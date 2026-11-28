@@ -4,6 +4,7 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
+import { paragraphBorderSegmentHalfExtentPt } from './paragraph-border-adjacency.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import type {
   LineLayout,
@@ -477,7 +478,7 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   if (visibleEnds.length === 0) return input.logicalLineBoxExtentPt;
   if (input.paragraph.shading) return input.logicalLineBoxExtentPt;
   for (const border of input.paragraph.borders) {
-    const strokeExtentPt = border.widthPt / 2;
+    const strokeExtentPt = paragraphBorderSegmentHalfExtentPt(border);
     visibleEnds.push(border.from.yPt + strokeExtentPt, border.to.yPt + strokeExtentPt);
   }
   if (input.paragraph.paragraphMark && !input.paragraph.paragraphMark.hidden) {

@@ -14,24 +14,21 @@ import type {
 // ECMA-376 §17.3.1.7 — a paragraph BOTTOM border is drawn `w:space` points below
 // the text ("the space after the bottom of the text … before this border is
 // drawn"), and §17.3.4 gives the border its own width (`w:sz`, eighths of a point).
-// drawParaBorders strokes the line CENTERED on `textBottom + space`, so its outer
-// (bottom) edge is at `textBottom + space + width/2`. Word reserves that whole
-// extent in the vertical flow — a bottom-bordered paragraph pushes the FOLLOWING
-// paragraph BELOW the border rather than letting its first line box overlap the
-// rule. The spec is silent on the flow reservation; this is Word's observed layout
-// (sample-14: the reference-list rule sat ~1.75 pt too high — half a border-width
-// plus its space — so "Further examples…" nearly touched the rule).
+// WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: the whole stroke lies outside the
+// border box, from `textBottom + space` to `textBottom + space + width`, and the
+// flow reserves that whole extent — a bottom-bordered paragraph pushes the
+// FOLLOWING paragraph below the stroke's outer edge.
 //
 // The renderer used to draw the bottom border PAST `state.y` without advancing the
 // flow by that extent, so the next paragraph overlapped it. This test measures the
 // flow delta a bottom border introduces: the follower's baseline must drop by
-// exactly `space + width/2` versus an identical layout whose leading paragraph has
+// exactly `space + width` versus an identical layout whose leading paragraph has
 // NO border.
 
 const BORDER_COLOR = 'aa00bb';
 const SPACE_PT = 1;
 const WIDTH_PT = 1.5; // sz12 = 12 eighths of a point → 1.5 pt
-const EXPECTED_EXTENT = SPACE_PT + WIDTH_PT / 2; // 1.75 pt
+const EXPECTED_EXTENT = SPACE_PT + WIDTH_PT; // 2.5 pt
 
 interface HStroke { y: number; strokeStyle: string; }
 interface FillRectCall { x: number; y: number; w: number; h: number; fillStyle: string; }
@@ -42,6 +39,7 @@ function makeRecordingCanvas(): {
   textBaselines: number[];
   textCalls: { text: string; y: number }[];
   fillRects: FillRectCall[];
+  strokedPaths: { points: { x: number; y: number }[]; strokeStyle: string; lineWidth: number }[];
 } {
   let font = '10px serif';
   let strokeStyle = '#000';
@@ -50,6 +48,7 @@ function makeRecordingCanvas(): {
   const textBaselines: number[] = [];
   const textCalls: { text: string; y: number }[] = [];
   const fillRects: FillRectCall[] = [];
+  const strokedPaths: { points: { x: number; y: number }[]; strokeStyle: string; lineWidth: number }[] = [];
   let path: { x: number; y: number }[] = [];
   const ctx = {
     get font() { return font; },
@@ -76,6 +75,7 @@ function makeRecordingCanvas(): {
       for (let i = 1; i < path.length; i++) {
         if (path[i].y === path[i - 1].y) hStrokes.push({ y: path[i].y, strokeStyle });
       }
+      strokedPaths.push({ points: [...path], strokeStyle, lineWidth: ctx.lineWidth });
     },
     fill() {},
     fillRect(x: number, y: number, w: number, h: number) {
@@ -98,7 +98,7 @@ function makeRecordingCanvas(): {
   // Real CanvasRenderingContext2D has a `.canvas` back-reference; the renderer
   // reads it on some table paths (e.g. the §17.4.80 Y-axis clip).
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, textCalls, fillRects };
+  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, textCalls, fillRects, strokedPaths };
 }
 
 function bottomBorderOnly(): ParagraphBorders {
@@ -167,7 +167,7 @@ async function followerBaseline(leadHasBorder: boolean): Promise<{ baseline: num
 }
 
 describe('a bottom paragraph border reserves flow so following content clears it (§17.3.1.7)', () => {
-  it('reserves top border space and the outer half-stroke before its text (§17.3.1.42)', async () => {
+  it('reserves top border space and the whole stroke before its text (§17.3.1.42)', async () => {
     const topWithBorder = makeRecordingCanvas();
     await renderDocumentToCanvas(
       docOf(para('Leader', null), para('', topBorderOnly()), para('Follower', null)),
@@ -179,7 +179,7 @@ describe('a bottom paragraph border reserves flow so following content clears it
       topWithoutBorder.canvas, 0, { dpr: 1, width: PAGE_WIDTH },
     );
     const followerDelta = topWithBorder.textBaselines[1]! - topWithoutBorder.textBaselines[1]!;
-    expect(followerDelta).toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+    expect(followerDelta).toBeCloseTo(EXPECTED_EXTENT, 3);
     const borderY = Math.min(...topWithBorder.hStrokes
       .filter((stroke) => stroke.strokeStyle === `#${BORDER_COLOR}`)
       .map((stroke) => stroke.y));
@@ -208,7 +208,7 @@ describe('a bottom paragraph border reserves flow so following content clears it
       return textCalls.find((call) => call.text === 'Follower')!.y;
     };
     expect(await renderFollower(true) - await renderFollower(false))
-      .toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+      .toBeCloseTo(EXPECTED_EXTENT, 3);
   });
 
   it('keeps the same top-border reservation in header paragraphs', async () => {
@@ -229,13 +229,13 @@ describe('a bottom paragraph border reserves flow so following content clears it
       return textCalls.find((call) => call.text === 'Follower')!.y;
     };
     expect(await renderFollower(true) - await renderFollower(false))
-      .toBeCloseTo(SPACE_PT + WIDTH_PT / 2, 3);
+      .toBeCloseTo(EXPECTED_EXTENT, 3);
   });
 
-  it('a bottom border drops the following paragraph by exactly space + width/2', async () => {
+  it('a bottom border drops the following paragraph by exactly space + width', async () => {
     // Baseline layouts differ ONLY in whether the leading empty paragraph carries a
     // bottom border. The border must push the follower down by its outer extent
-    // (space + half the stroke width) so the follower's line box clears the rule.
+    // (space + the stroke width) so the follower's line box clears the rule.
     const withBorder = await followerBaseline(true);
     const noBorder = await followerBaseline(false);
 
@@ -248,9 +248,59 @@ describe('a bottom paragraph border reserves flow so following content clears it
 
     // And the follower's line box now clears the border's OUTER edge: with a
     // 10 pt font (ascent 0.8 em = 8 pt here) the box top = baseline − 8 sits at or
-    // below the border edge = borderY + width/2.
+    // below the stroke's outer edge = its centre line borderY + width/2.
     const boxTop = withBorder.baseline - 8;
-    expect(boxTop).toBeGreaterThanOrEqual((withBorder.borderY as number) + WIDTH_PT / 2 - 1e-6);
+    // Paint snaps the stroke centre to the device pixel grid (at most half a
+    // pixel at dpr 1); the flow edge itself is exact.
+    expect(boxTop).toBeGreaterThanOrEqual((withBorder.borderY as number) + WIDTH_PT / 2 - 0.5 - 1e-6);
+  });
+
+  it('adds space after to the bottom-border reservation (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION)', async () => {
+    const followerY = async (bordered: boolean): Promise<number> => {
+      const lead = { ...para('Lead', bordered ? bottomBorderOnly() : null), spaceAfter: 6 } as DocParagraph;
+      const { canvas, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(lead, para('Follower', null)), canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      return textCalls.find((call) => call.text === 'Follower')!.y;
+    };
+    // Additive: space after plus the reservation, not their maximum.
+    expect(await followerY(true) - await followerY(false)).toBeCloseTo(EXPECTED_EXTENT, 3);
+  });
+
+  it('paints a wave top border as a hairline zigzag filling its band, whatever its w:sz', async () => {
+    for (const [width, band] of [[0.25, 3], [1.5, 3.75], [6, 3]] as const) {
+      const wave = (): ParagraphBorders => ({
+        top: { style: 'wave', color: BORDER_COLOR, width, space: 0 } as NonNullable<ParagraphBorders['top']>,
+        bottom: null, left: null, right: null, between: null,
+      });
+      const { canvas, strokedPaths, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(para('Wave', wave())), canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      const plain = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(para('Wave', null)), plain.canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      // The text moves down by the band; the zigzag stays inside it.
+      expect(textCalls[0]!.y - plain.textCalls[0]!.y).toBeCloseTo(band, 6);
+      const strokes = strokedPaths.filter((stroke) => stroke.strokeStyle === `#${BORDER_COLOR}`);
+      expect(strokes).toHaveLength(1);
+      // A 0.375pt hairline, raised to one device pixel at this scale.
+      const half = strokes[0]!.lineWidth / 2;
+      expect(strokes[0]!.lineWidth).toBe(1);
+      const ys = strokes[0]!.points.map((point) => point.y);
+      expect(Math.min(...ys) - half).toBeCloseTo(0, 6);
+      expect(Math.max(...ys) + half).toBeCloseTo(band, 6);
+    }
+  });
+
+  it('reserves a between border\'s spacing on both sides of its stroke', async () => {
+    const between = (): ParagraphBorders => ({
+      top: null, bottom: null, left: null, right: null,
+      between: { style: 'single', color: BORDER_COLOR, width: WIDTH_PT, space: SPACE_PT } as NonNullable<ParagraphBorders['between']>,
+    });
+    const secondY = async (bordered: boolean): Promise<number> => {
+      const { canvas, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(para('First', bordered ? between() : null), para('Second', bordered ? between() : null)),
+        canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      return textCalls.find((call) => call.text === 'Second')!.y;
+    };
+    expect(await secondY(true) - await secondY(false)).toBeCloseTo(2 * SPACE_PT + WIDTH_PT, 3);
   });
 
   it('a bordered paragraph inside a table cell measures as tall as it paints (B2 single measurer)', async () => {

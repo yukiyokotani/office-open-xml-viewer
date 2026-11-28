@@ -363,12 +363,11 @@ function buildMeasureState(
             },
             containerShading: cellState.containerShading,
             ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
-            trailingExtentPt: Math.max(
-              context.spaceAfterPt,
+            // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: space after adds to the border.
+            trailingExtentPt: context.spaceAfterPt + (
               paragraphBorderEdges?.bottom === 'none'
                 ? 0
-                : bottomBorderExtentPt(paragraph.borders),
-            ),
+                : bottomBorderExtentPt(paragraph.borders)),
             continuesFromPrevious: false,
             anchorFrames: bodyAnchorReferenceFrames(cellState),
             // Bound to the cell's own owner (its section, page and, for an
@@ -634,10 +633,9 @@ function acquireBodyParagraphAtLocation(
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
-      trailingExtentPt: Math.max(
-        context.spaceAfterPt,
-        edges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
-      ),
+      // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: space after adds to the border.
+      trailingExtentPt: context.spaceAfterPt + (
+        edges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
       continuesFromPrevious: continuation.boundary !== null,
       ...(continuation.sourceRangeStart === undefined
         ? {}
@@ -1276,10 +1274,9 @@ function layoutBodyStory(
         anchorCollisions: paragraphAnchorCollisions(candidate.floats),
         containerShading: candidate.containerShading,
         paragraphBorderEdges: borderEdges,
-        trailingExtentPt: Math.max(
-          context.spaceAfterPt,
-          borderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
-        ),
+        // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: space after adds to the border.
+        trailingExtentPt: context.spaceAfterPt + (
+          borderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
         continuesFromPrevious: continuing,
         ...(continuation?.sourceRangeStart === undefined ? {} : { sourceRangeStart: continuation.sourceRangeStart }),
         anchorFrames: bodyAnchorReferenceFrames(candidate),

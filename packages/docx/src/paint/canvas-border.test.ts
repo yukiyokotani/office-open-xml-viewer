@@ -178,3 +178,42 @@ describe('retained Canvas border paint', () => {
     expect(operations).not.toContainEqual(['stroke', 3]);
   });
 });
+
+describe('paragraph wave borders (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION)', () => {
+  const tracePoints = (segment: BorderSegment) => {
+    const points: Array<readonly [number, number]> = [];
+    const widths: number[] = [];
+    const ctx = recordingContext([]);
+    ctx.moveTo = (x: number, y: number) => { points.push([x, y]); };
+    ctx.lineTo = (x: number, y: number) => { points.push([x, y]); };
+    ctx.stroke = function stroke() { widths.push(this.lineWidth); };
+    paintStrokeSegment(segment, { ctx, scale: 1, dpr: 1, resources: { paint() {} } });
+    return { points, widths };
+  };
+  const waveSegment = (from: { xPt: number; yPt: number }, to: { xPt: number; yPt: number },
+    authoredStyle: 'wave' | 'doubleWave', widthPt: number, bandPt: number): BorderSegment => ({
+    edge: from.yPt === to.yPt ? 'top' : 'left', from, to, color: '#000000', widthPt, authoredStyle, style: 'wavy',
+    wave: { bandPt, rows: authoredStyle === 'wave' ? 1 : 2, hairlinePt: 0.375 },
+  });
+
+  it('fills the band with one hairline zigzag whatever the authored width', () => {
+    for (const widthPt of [0.25, 6]) {
+      const { points, widths } = tracePoints(waveSegment({ xPt: 0, yPt: 10 }, { xPt: 13, yPt: 10 }, 'wave', widthPt, 3));
+      expect(widths).toEqual([0.375]);
+      // A 3pt band about y = 10: vertices on its outer sides less half the
+      // hairline, one band height apart, the last cut at the segment end.
+      expect(points.map(([x]) => x)).toEqual([0, 3, 6, 9, 12, 13]);
+      expect(points.map(([, y]) => y)).toEqual([8.6875, 11.3125, 8.6875, 11.3125, 8.6875, 8.6875 + 2.625 / 3]);
+    }
+  });
+
+  it('stacks two zigzags in a double wave band and follows a vertical edge', () => {
+    const { points } = tracePoints(waveSegment({ xPt: 20, yPt: 0 }, { xPt: 20, yPt: 5.25 }, 'doubleWave', 0.5, 5.25));
+    const across = points.map(([x]) => x);
+    expect(Math.min(...across) - 0.1875).toBeCloseTo(20 - 2.625, 10);
+    expect(Math.max(...across) + 0.1875).toBeCloseTo(20 + 2.625, 10);
+    // Each row is half the band: the outer row spans the left half only.
+    expect(across.slice(0, 3)).toEqual([20 - 2.625 + 0.1875, 20 - 0.1875, 20 - 2.625 + 0.1875].map((x) => x));
+    expect(points.map(([, y]) => y).slice(0, 3)).toEqual([0, 2.625, 5.25]);
+  });
+});

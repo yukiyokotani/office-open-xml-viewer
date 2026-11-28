@@ -1,5 +1,6 @@
 import type { ParagraphBorders, ParaBorderEdge } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
+import { WORD_PARAGRAPH_BORDER_FLOW_RESERVATION } from './paint-compatibility.js';
 
 export type ParagraphBorderEdges = Readonly<{
   top: 'top' | 'between' | 'none';
@@ -20,9 +21,62 @@ export interface ParagraphBorderSegment {
   y2: number;
 }
 
-/** Vertical extent reserved below text for a visible bottom paragraph border.
- * ECMA-376 §17.3.1.7 places the centered stroke after `w:space`.
- * `word-paragraph-border-flow-reservation` */
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: the total thickness of a
+ * paragraph border of ST_Border style `style` (§17.18.2) and authored stroke
+ * width `width` (w:sz / 8): the sum of its strokes and the gaps between them. */
+export function wordParagraphBorderThicknessPt(style: string, width: number): number {
+  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
+  const w = Math.max(0, width);
+  switch (style) {
+    case 'double': return 3 * w;
+    case 'triple': return 5 * w;
+    case 'thinThickSmallGap': case 'thickThinSmallGap': return w + 1.5;
+    case 'thinThickThinSmallGap': return w + 3;
+    case 'thinThickMediumGap': case 'thickThinMediumGap': return 2 * w;
+    case 'thinThickThinMediumGap': return 3 * w;
+    case 'thinThickLargeGap': case 'thickThinLargeGap': return w + 2.25;
+    case 'thinThickThinLargeGap': return 2 * w + 3;
+    case 'threeDEmboss': case 'threeDEngrave': return w + 2 * Math.min(1.5, Math.max(0.75, w / 2));
+    case 'wave': return w === 1.5 ? 3.75 : 3;
+    case 'doubleWave': return 5.25;
+    default: return w;
+  }
+}
+
+/** How far a paragraph border's strokes lie outside the border box (text ±
+ * `w:space`): its whole thickness. */
+export function paragraphBorderStrokeOutsetPt(edge: ParaBorderEdge): number {
+  return wordParagraphBorderThicknessPt(edge.style, edge.width ?? 0);
+}
+
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a wave paragraph border paints
+ * hairline zigzags filling its band, whatever its w:sz: one for `wave`, two
+ * stacked for `doubleWave`. */
+export function wordParagraphWaveBorder(
+  style: string,
+  width: number,
+): Readonly<{ bandPt: number; rows: 1 | 2; hairlinePt: number }> | undefined {
+  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
+  if (style !== 'wave' && style !== 'doubleWave') return undefined;
+  return Object.freeze({
+    bandPt: wordParagraphBorderThicknessPt(style, width),
+    rows: style === 'wave' ? 1 : 2,
+    hairlinePt: WORD_PARAGRAPH_WAVE_HAIRLINE_PT,
+  });
+}
+
+const WORD_PARAGRAPH_WAVE_HAIRLINE_PT = 0.375;
+
+/** Half the block extent a retained paragraph border segment paints about its
+ * centre line: half its whole thickness (the stroke pattern is centred in it). */
+export function paragraphBorderSegmentHalfExtentPt(
+  border: Readonly<{ authoredStyle: string; widthPt: number }>,
+): number {
+  return wordParagraphBorderThicknessPt(border.authoredStyle, border.widthPt) / 2;
+}
+
+/** Vertical extent reserved below text for a visible bottom paragraph border
+ * (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION). */
 export function bottomBorderExtentPt(
   borders: ParagraphBorders | null | undefined,
   merge?: ParagraphBorderMerge,
@@ -30,13 +84,14 @@ export function bottomBorderExtentPt(
   if (!borders || merge?.suppressBottom) return 0;
   const bottom = borders.bottom;
   if (!bottom || bottom.style === 'none') return 0;
-  return (bottom.space ?? 0) + (bottom.width ?? 0) / 2;
+  return (bottom.space ?? 0) + paragraphBorderStrokeOutsetPt(bottom);
 }
 
 /** Reserve the painted outer edge of a visible top paragraph border above its
- * text. ECMA-376 §17.3.1.42 defines w:space as the distance from text to the
- * top stroke; §17.3.4 gives the centered stroke its own width. A grouped
- * paragraph whose top edge is suppressed contributes no top reservation. */
+ * text (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION). A between border separating
+ * two paragraphs of one border group takes its spacing on both sides of the
+ * stroke: the previous paragraph's bottom edge is suppressed in the group.
+ * A grouped paragraph whose top edge is suppressed reserves nothing. */
 export function topBorderExtentPt(
   borders: ParagraphBorders | null | undefined,
   edge: ParagraphBorderEdges['top'],
@@ -44,7 +99,8 @@ export function topBorderExtentPt(
   if (!borders || edge === 'none') return 0;
   const top = borders[edge];
   if (!top || top.style === 'none' || top.style === 'nil') return 0;
-  return (top.space ?? 0) + (top.width ?? 0) / 2;
+  const space = top.space ?? 0;
+  return (edge === 'between' ? 2 * space : space) + paragraphBorderStrokeOutsetPt(top);
 }
 
 function effectiveEdge(edge: ParaBorderEdge | null | undefined): ParaBorderEdge | null {

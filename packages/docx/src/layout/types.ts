@@ -718,6 +718,10 @@ export interface BorderSegment {
   readonly style: 'solid' | 'double' | 'compound' | 'dotted' | 'dashed' | 'wavy';
   /** Final ST_Border cadence in point-space; empty for continuous/double rails. */
   readonly dashPatternPt?: readonly number[];
+  /** A paragraph wave border (`wordParagraphWaveBorder`): `rows` hairline
+   * zigzags of `hairlinePt` filling a band of `bandPt` centred on the
+   * segment, in place of a stroke of `widthPt`. */
+  readonly wave?: Readonly<{ bandPt: number; rows: 1 | 2; hairlinePt: number }>;
 }
 
 export type FillPaint = Readonly<{ color: string }>;

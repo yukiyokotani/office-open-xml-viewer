@@ -368,7 +368,7 @@ describe('line-grid page-bottom admission', () => {
       block.kind === 'paragraph' ? block.lines.length : []))).toEqual([[1], [1], [1]]);
   });
 
-  it.each([[40, 2], [41, 2], [41.5, 1]])('keeps the grid caption bottom-border stroke inside body bottom %s', (bodyBottom, pages) => {
+  it.each([[40, 2], [41.5, 2], [42, 1]])('keeps the grid caption bottom-border stroke inside body bottom %s', (bodyBottom, pages) => {
     const caption = paragraph('Caption', auto(1)) as Extract<BodyElement, { type: 'paragraph' }>;
     caption.defaultFontSize = 16;
     caption.runs = [{ type: 'text', ...textRun('Caption'), fontSize: 16 }];
@@ -385,8 +385,10 @@ describe('line-grid page-bottom admission', () => {
       localMetrics: testFontSnapshot([{ family: TEST_FONT }]),
       measureContext: canvas.getContext('2d'),
     }));
-    // Text ends at 38pt, but the retained border center is at 41pt and
-    // its 1pt stroke ends at 41.5pt. Grid leading cannot exempt that ink.
+    // Text ends at 38pt; the 1pt stroke lies 1pt below it, from 39 to 40pt
+    // past the 1pt space (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION), centred at
+    // 41.5pt in the retained cell geometry and ending at 42pt. Grid leading
+    // cannot exempt that ink.
     expect(layout.pages).toHaveLength(pages);
     const retained = layout.pages[pages - 1].layers.body.at(-1);
     if (retained?.kind !== 'paragraph') throw new Error('expected caption paragraph');

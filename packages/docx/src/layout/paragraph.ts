@@ -129,6 +129,11 @@ import {
 import { retainedBorderTreatment } from './border-treatment.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import {
+  paragraphBorderSegmentHalfExtentPt,
+  paragraphBorderStrokeOutsetPt,
+  wordParagraphWaveBorder,
+} from './paragraph-border-adjacency.js';
+import {
   centeredLeaderGlyphOrigins,
   groupedRunBorderFragments,
   retainedEmphasisGlyphs,
@@ -7848,8 +7853,13 @@ function projectAcquiredParagraph(
         if (!visibleParagraphBorder(edge)) return [];
         const horizontal = side === 'top' || side === 'between' || side === 'bottom';
         const atEnd = side === 'right' || side === 'bottom';
+        // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a top, between or bottom
+        // border's strokes lie wholly outside the border box; the painted
+        // pattern is centred in that band.
+        const strokeShiftPt = horizontal ? paragraphBorderStrokeOutsetPt(edge) / 2 : 0;
+        const wave = wordParagraphWaveBorder(edge.style, edge.width ?? 0);
         const coordinate = horizontal
-          ? borderBounds.yPt + (atEnd ? borderBounds.heightPt : 0)
+          ? borderBounds.yPt + (atEnd ? borderBounds.heightPt + strokeShiftPt : -strokeShiftPt)
           : borderBounds.xPt + (atEnd ? borderBounds.widthPt : 0);
         return [{
           edge: side,
@@ -7862,6 +7872,7 @@ function projectAcquiredParagraph(
           color: edge.color ? `#${edge.color}` : '#000000',
           widthPt: edge.width,
           ...retainedBorderTreatment(edge.style, edge.width),
+          ...(wave ? { wave } : {}),
         }];
       })
     : [];
@@ -7972,15 +7983,17 @@ function sliceParagraphDecoration(
     if ((border.edge === 'top' || border.edge === 'between')
       && continuation.continuesFromPrevious) return [];
     if (border.edge === 'bottom' && continuation.continuesOnNext) return [];
+    // The pattern stays centred in its band outside the box, as acquired.
+    const outsetPt = paragraphBorderSegmentHalfExtentPt(border);
     if (border.edge === 'top' || border.edge === 'between') return [{
       ...border,
-      from: { xPt: leftPt, yPt: topPt },
-      to: { xPt: rightPt, yPt: topPt },
+      from: { xPt: leftPt, yPt: topPt - outsetPt },
+      to: { xPt: rightPt, yPt: topPt - outsetPt },
     }];
     if (border.edge === 'bottom') return [{
       ...border,
-      from: { xPt: leftPt, yPt: bottomPt },
-      to: { xPt: rightPt, yPt: bottomPt },
+      from: { xPt: leftPt, yPt: bottomPt + outsetPt },
+      to: { xPt: rightPt, yPt: bottomPt + outsetPt },
     }];
     if (border.edge === 'left') return [{
       ...border,

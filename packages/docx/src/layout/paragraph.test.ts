@@ -240,6 +240,25 @@ describe('layoutParagraph', () => {
     expect(Object.isFrozen(second.lines[0]?.placements[0])).toBe(true);
   });
 
+  it('keeps a split paragraph\'s top and bottom borders in their band outside the box', () => {
+    // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a 1.5pt single border is centred
+    // 0.75pt outside the box (text ± w:space), on every fragment.
+    const rule = (edge: 'top' | 'bottom', yPt: number) => ({
+      edge, from: { xPt: 10, yPt }, to: { xPt: 55, yPt }, color: '#000000', widthPt: 1.5,
+      authoredStyle: 'single', style: 'solid' as const,
+    });
+    const whole = layoutParagraph(input({ borders: [rule('top', 10 - 0.75), rule('bottom', 34 + 0.75)] }));
+    const first = sliceParagraphLayout(whole, {
+      lineStart: 0, lineEnd: 1, continuesFromPrevious: false, continuesOnNext: true,
+    });
+    const second = sliceParagraphLayout(whole, {
+      lineStart: 1, lineEnd: 2, continuesFromPrevious: true, continuesOnNext: false,
+    });
+    expect(first.borders.map((border) => [border.edge, border.from.yPt])).toEqual([['top', 9.25]]);
+    const secondBottom = second.inkBounds.yPt + second.inkBounds.heightPt;
+    expect(second.borders.map((border) => [border.edge, border.from.yPt - secondBottom])).toEqual([['bottom', 0.75]]);
+  });
+
   it('charges the initial jump and only intra-slice inter-line jumps', () => {
     const firstLine = { ...input().lines[0]!, bounds: { ...input().lines[0]!.bounds, yPt: 14 }, advancePt: 10 };
     const secondLine = { ...input().lines[1]!, bounds: { ...input().lines[1]!.bounds, yPt: 30 }, advancePt: 10 };
@@ -338,7 +357,8 @@ describe('layoutParagraph', () => {
     const whole = layoutParagraph(input({
       lines: [base.lines[0]!, secondLine], drawings: [drawing], textBoxes: [textBox],
       borders: [{
-        edge: 'bottom', from: { xPt: 10, yPt: 34 }, to: { xPt: 30, yPt: 34 },
+        // Acquired half its 1pt thickness below the box (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION).
+        edge: 'bottom', from: { xPt: 10, yPt: 34.5 }, to: { xPt: 30, yPt: 34.5 },
         color: '#000000', widthPt: 1, authoredStyle: 'single', style: 'solid',
       }],
     }));
@@ -366,7 +386,7 @@ describe('layoutParagraph', () => {
     expect(continuation.textBoxes[0]).toMatchObject({
       flowBounds: { yPt: 5 }, inkBounds: { yPt: 5 }, contentBounds: { yPt: 6 },
     });
-    expect(continuation.borders[0]).toMatchObject({ from: { yPt: 15 }, to: { yPt: 15 } });
+    expect(continuation.borders[0]).toMatchObject({ from: { yPt: 15.5 }, to: { yPt: 15.5 } });
   });
 
   it('characterizes continuation Y translation as the general translation with zero X delta', () => {
@@ -581,9 +601,10 @@ describe('layoutParagraph', () => {
       inkBounds: { xPt: 6, yPt: 8, widthPt: 108, heightPt: 30 },
       shading: { color: '#eeeeee' },
       borders: [
-        { edge: 'top', from: { xPt: 6, yPt: 8 }, to: { xPt: 114, yPt: 8 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
+        // Top and bottom strokes are acquired half their thickness outside the box.
+        { edge: 'top', from: { xPt: 6, yPt: 7.5 }, to: { xPt: 114, yPt: 7.5 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
         { edge: 'right', from: { xPt: 114, yPt: 8 }, to: { xPt: 114, yPt: 38 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
-        { edge: 'bottom', from: { xPt: 6, yPt: 38 }, to: { xPt: 114, yPt: 38 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
+        { edge: 'bottom', from: { xPt: 6, yPt: 38.5 }, to: { xPt: 114, yPt: 38.5 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
         { edge: 'left', from: { xPt: 6, yPt: 8 }, to: { xPt: 6, yPt: 38 }, color: '#111111', widthPt: 1, authoredStyle: 'single', style: 'solid' },
       ],
     }));
@@ -596,7 +617,7 @@ describe('layoutParagraph', () => {
 
     expect(first.inkBounds).toEqual({ xPt: 6, yPt: 8, widthPt: 108, heightPt: 16 });
     expect(first.borders).toEqual(expect.arrayContaining([
-      expect.objectContaining({ edge: 'top', from: { xPt: 6, yPt: 8 }, to: { xPt: 114, yPt: 8 } }),
+      expect.objectContaining({ edge: 'top', from: { xPt: 6, yPt: 7.5 }, to: { xPt: 114, yPt: 7.5 } }),
       expect.objectContaining({ edge: 'left', from: { xPt: 6, yPt: 8 }, to: { xPt: 6, yPt: 24 } }),
       expect.objectContaining({ edge: 'right', from: { xPt: 114, yPt: 8 }, to: { xPt: 114, yPt: 24 } }),
     ]));
@@ -605,7 +626,7 @@ describe('layoutParagraph', () => {
     expect(second.borders).toEqual(expect.arrayContaining([
       expect.objectContaining({ edge: 'left', from: { xPt: 6, yPt: 5 }, to: { xPt: 6, yPt: 19 } }),
       expect.objectContaining({ edge: 'right', from: { xPt: 114, yPt: 5 }, to: { xPt: 114, yPt: 19 } }),
-      expect.objectContaining({ edge: 'bottom', from: { xPt: 6, yPt: 19 }, to: { xPt: 114, yPt: 19 } }),
+      expect.objectContaining({ edge: 'bottom', from: { xPt: 6, yPt: 19.5 }, to: { xPt: 114, yPt: 19.5 } }),
     ]));
     expect(second.borders.some((border) => border.edge === 'top')).toBe(false);
   });
