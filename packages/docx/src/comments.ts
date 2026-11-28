@@ -374,7 +374,13 @@ function collectIndexedStoryCommentRanges(
         }, reference, geometryFallback, Math.max(from, to), coveredGeometry));
       }
       const covering = segments.filter((segment) => segment.endRunIndex > segment.startRunIndex);
-      ranges.push(...(covering.length > 0 ? covering : segments.slice(0, 1)));
+      // Fallback (the reference boundary, the adjacent text) stands in for a
+      // range, not for one of its segments: where some segment's covered runs
+      // are laid out, a segment none of whose runs are (deleted text in the
+      // final view) shows nothing, and is not resolved to text outside the
+      // range.
+      const laidOut = covering.filter((segment) => segment.coveredGeometry);
+      ranges.push(...(laidOut.length > 0 ? laidOut : covering.length > 0 ? covering : segments.slice(0, 1)));
       continue;
     }
 
