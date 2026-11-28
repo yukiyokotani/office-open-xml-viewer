@@ -22,6 +22,7 @@ tests/corpus/
   lib/opc.mjs, xml.mjs, zip.mjs      packaging
   lib/png.mjs          deterministic PNG pictures drawn by the builder
   lib/chart.mjs, drawing.mjs, iso216.mjs   shared chart, picture and data helpers
+  lib/chartex.mjs      chart extension (cx) parts and their drawing anchor
   lib/features.mjs     `covers` vocabulary (extraction shared with tests/visual/corpus-features.mjs)
   lib/package-check.mjs  content types, relationships, XML well-formedness
   render.mjs           render specimens to PNG and contact sheets for review
