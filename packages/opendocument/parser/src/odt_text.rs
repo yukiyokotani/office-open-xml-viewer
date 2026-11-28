@@ -1994,16 +1994,31 @@ fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFace
         ScriptClass::Complex => (NS_STYLE, "language-complex", "country-complex"),
     };
     let language = cascade.get(ns, language).filter(|v| *v != "none")?;
-    Some(
-        fonts.atom(&match cascade.get(ns, country).filter(|v| *v != "none") {
-            Some(country) => format!(
-                "{}-{}",
-                language.to_ascii_lowercase(),
-                country.to_ascii_uppercase()
-            ),
-            None => language.to_ascii_lowercase(),
-        }),
-    )
+    let country = cascade.get(ns, country).filter(|v| *v != "none");
+    // The western value is new model data copied into every inheriting run:
+    // a combined length the renderer would not admit as a language is
+    // dropped before any case conversion or copy (the East Asian and complex
+    // values keep their behaviour).
+    if class == ScriptClass::Latin {
+        let mut units = 0usize;
+        for part in [Some(language), country].iter().flatten() {
+            units += usize::from(units > 0);
+            for c in part.chars() {
+                units += c.len_utf16();
+                if units > MAX_CANVAS_LANGUAGE_TAG_UNITS {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(fonts.atom(&match country {
+        Some(country) => format!(
+            "{}-{}",
+            language.to_ascii_lowercase(),
+            country.to_ascii_uppercase()
+        ),
+        None => language.to_ascii_lowercase(),
+    }))
 }
 
 /// The complete language tag a cascade sets for text of a script class: the

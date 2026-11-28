@@ -2353,4 +2353,27 @@ fn an_oversized_language_component_bounds_the_class_language_tag() {
         class_language(r#"fo:language="en" fo:script="latn" fo:country="us""#).as_deref(),
         Some("en-Latn-US")
     );
+    // The western regional value is bounded too: an inherited oversized
+    // fo:country is not copied into the runs' `lang`.
+    let western = |attributes: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties {attributes}/></style:style>"#
+        );
+        let document = read_fixture(Fixture {
+            automatic: &style,
+            body: "<text:p><text:span text:style-name=\"T\">a</text:span><text:span text:style-name=\"T\">b</text:span></text:p>",
+            ..Fixture::default()
+        });
+        text_runs(paragraphs(&document.body)[0])
+            .into_iter()
+            .map(|run| run.lang.clone())
+            .collect::<Vec<_>>()
+    };
+    let country = "x".repeat(1024);
+    let oversized = western(&format!(r#"fo:language="en" fo:country="{country}""#));
+    assert!(!oversized.is_empty());
+    assert!(oversized.iter().all(Option::is_none));
+    assert!(western(r#"fo:language="en" fo:country="us""#)
+        .iter()
+        .all(|lang| lang.as_deref() == Some("en-US")));
 }

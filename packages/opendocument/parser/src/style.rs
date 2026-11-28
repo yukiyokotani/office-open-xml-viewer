@@ -440,7 +440,7 @@ impl<'a> Cascade<'a> {
         let text_group = group == TEXT;
         let mut names_language = false;
         let mut language_depths = Vec::new();
-        for (position, style) in styles.iter().enumerate() {
+        for style in &styles {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
                     if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -448,9 +448,21 @@ impl<'a> Cascade<'a> {
                     {
                         entry.insert(order.len());
                         order.push((key, value.as_str()));
-                        if text_group && properties.language.contains(key) {
-                            names_language = true;
-                            language_depths.push((key, position));
+                    }
+                }
+            }
+        }
+        if text_group {
+            // Only the preclassified language keys are looked up, once per
+            // style: untagged cascades have none and do no per-attribute work.
+            for (position, style) in styles.iter().enumerate() {
+                if let Some(properties) = style.group(group) {
+                    for key in &properties.language {
+                        if language_depths.iter().all(|(seen, _)| *seen != key) {
+                            if let Some((stored, _)) = properties.attributes.get_key_value(key) {
+                                names_language = true;
+                                language_depths.push((stored, position));
+                            }
                         }
                     }
                 }
