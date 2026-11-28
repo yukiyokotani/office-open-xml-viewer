@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Stroke } from '@silurus/ooxml-core';
-import { renderTable, tableLayoutMemoSizeForTest } from './renderer.js';
+import { renderTable, renderTableWithLayoutMemo, renderTextBody, type TableLayoutMemo } from './renderer.js';
 import { presentFacesContext } from './test-support/present-faces.js';
 import type { TableCell, TableElement, TableRow, TextBody } from './types';
 
@@ -17,10 +17,10 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number }> } {
+function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
-  const texts: Array<{ text: string; y: number }> = [];
+  const texts: Array<{ text: string; y: number; font: string }> = [];
   let cur = { x: 0, y: 0 };
   let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
   let lineWidth = 1;
@@ -60,7 +60,7 @@ function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext
       const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
       return { width: text.length * sizePx * 0.5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
     },
-    fillText(text: string, _x: number, y: number) { texts.push({ text, y }); }, strokeText() {},
+    fillText(text: string, _x: number, y: number) { texts.push({ text, y, font: String(this.font) }); }, strokeText() {},
     font: '10px sans-serif',
     textAlign: 'left' as CanvasTextAlign,
     textBaseline: 'alphabetic' as CanvasTextBaseline,
@@ -464,7 +464,8 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     // Row sizing records each measured paragraph layout for the paint of
     // that cell (one per cell here); paint drops it. A shrink-to-fit cell
     // (ODF style:shrink-to-fit) is skipped by row sizing, and the font
-    // scales its paint tries are never retained.
+    // scales its paint tries are never retained; a warped cell, whose paint
+    // does not reuse its flat layout, is not recorded either.
     const shrinking = {
       verticalAnchor: 't', shrinkOnOverflow: true,
       paragraphs: [{
@@ -477,18 +478,75 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
       lIns: 0, rIns: 0, tIns: 0, bIns: 0,
       wrap: 'square', vert: 'horz', autoFit: 'norm',
     } as unknown as TextBody;
+    const warped = { ...lines(2), textWarp: { preset: 'textInflate' } } as TextBody;
     const t = tableOf([
       [cell({ textBody: lines(1) }), cell({ textBody: lines(1) }), cell({ textBody: shrinking })],
-      [cell({ textBody: lines(1) }), cell(), cell()],
+      [cell({ textBody: lines(1) }), cell({ textBody: warped }), cell()],
     ], [COL, COL, COL]);
+    t.height = 60 * EMU; // frame slack: the warped cell is measured too
+    const memo: TableLayoutMemo = { layouts: new Map(), lines: 0 };
     const sizes: number[] = [];
-    const { ctx, texts } = makeRecordingCtx(() => sizes.push(tableLayoutMemoSizeForTest()));
-    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    const { ctx, texts } = makeRecordingCtx(() => sizes.push(memo.lines));
+    renderTableWithLayoutMemo(memo, ctx, t, SCALE, undefined);
     expect(texts.some((entry) => entry.text.startsWith('aaaa'))).toBe(true);
-    // Three measured cells, never more; each painted cell gives its layout
-    // up, so the last cell (row 2) paints with only its own still held.
+    // Three measured one-line cells, never more; each painted cell gives its
+    // layout up, so nothing is held once the table is painted.
     expect(Math.max(...sizes)).toBe(3);
-    expect(sizes[sizes.length - 1]).toBe(1);
+    expect(memo.lines).toBe(0);
+    expect(memo.layouts.size).toBe(0);
+  });
+
+  it('bounds the layouts a large table retains', () => {
+    // 30 x 30 cells of four lines each: 3600 measured lines. Recording stops
+    // at the retention bound, so the first cells reuse their layouts and the
+    // rest are laid out again, painting the same rows.
+    const rows = Array.from({ length: 30 }, () =>
+      Array.from({ length: 30 }, () => cell({ textBody: lines(4) })));
+    const t = tableOf(rows, Array(30).fill(COL));
+    const memo: TableLayoutMemo = { layouts: new Map(), lines: 0 };
+    let peak = 0;
+    const { ctx, texts } = makeRecordingCtx(() => { peak = Math.max(peak, memo.lines); });
+    renderTableWithLayoutMemo(memo, ctx, t, SCALE, undefined);
+    expect(peak).toBeGreaterThan(1000);
+    expect(peak).toBeLessThanOrEqual(2048);
+    expect(memo.lines).toBe(0);
+    const reference = makeRecordingCtx();
+    renderTable(reference.ctx, t, SCALE);
+    expect(texts).toEqual(reference.texts);
+    expect(texts.length).toBe(3600);
+  });
+
+  it('lets no other text body see the measured layouts of a table cell', () => {
+    // An onTextRun consumer renders the same paragraph on a second canvas
+    // with another theme font while the cell paints. It must get its own
+    // layout (Courier New), not the table's measured one (Arial).
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'theme', fontSize: 18, fontFamily: '+mn-lt' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody })]], [COL]);
+    const outer = makeRecordingCtx();
+    const nested = makeRecordingCtx();
+    let rendered = false;
+    renderTable(outer.ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: 'Arial', dpr: 1 }, () => {
+      if (rendered) return;
+      rendered = true;
+      renderTextBody(nested.ctx, textBody, 0, 0, COL * SCALE, 20, SCALE, null, 0, false, false,
+        '#000000', undefined, { themeMajorFont: null, themeMinorFont: 'Courier New', dpr: 1 });
+    });
+    expect(rendered).toBe(true);
+    expect(outer.texts[0].font).toContain('Arial');
+    expect(nested.texts.map((entry) => entry.text)).toEqual(['theme']);
+    expect(nested.texts[0].font).toContain('Courier New');
+    expect(nested.texts[0].font).not.toContain('Arial');
   });
 
   it('keeps a positive row for rotated cell text, whose measure is the box width', () => {
@@ -534,14 +592,26 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
   } as unknown as TextBody);
   const threeLines = (vert = 'horz') => lines(3, vert);
 
-  it('grows a positive row for a vert token the renderer lays out horizontally', () => {
-    // renderTextBody rotates only vert/eaVert/vert270 and stacks only
-    // wordArtVert*; mongolianVert is painted horizontally, so it measures so.
-    const t = tableOf([
-      [cell({ textBody: threeLines('mongolianVert'), borderB: ln() })],
-      [cell({ borderT: ln() })],
-    ], [COL]);
-    expect(horizontalAt(render(t), 72)).toHaveLength(1);
+  it('keeps every non-horizontal vert token on the earlier rule', () => {
+    // ST_TextVerticalType (ECMA-376 §20.1.10.83): mongolianVert is vertical
+    // text too, and an xsd:token value padded with collapsible whitespace is
+    // the same token. Only an effectively horizontal body (omitted or `horz`,
+    // padded or not) takes the growth rule; with the minima filling the
+    // frame every other value keeps the 20pt row.
+    for (const vert of ['mongolianVert', ' vert ', '\teaVert\n', ' wordArtVert', 'vert270 ', 'unknown']) {
+      const t = tableOf([
+        [cell({ textBody: threeLines(vert), borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [COL]);
+      expect(horizontalAt(render(t), 20), vert).toHaveLength(1);
+    }
+    for (const vert of [' horz', 'horz\t']) {
+      const t = tableOf([
+        [cell({ textBody: threeLines(vert), borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [COL]);
+      expect(horizontalAt(render(t), 72), vert).toHaveLength(1);
+    }
   });
 
   it('adds a rowSpan deficit to the last spanned row', () => {
@@ -611,6 +681,70 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
       expect(horizontalAt(strokes, 115.2)).toHaveLength(1);
       expect(horizontalAt(strokes, 168.8)).toHaveLength(0);
     }
+  });
+
+  it('resolves staggered merges by end row, not by span length (control4 J/K)', () => {
+    // PowerPoint for Mac control4 (2026-11-29), four rows of 24pt minima,
+    // 24pt leading (20pt text), zero margins, frame equal to the row sum:
+    // eight lines over rows 1-3 beside five lines over rows 3-4 exports as
+    // 24/24/144/24 in both column orders (J, and K with the columns
+    // swapped). Shortest span first would give 24/24/144/96.
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    // Column a: eight lines over rows 1-3. Column b: five lines over rows 3-4.
+    const a = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const b = [cell(), cell(), cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true })];
+    for (const swapped of [false, true]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => swapped
+        ? [b[r], a[r], cell({ borderB: ln() })]
+        : [a[r], b[r], cell({ borderB: ln() })]), [COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 96 * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, swapped ? 'K' : 'J').toEqual([24, 48, 192, 216]);
+    }
+  });
+
+  it('orders a group with an earlier-rule merge the same way whatever the column order', () => {
+    // A one-line merge over rows 1-4 (fits, adds nothing) and a rotated
+    // merge over rows 1-2 share row 1; a four-line merge over rows 2-3
+    // links them into one group. A group with an earlier-rule cell keeps
+    // reading order for all of its merges, so swapping the fitting and the
+    // rotated merge changes nothing: the rotated cell spreads its 12pt
+    // deficit (60pt box width over 48pt) evenly, then the four-line merge
+    // adds its 39.6pt deficit (93.6pt over 30 + 24pt) to row 3.
+    const fitting = [cell({ textBody: lines(1), rowSpan: 4 }), cell({ vMerge: true }), cell({ vMerge: true }), cell({ vMerge: true })];
+    const rotated = [cell({ textBody: threeLines('vert'), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const tall = [cell(), cell({ textBody: lines(4), rowSpan: 2 }), cell({ vMerge: true }), cell()];
+    const result = (swapped: boolean) => {
+      const t = tableOf([0, 1, 2, 3].map((r) => [
+        ...(swapped ? [rotated[r], fitting[r]] : [fitting[r], rotated[r]]),
+        tall[r], cell({ borderB: ln() }),
+      ]), [COL, COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 100 * EMU; // frame slack: the rotated cell is measured
+      return render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+    };
+    // 30 / 30 / 63.6 / 24pt rows: edges 30, 60, 123.6, 147.6.
+    expect(result(false)).toEqual([30, 60, 123, 147]);
+    expect(result(true)).toEqual(result(false));
   });
 
   it('keeps a multi-column cell on the earlier rule, painting into its columns', () => {

@@ -5091,6 +5091,11 @@ export function renderTextBody(
   // (rotated text measured by its box, ODF tables) pass false for a positive
   // row and measure an omitted-lnSpc line by its glyph size.
   measureNaturalLineSpacing = measureOnly,
+  // renderTable's measured paragraph layouts for this cell (see
+  // TableLayoutAccess). Only the cell's own flat layout uses it: rotated,
+  // stacked and warped re-entries, and any other renderTextBody call, lay out
+  // afresh.
+  tableLayouts?: TableLayoutAccess,
 ): number | void {
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
   // above another in columns; see stacked-text.ts and core layoutStackedText.
@@ -5331,7 +5336,7 @@ export function renderTextBody(
     // in lockstep with the draw-side `textXOffset` (§below) and the
     // naturalWidthExceedsBbox measurement; a bullet's gutter contributes 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
-    const lines = tableParagraphLayout(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
+    const lines = tableParagraphLayout(tableLayouts, ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
@@ -7742,13 +7747,19 @@ export function applyFrameTransform(
   ctx.translate(-(x + w / 2), -(y + h / 2));
 }
 
-/** The exact `vert` tokens whose measureOnly result is the box width in
- * {@link renderTextBody}: its stacked and rotated dispatch. Any other token
- * (mongolianVert, padded or invalid values) is laid out horizontally there,
- * so it is measured like horizontal text. */
-const MEASURED_BY_BOX_WIDTH_VERT: ReadonlySet<string> = new Set([
-  'wordArtVert', 'wordArtVertRtl', 'vert', 'eaVert', 'vert270',
-]);
+/**
+ * True for a table cell body that is effectively horizontal: `vert` omitted or
+ * the ST_TextVerticalType token `horz`. DrawingML restricts the token as
+ * xsd:token in both strict and transitional schemas, so whitespace collapse
+ * admits only U+0020/TAB/LF/CR at its ends; NBSP or internal whitespace
+ * cannot mean `horz`. Every other value (the vertical tokens vert, vert270,
+ * eaVert, wordArtVert, wordArtVertRtl and mongolianVert, padded or not, and
+ * unknown values) is not admitted.
+ */
+function isHorizontalCellVert(vert: unknown): boolean {
+  return vert === undefined || typeof vert === 'string'
+    && /^[ \t\r\n]*horz[ \t\r\n]*$/.test(vert);
+}
 
 /**
  * Paragraph layouts that renderTable's row sizing measured, kept for the paint
@@ -7756,22 +7767,40 @@ const MEASURED_BY_BOX_WIDTH_VERT: ReadonlySet<string> = new Set([
  * painted with, so paint reuses those lines instead of breaking every
  * paragraph twice.
  *
- * - Only row sizing records (`recording`). Paint, and any cell that row sizing
- *   skips (shrink-to-fit, earlier-rule rows), lays out afresh and stores
- *   nothing, so trial layouts (a shrink search at many scales) are never kept.
- * - A painted cell drops its paragraphs, so the memo holds at most the
- *   measured-but-not-yet-painted cells, and nothing outlives renderTable; a
- *   font that loads later is picked up by the next render.
+ * - It is passed explicitly to the cell's own renderTextBody calls
+ *   (TableLayoutAccess), never held in module state, so no other text body
+ *   (a nested render on another canvas or with another render context, an
+ *   onTextRun consumer) can see it.
+ * - Only row sizing records, and only for cells on the growth rule, whose
+ *   paint lays the same paragraphs out the same way. Paint, cells that row
+ *   sizing skips (shrink-to-fit) and cells on the earlier rule (rotated,
+ *   stacked, warped, multi-column, ODF) store nothing, so trial layouts (a
+ *   shrink search at many scales) are never kept.
+ * - Retention is bounded: recording stops once TABLE_LAYOUT_RETAINED_LINES
+ *   lines are held, and a painted cell drops its paragraphs. A large table
+ *   reuses the layouts of its first cells and lays the rest out again, as
+ *   it would without the memo. Nothing outlives renderTable, so a font that
+ *   loads later is picked up by the next render.
  * - Recorded lines are frozen. Everything a layout pass or paint derives from
  *   them (fontAlgn offsets, resolved tab widths) goes on that pass's own copy,
  *   so a discarded pass cannot change what a later pass paints.
  */
-interface TableLayoutMemo {
+export interface TableLayoutMemo {
   layouts: Map<Paragraph, Map<string, readonly LayoutLine[]>>;
-  recording: boolean;
+  /** Lines currently held in `layouts`. */
+  lines: number;
 }
 
-let tableLayoutMemo: TableLayoutMemo | null = null;
+/** A cell's view of the memo: `record` is true for row sizing of a cell
+ * whose paint reuses the result. */
+interface TableLayoutAccess {
+  memo: TableLayoutMemo;
+  record: boolean;
+}
+
+/** Retention bound of TableLayoutMemo, in laid-out lines. Memory policy
+ * only: past it, layouts are computed again and paint is unchanged. */
+const TABLE_LAYOUT_RETAINED_LINES = 2048;
 
 function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
   for (const line of lines) {
@@ -7787,27 +7816,31 @@ function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
 }
 
 function tableParagraphLayout(
+  access: TableLayoutAccess | undefined,
   ...args: Parameters<typeof layoutParagraph>
 ): LayoutLine[] {
-  const memo = tableLayoutMemo;
-  if (!memo) return layoutParagraph(...args);
+  if (!access) return layoutParagraph(...args);
+  const { memo, record } = access;
   const [ctx, para, ...rest] = args;
   const key = rest.map((value) => typeof value === 'object' ? '' : String(value)).join('|');
   const cached = memo.layouts.get(para)?.get(key);
   if (cached) return cached as LayoutLine[];
   const lines = layoutParagraph(ctx, para, ...rest);
-  if (!memo.recording) return lines;
+  if (!record || memo.lines + lines.length > TABLE_LAYOUT_RETAINED_LINES) return lines;
   let byKey = memo.layouts.get(para);
   if (!byKey) memo.layouts.set(para, byKey = new Map());
   byKey.set(key, freezeLayout(lines));
+  memo.lines += lines.length;
   return lines;
 }
 
-/** Number of paragraph layouts tableParagraphLayout holds (tests only). */
-export function tableLayoutMemoSizeForTest(): number {
-  let n = 0;
-  for (const byKey of tableLayoutMemo?.layouts.values() ?? []) n += byKey.size;
-  return n;
+function dropTableLayouts(memo: TableLayoutMemo, paragraphs: readonly Paragraph[]): void {
+  for (const para of paragraphs) {
+    const byKey = memo.layouts.get(para);
+    if (!byKey) continue;
+    for (const lines of byKey.values()) memo.lines -= lines.length;
+    memo.layouts.delete(para);
+  }
 }
 
 export function renderTable(
@@ -7818,24 +7851,19 @@ export function renderTable(
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
 ) {
-  const outer = tableLayoutMemo;
-  const memo: TableLayoutMemo = { layouts: new Map(), recording: false };
-  tableLayoutMemo = memo;
-  try {
-    renderTableLayout(ctx, el, scale, slideNumber, rc, onTextRun, memo);
-  } finally {
-    tableLayoutMemo = outer;
-  }
+  renderTableWithLayoutMemo({ layouts: new Map(), lines: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
 }
 
-function renderTableLayout(
+/** renderTable with a caller-owned layout memo; exported for tests, which
+ * observe its retention. Not re-exported from index.ts. */
+export function renderTableWithLayoutMemo(
+  memo: TableLayoutMemo,
   ctx: CanvasRenderingContext2D,
   el: TableElement,
   scale: number,
   slideNumber: number | undefined,
-  rc: RenderContext,
-  onTextRun: TextRunCallback | undefined,
-  memo: TableLayoutMemo,
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+  onTextRun?: TextRunCallback,
 ) {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
@@ -7886,9 +7914,11 @@ function renderTableLayout(
   // when the frame extent exceeded the row sum, measured an omitted-lnSpc
   // line of a positive row by its glyph size, and spread a merged cell's
   // deficit evenly over its rows:
-  // - a cell whose measureOnly reports by its box width
-  //   (MEASURED_BY_BOX_WIDTH_VERT): that measure is not the laid-out extent of
-  //   rotated or stacked text, so the PowerPoint controls say nothing of it;
+  // - a cell that is not effectively horizontal (isHorizontalCellVert, the
+  //   same admission as the horizontal clip below): rotated and stacked
+  //   bodies measure by their box width, which is not their laid-out extent,
+  //   and the PowerPoint controls cover horizontal text only, so
+  //   mongolianVert, padded vertical tokens and unknown values stay too;
   // - every cell of an ODF table (`odfRowHeights`): ODF row heights are
   //   style:row-height (fixed, OpenDocument 1.3 Part 3 §20.348) or
   //   style:min-row-height, and LibreOffice's growth of either is not
@@ -7904,12 +7934,15 @@ function renderTableLayout(
   const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
   const frameHasSlack = el.height > authoredRowsTotalEmu;
   const keepsEarlierRule = (body: TextBody): boolean =>
-    el.odfRowHeights === true || MEASURED_BY_BOX_WIDTH_VERT.has(body.vert)
+    el.odfRowHeights === true || !isHorizontalCellVert(body.vert)
     || (body.numCol ?? 1) > 1
     || (body.textWarp != null && hasTextWarp(body.textWarp.preset));
 
-  // Row sizing records its layouts for the paint below (tableParagraphLayout).
-  memo.recording = true;
+  // Row sizing records the layouts of growth-rule cells for the paint below
+  // (tableParagraphLayout).
+  const sizingLayouts = (earlierRule: boolean): TableLayoutAccess | undefined =>
+    earlierRule ? undefined : { memo, record: true };
+  const paintLayouts: TableLayoutAccess = { memo, record: false };
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -7930,7 +7963,7 @@ function renderTableLayout(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
         cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false,
-        !earlierRule || row.height === 0,
+        !earlierRule || row.height === 0, sizingLayouts(earlierRule),
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
     }
@@ -7943,9 +7976,12 @@ function renderTableLayout(
   // row at its own height and grow only the last. Merged cells are resolved
   // in the order of the row they end on, so a cell ending lower sees the
   // growth of every merge nested inside it whatever the column order.
-  // Cells that keep the earlier rule keep its row-major order: they hold
-  // their own positions in the sequence and only the other cells are
-  // reordered among the remaining positions.
+  // Merges that share no row cannot affect each other, so the order is set
+  // per group of merges linked through shared rows. A group with any cell on
+  // the earlier rule keeps that rule's row-major reading order for every
+  // merge in it: the controls below cover ordinary cells only, and one order
+  // for the whole group keeps the result independent of where a merge that
+  // contributes nothing sits.
   const spanCells: { ri: number; ci: number; last: number; earlierRule: boolean }[] = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -7972,9 +8008,26 @@ function renderTableLayout(
   //   (longest first: 24/96/24/144).
   // Array.prototype.sort is stable: cells ending on the same row keep their
   // reading order.
-  const byEndRow = spanCells.filter((c) => !c.earlierRule).sort((a, b) => a.last - b.last);
-  let nextByEndRow = 0;
-  const spanOrder = spanCells.map((c) => c.earlierRule ? c : byEndRow[nextByEndRow++]);
+  const spanOrder: typeof spanCells = [];
+  {
+    // Groups of row intervals linked by overlap: sweep by first row.
+    const byFirstRow = [...spanCells].sort((a, b) => a.ri - b.ri);
+    const groupOf = new Map<(typeof spanCells)[number], number>();
+    let group = -1;
+    let groupLast = -1;
+    for (const c of byFirstRow) {
+      if (c.ri > groupLast) group++;
+      groupLast = Math.max(groupLast, c.last);
+      groupOf.set(c, group);
+    }
+    const members: (typeof spanCells)[] = [];
+    for (const c of spanCells) (members[groupOf.get(c)!] ??= []).push(c);
+    for (const cells of members) {
+      spanOrder.push(...(cells.some((c) => c.earlierRule)
+        ? cells
+        : [...cells].sort((a, b) => a.last - b.last)));
+    }
+  }
   for (const { ri, ci, last, earlierRule } of spanOrder) {
     const cell = el.rows[ri].cells[ci];
     const textBody = cell.textBody!;
@@ -7986,7 +8039,7 @@ function renderTableLayout(
       ctx, tableTextBody(textBody), 0, 0, cellW, 0, scale,
       cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
       '#000000', slideNumber, rc, undefined, true, undefined, false,
-      !earlierRule || hasAutoHeightRow,
+      !earlierRule || hasAutoHeightRow, sizingLayouts(earlierRule),
     ) as number) || 0;
     let have = 0;
     for (let r = ri; r <= last; r++) have += rowHeights[r];
@@ -7998,7 +8051,6 @@ function renderTableLayout(
       rowHeights[last] += needed - have;
     }
   }
-  memo.recording = false;
 
   // ── Column x-positions ────────────────────────────────────────────────────
   // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
@@ -8175,15 +8227,10 @@ function renderTableLayout(
       // already folded into body.vert, omitted or `horz`). How the physical x
       // interval maps onto rotated, stacked or unknown directions is not settled
       // here, so those bodies keep their previous unclipped paint and overlays.
-      // DrawingML ST_TextVerticalType restricts xsd:token in both strict and
-      // transitional schemas. For this single-word enum, collapse accepts only
-      // U+0020/TAB/LF/CR at the ends; NBSP and internal whitespace cannot mean
-      // `horz`. Apply this only to admission, leaving the body/paint policy intact.
-      // Keep this tolerant for caller-supplied and previously parsed models too;
+      // isHorizontalCellVert gives the xsd:token admission. Apply it only to
+      // admission, leaving the body/paint policy intact. Keep this tolerant for caller-supplied and previously parsed models too;
       // normalizing the shared direction would also change orientation dispatch.
-      const rawVert = cell.textBody.vert;
-      const isHorizontal = rawVert === undefined || typeof rawVert === 'string'
-        && /^[ \t\r\n]*horz[ \t\r\n]*$/.test(rawVert);
+      const isHorizontal = isHorizontalCellVert(cell.textBody.vert);
       cellHorzOverflow = !isHorizontal ? undefined
         : cell.horzOverflow === 'overflow' ? 'overflow' : 'clip';
       ctx.save();
@@ -8205,10 +8252,15 @@ function renderTableLayout(
           slideNumber,
           rc,
           tableTextRun,
+          false,
+          undefined,
+          false,
+          false,
+          paintLayouts,
         );
       } finally {
         // The cell is painted: its measured layouts are not needed again.
-        for (const para of cell.textBody.paragraphs) memo.layouts.delete(para);
+        dropTableLayouts(memo, cell.textBody.paragraphs);
         ctx.restore();
       }
     }
