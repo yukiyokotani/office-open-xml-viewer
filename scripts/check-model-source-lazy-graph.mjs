@@ -23,7 +23,7 @@ export const SOURCE_DISPATCH = new Map([
   ['packages/docx/src/document.ts', ['load']],
   ['packages/xlsx/src/workbook.ts', ['load']],
   ['packages/pptx/src/presentation.ts', ['load']],
-  ['packages/node/src/docx.ts', ['openDocxDocument', 'materializeDocxDocument']],
+  ['packages/node/src/docx.ts', ['openDocxDocument', 'materializeDocxDocument', 'openDocxPictures']],
   ['packages/node/src/xlsx.ts', ['openXlsxWorkbook']],
   ['packages/node/src/pptx.ts', ['openPptxPresentationImpl']],
   ['packages/node/src/docx-model-source.ts', ['acquireDocxInput']],

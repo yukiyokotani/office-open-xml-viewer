@@ -23,10 +23,13 @@ import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { normalizeCurrentDate } from './input-normalization.ts';
 import { resolveNodeSessionInput } from './model-source.ts';
 import {
+  admitDocxPictureSession,
   DocxDocumentSessionImpl,
   type DocxDocumentSession,
   type DocxPageRenderOptions,
+  type DocxPictureSession,
   type OpenDocxDocumentOptions,
+  type OpenDocxPicturesOptions,
 } from './docx.ts';
 
 class SourceDocxDocumentSession extends DocxDocumentSessionImpl {
@@ -130,6 +133,19 @@ export async function materializeDocxSource(
       }
     },
   );
+}
+
+/** Factory-less picture session over a selected source: the body is parsed
+ * (a model source builds its picture store while parsing), no layout runs. */
+export async function openDocxPicturesSource(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenDocxPicturesOptions,
+  wasmModule: () => WebAssembly.Module,
+): Promise<DocxPictureSession> {
+  const { acquired } = await acquireDocxInput(
+    buffer, options, wasmModule, materializeDocumentPullSession,
+  );
+  return admitDocxPictureSession(acquired, options.signal);
 }
 
 /** Selected-source DOCX acquisition, loaded only after source-option dispatch. */

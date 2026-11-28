@@ -160,11 +160,13 @@ describe('Node sessions with a model source', () => {
     await session.close();
     expect(measured.closes()).toBe(1);
 
+    // Without a factory nothing measures; the grid's fallback width resolves
+    // the source's anchors and is recorded for a later render.
     const unmeasured = fakeSource('xlsx', { hostLayoutFamily: 'Calibri', hostLayoutSizePt: 11 });
     const withoutFactory = await openXlsxWorkbook(xlsxSample, { legacyXls: unmeasured.source });
     expect(unmeasured.configures()).toBe(1);
-    expect(unmeasured.configuredWidth()).toBeNaN();
-    expect(withoutFactory.workbookIndex.layoutMetrics).toBeUndefined();
+    expect(unmeasured.configuredWidth()).toBe(8);
+    expect(withoutFactory.workbookIndex.layoutMetrics).toEqual({ maximumDigitWidth: 8 });
     await withoutFactory.close();
   }, 30_000);
 

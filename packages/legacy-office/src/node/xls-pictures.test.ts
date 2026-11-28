@@ -101,8 +101,32 @@ describe('XLS pictures', () => {
     });
   });
 
+  // Without a factory nothing can measure, and the session renders nothing:
+  // anchors resolve at the grid's fallback width (8 px) and that width is
+  // recorded, so a later render sizes the grid to match.
+  it('keeps pictures at the grid fallback width without a canvas factory', async () => {
+    const bytes = buildXlsPicturesFixture({ behavior: 0 });
+    const { worksheet, layout } = await sheet(bytes);
+    expect(layout).toEqual({ maximumDigitWidth: 8 });
+    expect(worksheet.images).toEqual([expect.objectContaining({
+      editAs: 'twoCell', mimeType: 'image/png',
+      fromColOff: 5 * 8 * EMU_PER_PIXEL, nativeExtCx: Math.round(17.5 * 8 * EMU_PER_PIXEL),
+      fromRowOff: 95250, nativeExtCy: 523875,
+    })]);
+
+    const session = await openXlsxWorkbook(bytes, { legacyXls: testXlsSource() });
+    try {
+      let images: ReadonlyArray<{ imagePath: string; mimeType: string }> = [];
+      for await (const unit of session.worksheetRows(0)) {
+        if (unit.kind === 'finished') images = unit.worksheet.images ?? [];
+      }
+      expect(images).toHaveLength(1);
+      const image = await session.getImage(images[0]!.imagePath, images[0]!.mimeType);
+      expect(new Uint8Array(await image.arrayBuffer())).toEqual(picturePng);
+    } finally { await session.close(); }
+  });
+
   it.each([
-    ['no canvas factory', undefined],
     ['a width above the host bound', 4097],
     ['a non-finite width', Infinity],
   ] as const)('omits pictures without inventing metrics for %s', async (_label, width) => {

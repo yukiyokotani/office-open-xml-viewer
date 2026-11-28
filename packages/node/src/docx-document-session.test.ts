@@ -8,6 +8,7 @@ import { layoutDocument } from '../../docx/src/document-layout.ts';
 import {
   materializeDocxDocument,
   openDocxDocument,
+  openDocxPictures,
 } from './docx.ts';
 import type { NodeCanvasFactory } from './render.ts';
 import { OoxmlError } from '@silurus/ooxml-core';
@@ -145,6 +146,38 @@ describe('Node bounded DOCX document session', () => {
       expect(extract).toHaveBeenCalledTimes(1);
     } finally {
       extract.mockRestore();
+    }
+  });
+
+  it('reads pictures without a canvas factory through a session that cannot render', async () => {
+    await expect(openDocxDocument(bytes, {} as never))
+      .rejects.toThrow(/requires a canvas factory; openDocxPictures reads pictures without one/);
+    const onResourceMetrics = vi.fn();
+    const session = await openDocxPictures(bytes, { onResourceMetrics });
+    expect('renderPage' in session).toBe(false);
+    expect('pageCount' in session).toBe(false);
+    const image = await session.getImage('word/media/image1.jpeg', 'image/jpeg');
+    expect(image.type).toBe('image/jpeg');
+    expect(image.size).toBe(202_076);
+    expect(await session.getImage('word/media/image1.jpeg', 'image/jpeg')).toBe(image);
+    await expect(session.getImage('word/document.xml')).rejects.toThrow(TypeError);
+    expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThanOrEqual(202_076);
+    await session.close();
+    await expect(session.getImage('word/media/image1.jpeg', 'image/jpeg')).rejects.toThrow(/closed/);
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }));
+  });
+
+  it('fails a factory-less picture session when a read exceeds the archive entry budget', async () => {
+    const session = await openDocxPictures(bytes, { resourceLimits: { maxArchiveEntryBytes: 150_000 } });
+    try {
+      const failure = await session.getImage('word/media/image1.jpeg', 'image/jpeg').then(
+        () => { throw new Error('resolved an over-budget picture'); },
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({ code: 'ooxml-resource-limit' });
+      await expect(session.getImage('word/media/image2.jpeg', 'image/jpeg')).rejects.toBe(failure);
+    } finally {
+      await session.close();
     }
   });
 

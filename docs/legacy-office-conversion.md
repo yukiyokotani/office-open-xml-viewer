@@ -213,6 +213,25 @@ const picture = await session.getImage(run.imagePath, run.mimeType); // Blob
 `openXlsxWorkbook(bytes, { legacyXls })` sessions offer the same `getImage`
 for worksheet pictures, and `openPptxPresentation` sessions already do.
 
+To read pictures without rendering, and so without a canvas `factory`, open
+a picture session instead. It parses the document but creates no layout
+state, and offers only `getImage`, `resourceUsage` and `close`:
+
+```typescript
+import { materializeDocxDocument, openDocxPictures } from '@silurus/ooxml/node';
+
+const document = await materializeDocxDocument(legacyDocBytes, { legacyDoc });
+const pictures = await openDocxPictures(legacyDocBytes, { legacyDoc });
+try {
+  const picture = await pictures.getImage(run.imagePath, run.mimeType);
+} finally {
+  await pictures.close();
+}
+```
+
+`openDocxDocument` still requires a `factory`, because pagination measures
+text.
+
 Both browser rendering modes and progressive layout use the same retained
 layout pipeline. The native source remains alive for image reads until the
 document is destroyed; finishing a model cursor does not dispose it.
@@ -367,9 +386,15 @@ host-layout capability, and the XLSX renderer answers with its own
 `computeMdw`, the same measurement that sizes the painted grid, in the
 rendering realm: the render Worker in `mode: 'worker'`, the page in main
 mode, and the session canvas `factory` in Node. There is no measurement
-callback option. Without a measured width (for example in Node without a
-`factory`), drawings that need the worksheet grid to resolve their anchors
-are omitted; a chart sheet's charts use absolute anchors and remain.
+callback option. In Node without a `factory` nothing can measure the font
+and the session renders nothing, so anchors resolve with the grid's fallback
+width of 8 pixels, the width the grid itself uses when it cannot measure.
+That width is recorded as the workbook's `layoutMetrics`, so a later render
+sizes the grid to match; the drawings and their `getImage` bytes stay
+available, but column positions are approximate when the Normal font's
+real digit width differs. When a `factory` is given but its measurement is
+unusable, drawings that need the worksheet grid to resolve their anchors are
+omitted; a chart sheet's charts use absolute anchors and remain.
 
 XLS worksheets are delivered complete, without an early row preview.
 
