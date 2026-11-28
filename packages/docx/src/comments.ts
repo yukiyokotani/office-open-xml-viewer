@@ -417,6 +417,7 @@ function collectIndexedStoryCommentRanges(
   renderedRunIndex: RenderedRunIndex,
   splitRuns?: SplitRunIndex,
   textRunIndex: RenderedRunIndex = renderedRunIndex,
+  completedSourceKeys?: ReadonlySet<string>,
 ): CommentAnchorRange[] {
   const validByValue = new Map<string, string>();
   const ambiguousValues = new Set<string>();
@@ -466,6 +467,14 @@ function collectIndexedStoryCommentRanges(
     if (marks.starts.length > 1 || marks.ends.length > 1) continue;
     const start = marks.starts.length === 1 ? marks.starts[0] : undefined;
     const end = marks.ends.length === 1 ? marks.ends[0] : undefined;
+    // A prefix of a layout still being published shows a comment only when
+    // it places it as the complete layout will: every paragraph of its
+    // authored extent (its start, end and reference and all between) has
+    // ended in the prefix, and the text that would stand in for it is
+    // already decided. Until then nothing of it is published; it appears
+    // with a later prefix or the complete layout, never somewhere it will
+    // not stay.
+    if (completedSourceKeys && !settledInPrefix([reference, start, end])) continue;
     const orderedPair = start && end && (
       start.paragraphIndex < end.paragraphIndex
       || (start.paragraphIndex === end.paragraphIndex && start.boundary <= end.boundary)
@@ -533,6 +542,25 @@ function collectIndexedStoryCommentRanges(
     ));
   }
   return ranges;
+
+  function settledInPrefix(marks: readonly (MarkLocation | undefined)[]): boolean {
+    const extent = marks.filter((mark): mark is MarkLocation => mark !== undefined);
+    const first = Math.min(...extent.map((mark) => mark.paragraphIndex));
+    const last = Math.max(...extent.map((mark) => mark.paragraphIndex));
+    for (let index = first; index <= last; index += 1) {
+      if (!completedSourceKeys!.has(sourceKey(paragraphs[index]!.source))) return false;
+    }
+    // The adjacent-paragraph fallback of a mark in a paragraph without text
+    // is the text after it, else the text before it, in the order its
+    // affinity prefers: decided once text after it is laid out, or when the
+    // mark prefers the text before it and that is.
+    return extent.every((mark) => {
+      if (projectedTextIndex.paragraphIndices.has(mark.paragraphIndex)) return true;
+      const followingIndex = lowerBoundProjectedTextLocation(projectedTextIndex.locations, mark);
+      if (followingIndex < projectedTextIndex.locations.length) return true;
+      return frozenPoint(mark).affinity === 'preceding' && followingIndex > 0;
+    });
+  }
 
   function placed(range: CommentAnchorRange, fallbackSide: 'first' | 'last'): CommentAnchorRange {
     const standIn = standInRun(range, renderedRunIndex, splitRuns, fallbackSide);
@@ -611,6 +639,7 @@ export function collectLayoutSourceCommentRanges(
   renderedRunIndex: RenderedRunIndex = new Map(),
   splitRuns?: SplitRunIndex,
   textRunIndex?: RenderedRunIndex,
+  completedSourceKeys?: ReadonlySet<string>,
 ): CommentAnchorRange[] {
   const validCommentIds = new Set(comments.map(({ id }) => id));
   const byStory = new Map<string, ParagraphVisit[]>();
@@ -623,7 +652,8 @@ export function collectLayoutSourceCommentRanges(
     visits.push({ paragraph: block, source: blockSource });
   }
   return [...byStory.values()].flatMap((paragraphs) =>
-    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex, splitRuns, textRunIndex));
+    collectIndexedStoryCommentRanges(
+      paragraphs, validCommentIds, renderedRunIndex, splitRuns, textRunIndex, completedSourceKeys));
 }
 
 /** Avoid any story walk for the common comment-free document. */
@@ -635,39 +665,8 @@ export function collectLayoutSourceCommentRangesIfPresent(
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
   const collected = collectLayoutSourceCommentRanges(
-    comments ?? [], source, renderedRunIndex, options.splitRuns, options.textRunIndex);
-  const completed = options.completedSourceKeys;
-  // In a prefix, the run next to a boundary is there when the fragment that
-  // adjoins the boundary is: the first fragment of the run after it, laid
-  // out as soon as the run appears, or the last fragment of the run before
-  // it, laid out only when something after it is (a later run, or the end
-  // of its paragraph). An earlier fragment of a run that goes on beyond the
-  // prefix does not place the boundary.
-  const adjoiningRun = (
-    source: Readonly<DocxStorySource>,
-    boundary: number,
-    affinity: 'following' | 'preceding',
-  ): boolean => {
-    const indices = renderedRunIndex.get(sourceKey(source));
-    if (!indices) return false;
-    if (affinity === 'following') return indices.has(boundary);
-    if (!indices.has(boundary - 1)) return false;
-    if (completed!.has(sourceKey(source))) return true;
-    for (const index of indices) if (index >= boundary) return true;
-    return false;
-  };
-  const ranges = completed === undefined ? collected : collected.filter((range) => {
-    const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
-    const hasCoveredRun = range.startRunIndex < range.endRunIndex
-      ? [...sourceIndices].some((index) =>
-          index >= range.startRunIndex && index < range.endRunIndex)
-      : adjoiningRun(range.source, range.startRunIndex, range.reference.affinity);
-    const hasReferenceRun = adjoiningRun(range.reference.source, range.reference.runIndex, range.reference.affinity);
-    return hasCoveredRun
-      || hasReferenceRun
-      || completed.has(sourceKey(range.source))
-      || completed.has(sourceKey(range.reference.source));
-  });
+    comments ?? [], source, renderedRunIndex, options.splitRuns, options.textRunIndex, options.completedSourceKeys);
+  const ranges = collected;
   const owners = options.cardOwners;
   const placed = owners ? [...assignCommentCardOwners(ranges, owners.sourcePages, owners.runsForPage)] : ranges;
   // The placements leave beside the ranges for a caller that sends both to

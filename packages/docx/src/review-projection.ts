@@ -1,8 +1,13 @@
 /** Scope for projecting review anchors from a retained layout. */
 export interface ReviewAnchorProjectionOptions {
-  /** When present, provisional projection may use fallback geometry only for
-   * paragraphs whose final fragment is already in the published prefix.
-   * Omit for authoritative projection. */
+  /** The paragraphs that have ended in a published prefix. When present the
+   * projection is provisional. A revision may use fallback geometry only
+   * for such paragraphs. A comment is published only when every paragraph
+   * of its authored extent is one of them and its stand-in text is decided
+   * (comments.ts): the prefix then places it as the complete layout will,
+   * and a comment whose extent goes on beyond the prefix appears later, on
+   * purpose, rather than somewhere it will not stay. Omit for authoritative
+   * projection. */
   readonly completedSourceKeys?: ReadonlySet<string>;
   /** The laid-out document to decide comment card owners against
    * (comments.ts assignCommentCardOwners): the pages that hold runs of each

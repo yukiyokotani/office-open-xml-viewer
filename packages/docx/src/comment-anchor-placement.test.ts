@@ -733,6 +733,43 @@ describe('a reference-only comment after a run that goes on beyond a published p
   });
 });
 
+describe('a comment whose authored extent goes on beyond a published prefix', () => {
+  const filler = Array.from({ length: 400 }, (_, index) => `<w:p>${sized(`filler ${index}`)}</w:p>`).join('');
+  /** [pages, anchors] of each publication, and the complete layout's metadata. */
+  const publish = async (body: string) => {
+    const { model } = await paintedDocument(body + filler, COMMENT_PART);
+    const source = layoutSourceStore(model);
+    const retained = retainRenderWorkerDocumentLayout(
+      source, createLayoutServices(source, { measureContext: oracleMeasureContext() }), 0);
+    const review = { comments: model.comments ?? [], revisions: [] };
+    const published: [number, number][] = [];
+    await paginateRenderWorkerDocumentProgressively(retained, source, {
+      publish: (publication) => {
+        published.push([publication.pageCount, publication.commentAnchorRanges?.length ?? 0]);
+      },
+      progress: () => undefined,
+    }, { currentDateMs: 0 }, undefined, review);
+    return { published, complete: renderWorkerLayoutMeta(retained, review, 0, false) };
+  };
+
+  it('is not shown at unrelated text of the prefix: a range from deleted text to the next page', async () => {
+    const { published, complete } = await publish(`<w:p>${sized('Unrelated')}</w:p>`
+      + `<w:p><w:commentRangeStart w:id="1"/>${DELETION}</w:p>`
+      + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${sized('Covered')}<w:commentRangeEnd w:id="1"/>${REFERENCE}</w:p>`);
+    expect(published[0]).toEqual([1, 0]);
+    expect(complete.commentAnchorRanges).toHaveLength(1);
+    expect(complete.commentAnchorPlacements?.[0]?.cardPageIndex).toBe(1);
+  });
+
+  it('is published with the complete layout, where it stays: a lone range start before a run that crosses pages', async () => {
+    const { published, complete } = await publish(`<w:p>${EXACT_12PT}<w:commentRangeStart w:id="1"/>`
+      + `${sized(`${'word '.repeat(910)}end`)}${REFERENCE}</w:p>`);
+    expect(published[0]).toEqual([1, 0]);
+    expect(complete.commentAnchorRanges).toHaveLength(1);
+    expect(complete.commentAnchorPlacements?.[0]?.cardPageIndex).toBe(0);
+  });
+});
+
 describe('text an exact-height row hides, in the text layer', () => {
   it('takes no pointer: its box does not cover what the row shows', async () => {
     const { runs } = await paintedDocument(
