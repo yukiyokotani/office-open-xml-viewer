@@ -157,8 +157,45 @@ function checkoutState(root) {
   return {
     head,
     tracked: tracked.filter(relevant),
-    untracked: untracked.filter(relevant),
+    untracked: [...new Set([...untracked, ...ignoredSpecimens(root, head, [...tracked, ...untracked])])]
+      .filter(relevant),
   };
+}
+
+// `git status` omits ignored files, and a baseline revision that predates the
+// public corpus may ignore the specimen folders. So the specimen inputs are
+// also listed from disk and compared with the files tracked at the baseline
+// revision; any other one counts as an untracked input and goes through the
+// same allowance and copy-record checks. The tracked list depends only on the
+// revision, so it is read once per checkout and revision.
+const trackedSpecimens = new Map();
+
+function ignoredSpecimens(root, head, reported) {
+  const key = `${root}\0${head}`;
+  if (!trackedSpecimens.has(key)) {
+    const output = git(root, [
+      'ls-tree', '-r', '-z', '--name-only', head, '--',
+      'packages/docx/public/corpus', 'packages/xlsx/public/corpus', 'packages/pptx/public/corpus',
+    ], { trim: false });
+    trackedSpecimens.set(key, new Set(output.split('\0').filter(Boolean)));
+  }
+  const tracked = trackedSpecimens.get(key);
+  const known = new Set(reported);
+  const found = [];
+  for (const format of ['docx', 'xlsx', 'pptx']) {
+    const directory = `packages/${format}/public/corpus`;
+    let names;
+    try {
+      names = readdirSync(join(root, directory));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const path = `${directory}/${name}`;
+      if (CORPUS_INPUT_PATH.test(path) && !tracked.has(path) && !known.has(path)) found.push(path);
+    }
+  }
+  return found;
 }
 
 // A public specimen that the PR under test adds or rewrites has no image from
@@ -511,6 +548,24 @@ function verifiedBaselinePath(location, path) {
   return real;
 }
 
+/** Fail when any existing component of `path`, from the checkout root down, is
+ * a symlink, so a write or a stale-image removal cannot be redirected out of
+ * the checkout. Call it before every snapshot or candidate-output write. */
+function assertNoSymlinkBelowCheckout(path) {
+  const root = ownCheckout();
+  const offset = relative(root, resolve(realpathSync(process.cwd()), path));
+  if (offset.startsWith('..') || isAbsolute(offset)) {
+    throw new Error(`self-VRT output path is outside the checkout: ${path}`);
+  }
+  let current = root;
+  for (const component of offset.split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (isSymlink(current)) {
+      throw new Error(`refusing to write below a symlinked self-VRT path: ${current}`);
+    }
+  }
+}
+
 function isSymlink(path) {
   try {
     return lstatSync(path).isSymbolicLink();
@@ -628,6 +683,7 @@ export function prepareSelfVrtCorpus({
   };
   if (snapshot) {
     const copies = snapshotCorpusInputs(location.checkout);
+    assertNoSymlinkBelowCheckout(path);
     mkdirSync(root, { recursive: true });
     writeFileSync(
       path,
@@ -754,6 +810,7 @@ export function beginSelfVrtItems(options) {
   const { location, directory, path, names, header } = plan;
   const key = `${corpus}\0${stem}`;
   if (snapshot) {
+    assertNoSymlinkBelowCheckout(directory);
     mkdirSync(directory, { recursive: true });
     // A previous snapshot in this checkout may have rendered more items.
     for (const stale of sortedItems(readdirSync(directory), itemKind)) {
@@ -815,6 +872,7 @@ export function verifySelfVrtItemManifest(options) {
   }
   itemStates.delete(key);
   if (snapshot) {
+    assertNoSymlinkBelowCheckout(directory);
     const present = sortedItems(readdirSync(directory), itemKind);
     if (JSON.stringify(present) !== JSON.stringify(names)) {
       throw new Error(
@@ -860,6 +918,7 @@ export function captureOrCompareSelfVrtItem({
     throw new Error(`self-VRT items of ${stem} were not begun before capture`);
   }
   const outputDirectory = `tests/visual/${snapshot ? 'baseline' : 'screenshots'}/${outputPrefix}${stem}`;
+  assertNoSymlinkBelowCheckout(`${outputDirectory}/${key}`);
   mkdirSync(outputDirectory, { recursive: true });
   writeFileSync(`${outputDirectory}/${key}`, actual);
   if (snapshot) {

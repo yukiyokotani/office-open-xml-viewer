@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -942,5 +943,109 @@ test('a specimen replaced between selection load and preparation is refused, wit
     });
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('snapshot writes and stale-image removal never follow a symlinked baseline path', () => {
+  const fixture = selfVrtFixture();
+  const outside = join(fixture.scratch, 'outside');
+  try {
+    mkdirSync(join(outside, 'demo/deck'), { recursive: true });
+    writeFileSync(join(outside, 'demo/deck/slide-9.png'), 'stale');
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    // Ignore the baseline folder itself (without a trailing slash) so a symlink
+    // there is reported by the guard and not by the clean-checkout check.
+    writeFileSync(join(fixture.base, '.git/info/exclude'), 'packages/*/tests/visual/baseline\n');
+    const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
+    const baseline = join(fixture.base, 'packages/pptx/tests/visual/baseline');
+    mkdirSync(join(fixture.base, 'packages/pptx/tests/visual'), { recursive: true });
+    const untouched = () => {
+      assert.deepEqual(readdirSync(outside).sort(), ['demo', 'keep.txt']);
+      assert.deepEqual(readdirSync(join(outside, 'demo/deck')), ['slide-9.png']);
+      assert.equal(readFileSync(join(outside, 'keep.txt'), 'utf8'), 'keep');
+    };
+    // The whole baseline folder is a symlink: the manifest write is refused.
+    symlinkSync(outside, baseline);
+    inPackage(fixture.base, env, () => {
+      assert.throws(
+        () => prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true }),
+        /symlinked self-VRT path/,
+      );
+    });
+    untouched();
+    unlinkSync(baseline);
+    // A symlinked per-document directory: stale-image cleanup and captures are refused.
+    mkdirSync(join(baseline, 'demo'), { recursive: true });
+    symlinkSync(join(outside, 'demo/deck'), join(baseline, 'demo/deck'));
+    inPackage(fixture.base, env, () => {
+      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
+      assert.throws(
+        () => beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true }),
+        /symlinked self-VRT path/,
+      );
+    });
+    untouched();
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('an ignored copied specimen is subject to the allowance and the copy record', () => {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-ignored-'));
+  const base = join(scratch, 'base');
+  const candidate = join(scratch, 'candidate');
+  const rel = 'packages/xlsx/public/corpus';
+  const specimen = 'xlsx-999-new.xlsx';
+  try {
+    mkdirSync(join(base, rel), { recursive: true });
+    git(base, 'init', '-q');
+    git(base, 'config', 'user.email', 'vrt@example.invalid');
+    git(base, 'config', 'user.name', 'vrt');
+    // An older baseline revision that ignores the corpus inputs.
+    writeFileSync(join(base, '.gitignore'), 'packages/*/tests/visual/baseline/\npackages/*/public/corpus/\n');
+    writeFileSync(join(base, rel, '.gitkeep'), '');
+    git(base, 'add', '-f', '.');
+    git(base, 'commit', '-q', '-m', 'renderer');
+    const revision = git(base, 'rev-parse', 'HEAD');
+    git(scratch, 'clone', '-q', base, candidate);
+    writeFileSync(join(candidate, rel, specimen), 'new');
+    writeFileSync(join(base, rel, specimen), 'new');
+    assert.equal(git(base, 'status', '--porcelain', '--', rel), '', 'git status does not show the ignored copy');
+    const spec = { corpus: 'corpus', format: 'xlsx', files: [`corpus/${specimen}`] };
+    const inXlsx = (checkout, env, run) => {
+      const previous = process.cwd();
+      process.chdir(join(checkout, 'packages/xlsx'));
+      try {
+        return withEnv({ VRT_ALLOW_HARNESS_CHANGES: undefined, ...env }, run);
+      } finally {
+        process.chdir(previous);
+      }
+    };
+    const snapshotEnv = (flag) => ({
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision,
+    });
+    const compare = (flag) => inXlsx(candidate, {
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision,
+    }, () => {
+      prepareSelfVrtCorpus({ ...spec, snapshot: false });
+      selfVrtBaselineRoot();
+    });
+    // Without the allowance the ignored copy is an unrecorded change.
+    assert.throws(
+      () => inXlsx(base, snapshotEnv(undefined), () => prepareSelfVrtCorpus({ ...spec, snapshot: true })),
+      /clean renderer checkout; changed paths at .*xlsx-999-new\.xlsx/,
+    );
+    // With it, the copy is recorded in the manifest.
+    inXlsx(base, snapshotEnv('1'), () => prepareSelfVrtCorpus({ ...spec, snapshot: true }));
+    const record = JSON.parse(readFileSync(
+      join(base, 'packages/xlsx/tests/visual/baseline/public-corpus/manifest.json'), 'utf8',
+    ));
+    assert.deepEqual(record.corpusInputCopies.map((copy) => copy.path), [`${rel}/${specimen}`]);
+    compare('1');
+    rmSync(join(base, rel, specimen));
+    assert.throws(() => compare('1'), /copies differ from the snapshot's record/);
+    assert.throws(() => compare(undefined), /set it for the comparison run too/);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });

@@ -4,6 +4,14 @@
 previous renderer, the baseline is bound to a checkout, and every difference
 must be adjudicated. This file holds the procedures that go with them.
 
+## Threat model
+
+The self-VRT bindings protect against stale or mismatched files and operator
+mistakes: the wrong checkout, a forgotten specimen copy, leftover images,
+gitignored files, symlinked generated directories, and non-regular files such
+as named pipes. They do not defend against a local process that deliberately
+replaces files while a run is in progress; concurrent races are out of scope.
+
 ## Harness bootstrap exceptions
 
 When a harness change is bootstrapped against an older baseline
@@ -13,7 +21,9 @@ two more things are allowed:
 - `pnpm-lock.yaml`, but only hunks that add or remove the fixtures'
   `@fontsource/*` packages. Any other hunk fails.
 - The inputs under `packages/<fmt>/public/corpus/`. Git ignores them before
-  the corpus is tracked, so the bootstrap may copy them in.
+  the corpus is tracked, so the bootstrap may copy them in. The harness lists
+  these folders from disk and compares them with the files tracked at the
+  baseline revision, so an ignored copy is checked like any other.
 
 ## Added or changed public specimens
 
