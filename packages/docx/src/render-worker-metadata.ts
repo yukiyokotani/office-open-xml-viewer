@@ -14,6 +14,15 @@ import type { DocumentLayoutMeta, DocumentMeta } from './worker-protocol.js';
 
 export type RenderWorkerReviewIndexInput = Pick<DocumentMeta, 'comments' | 'revisions'>;
 
+const PROVISIONAL_LAYOUTS = new WeakSet<object>();
+
+/** Record that `layout` is a prefix published while the document is still
+ * being paginated: whichever request reads it later, its review anchors are
+ * projected as from a prefix, as its publication was. */
+export function markProvisionalRenderWorkerLayout(layout: object): void {
+  PROVISIONAL_LAYOUTS.add(layout);
+}
+
 /** The single worker-side projection from an immutable selected layout to the
  * synchronous geometry and indexes exposed by the host. Initial parse and
  * runtime view switching both delegate here. */
@@ -28,9 +37,13 @@ export function projectRenderWorkerLayoutMeta(
   const reviewIndex = hasComments || hasRevisions
     ? reviewProjectionIndexForDocument(layout)
     : undefined;
+  // A published prefix is projected as one by every route that reads it
+  // (its publication, a view selection, a runs request), not only by the
+  // route that says so: the mark belongs to the layout.
+  const provisional = options.provisional === true || PROVISIONAL_LAYOUTS.has(layout);
   const reviewProjection = reviewIndex
     ? {
-        ...(options.provisional ? { completedSourceKeys: reviewIndex.completedSourceKeys } : {}),
+        ...(provisional ? { completedSourceKeys: reviewIndex.completedSourceKeys } : {}),
         // Each comment's card owner is decided once against this layout.
         cardOwners: {
           sourcePages: reviewIndex.sourcePages,
@@ -91,15 +104,6 @@ export function renderWorkerLayoutMeta(
   return projectRenderWorkerLayoutMeta(layout, source, review);
 }
 
-const PROVISIONAL_LAYOUTS = new WeakSet<object>();
-
-/** Record that `layout` is a prefix published while the document is still
- * being paginated: whichever request reads it later, its review anchors are
- * projected as from a prefix, as its publication was. */
-export function markProvisionalRenderWorkerLayout(layout: object): void {
-  PROVISIONAL_LAYOUTS.add(layout);
-}
-
 const COMMENT_ANCHORS_BY_LAYOUT = new WeakMap<object, Pick<
   DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'
 >>();
@@ -123,8 +127,7 @@ export function renderWorkerCommentAnchors(
   ));
   let anchors = COMMENT_ANCHORS_BY_LAYOUT.get(layout);
   if (!anchors) {
-    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] },
-      { provisional: PROVISIONAL_LAYOUTS.has(layout) });
+    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] });
     anchors = {
       commentAnchorRanges: meta.commentAnchorRanges,
       commentAnchorPlacements: meta.commentAnchorPlacements,

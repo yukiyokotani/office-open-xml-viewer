@@ -21,7 +21,9 @@ import type { DocumentLayout } from './layout/types.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
-import { projectRenderWorkerLayoutMeta, renderWorkerCommentAnchors } from './render-worker-metadata.js';
+import {
+  projectRenderWorkerLayoutMeta, renderWorkerCommentAnchors, renderWorkerLayoutMeta,
+} from './render-worker-metadata.js';
 import { paginateRenderWorkerDocumentProgressively } from './render-worker-progressive.js';
 import { buildDocxTextLayer } from './text-layer.js';
 import { DocxScrollCommentNavigation } from './scroll-comment-navigation.js';
@@ -676,7 +678,7 @@ describe('comment anchors read from a prefix the render worker has published', (
     const retained = retainRenderWorkerDocumentLayout(
       source, createLayoutServices(source, { measureContext: oracleMeasureContext() }), 0);
     const review = { comments: model.comments ?? [], revisions: [] };
-    const seen: { pages: number; published: number; read: number }[] = [];
+    const seen: { pages: number; published: number; read: number; selected: number }[] = [];
     await paginateRenderWorkerDocumentProgressively(retained, source, {
       publish: (publication) => {
         // What a request for the runs and anchors of this view reads now.
@@ -685,14 +687,18 @@ describe('comment anchors read from a prefix the render worker has published', (
           pages: publication.pageCount,
           published: publication.commentAnchorRanges?.length ?? 0,
           read: read.commentAnchorRanges?.length ?? 0,
+          // What selecting this view again (tracked changes on, then off)
+          // gives the host as its metadata.
+          selected: renderWorkerLayoutMeta(retained, review, 0, false).commentAnchorRanges?.length ?? 0,
         });
       },
       progress: () => undefined,
     }, { currentDateMs: 0 }, undefined, review);
     const first = seen.find((publication) => publication.pages === 1);
-    expect(first).toEqual({ pages: 1, published: 0, read: 0 });
+    expect(first).toEqual({ pages: 1, published: 0, read: 0, selected: 0 });
     // The complete layout places the comment.
     expect(renderWorkerCommentAnchors(retained, review, 0, false).commentAnchorRanges).toHaveLength(1);
+    expect(renderWorkerLayoutMeta(retained, review, 0, false).commentAnchorRanges).toHaveLength(1);
   });
 });
 
