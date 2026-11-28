@@ -130,12 +130,19 @@ function boundingPolygon(polygons: readonly Point[][]): Point[] {
  * after each union is reduced (clipRegions), so duplicate or nested
  * rectangles never trigger the bounding-box superset. */
 export function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
-  let pieces: Point[][] = [placedPolygon(box.x, box.y, box.width, box.height, box.transform)];
+  const whole = placedPolygon(box.x, box.y, box.width, box.height, box.transform);
+  let pieces: Point[][] = [whole];
+  let capped = false;
   for (const clip of clips ?? []) {
     let regions = clipRegions(clip, pieces);
     if (regions.length === 0) return [];
-    // Past the cap a union is cut as its bounding box, a superset.
-    if (pieces.length * regions.length > MAX_CLIP_PIECES) regions = [boundingPolygon(regions)];
+    // Past the cap a union is cut as its bounding box, a superset: the
+    // pieces then bound what is visible, and whether anything is visible at
+    // all is decided exactly below.
+    if (pieces.length * regions.length > MAX_CLIP_PIECES) {
+      regions = [boundingPolygon(regions)];
+      capped = true;
+    }
     const seen = new Set<string>();
     pieces = pieces.flatMap((piece) => regions.map((region) => cutPolygon(piece, region)))
       .filter((piece) => {
@@ -147,7 +154,20 @@ export function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>
       });
     if (pieces.length === 0) return [];
   }
-  return pieces;
+  return capped && !someVisible(whole, clips ?? [], 0) ? [] : pieces;
+}
+
+/** Whether some point of the convex `piece` lies inside every union of
+ * `clips` from `from` on: one rectangle of each union at a time, depth
+ * first, stopping at the first common area. Exact where the capped cut in
+ * visiblePieces is a superset. */
+function someVisible(piece: readonly Point[], clips: readonly Readonly<DocxClipRegion>[], from: number): boolean {
+  if (from === clips.length) return true;
+  for (const region of clipRegions(clips[from]!, [piece as Point[]])) {
+    const cut = cutPolygon(piece, region);
+    if (cut.length >= 3 && Math.abs(area(cut)) > 1e-9 && someVisible(cut, clips, from + 1)) return true;
+  }
+  return false;
 }
 
 /** Whether any of a box placed like

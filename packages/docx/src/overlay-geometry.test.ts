@@ -794,6 +794,17 @@ describe('the card of a comment whose paragraph crosses a page break', () => {
     expect(cardsPerPage(layout, model)).toEqual([[1, true], [0, true], [0, true]]);
   });
 
+  it('stands with a reference-only point on the page of the run it follows', async () => {
+    // The paragraph crosses into page two; the reference stands right after
+    // "Target", a run on page two. Page one shows nothing of the comment.
+    const lines = Array.from({ length: 70 }, (_, line) => `${line > 0 ? '<w:r><w:br/></w:r>' : ''}${sized(line === 65 ? 'Target' : `L${line}`)}`
+      + (line === 65 ? '<w:r><w:commentReference w:id="1"/></w:r>' : ''));
+    const { layout, model } = await paintedDocument('<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>'
+      + `${lines.join('')}</w:p>`, COMMENT_PART);
+    expect(layout.pages).toHaveLength(2);
+    expect(cardsPerPage(layout, model)).toEqual([[0, false], [1, true]]);
+  });
+
   it('stands on the first page of a single range that crosses a page break', async () => {
     const { layout, model } = await paintedDocument(crossing(70).replace('</w:p>',
       '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>'), COMMENT_PART);

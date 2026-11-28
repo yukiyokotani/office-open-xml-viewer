@@ -27,6 +27,12 @@ export interface CommentAnchorRange {
    * earlier page of the same paragraph, shows nothing of it and does not
    * resolve it from the reference boundary. */
   readonly coveredGeometry?: true;
+  /** For a point anchor (equal bounds) collected with its run index: the
+   * source run the point shows, chosen against every laid-out run of its
+   * paragraph (the first at or after the point, else the last before it).
+   * A page that does not hold that run, such as the page before it of the
+   * same paragraph, shows nothing of the point. */
+  readonly pointRunIndex?: number;
   /** Set on the one range of a comment that carries the comment's margin
    * card and marker: the first, in document order, of which a page shows
    * something (assignCommentCardOwners). Absent for ranges not decided
@@ -393,7 +399,24 @@ function collectIndexedStoryCommentRanges(
     const geometryFallback = nearestProjectedText(point, projectedTextIndex);
     ranges.push(frozenRange(id, point, reference, geometryFallback));
   }
-  return ranges;
+  return ranges.map((range) => withPointRun(range, renderedRunIndex));
+}
+
+/** Fix a point anchor's run against the whole laid-out document
+ * (CommentAnchorRange.pointRunIndex), as resolveCommentAnchorRuns would
+ * choose it if every run of the paragraph were on one page. */
+function withPointRun(range: CommentAnchorRange, renderedRunIndex: RenderedRunIndex): CommentAnchorRange {
+  if (range.startRunIndex !== range.endRunIndex) return range;
+  const rendered = renderedRunIndex.get(sourceKey(range.source));
+  if (!rendered || rendered.size === 0) return range;
+  let following: number | undefined;
+  let preceding: number | undefined;
+  for (const index of rendered) {
+    if (index >= range.startRunIndex) {
+      if (following === undefined || index < following) following = index;
+    } else if (preceding === undefined || index > preceding) preceding = index;
+  }
+  return Object.freeze({ ...range, pointRunIndex: (following ?? preceding)! });
 }
 
 /** Resolve comment ranges in every retained story (body, headers, footers,
@@ -484,6 +507,9 @@ export function resolveCommentAnchorRuns(
   // A lone rangeStart/rangeEnd or reference-only comment is a point anchor at
   // the range's own source/boundary (§17.13.4.3/.4). The separately-authored
   // commentReference may be elsewhere and must not displace that point.
+  if (anchor.pointRunIndex !== undefined) {
+    return addressable.filter((run) => run.sourceRunIndex === anchor.pointRunIndex);
+  }
   if (anchor.startRunIndex === anchor.endRunIndex && addressable.length > 0) {
     const followingIndex = addressable.reduce<number | undefined>((nearest, run) => {
       const index = run.sourceRunIndex as number;
