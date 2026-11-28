@@ -1300,7 +1300,7 @@ impl<'a> Reader<'a> {
                 instruction,
                 fallback,
             } => {
-                let text = properties.text_run();
+                let text = properties.field_text_run();
                 vec![DocRun::Field(Box::new(FieldRun {
                     field_type: (*kind).into(),
                     instruction: (*instruction).into(),
@@ -1326,8 +1326,8 @@ impl<'a> Reader<'a> {
                     // The field result is text of the same style: its
                     // §17.3.2.20-equivalent language axes too.
                     lang: text.lang.clone(),
-                    lang_east_asia: text.lang_east_asia.clone().and_then(admitted_regional_language),
-                    lang_bidi: text.lang_bidi.clone().and_then(admitted_regional_language),
+                    lang_east_asia: text.lang_east_asia.clone(),
+                    lang_bidi: text.lang_bidi.clone(),
                     lang_script_class: match language {
                         Some(tag) => properties
                             .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty())),
@@ -1880,6 +1880,23 @@ impl RunProperties {
     /// Native size of one emitted run, excluding its text and link: the run
     /// shells and every string `text_run` copies out of the properties.
     pub fn text_run(&self) -> TextRun {
+        self.text_run_regional(false)
+    }
+
+    /// The text run of a field result: like `text_run`, but an East Asian or
+    /// complex regional value over the Canvas language limit is rejected on
+    /// the borrowed value, before any copy (`regional_language_admitted`).
+    fn field_text_run(&self) -> TextRun {
+        self.text_run_regional(true)
+    }
+
+    fn text_run_regional(&self, bounded: bool) -> TextRun {
+        let regional = |value: &Option<Atom>| {
+            value
+                .as_deref()
+                .filter(|value| !bounded || regional_language_admitted(value))
+                .map(str::to_string)
+        };
         let family = Some(self.family.to_string());
         TextRun {
             bold: self.bold,
@@ -1920,8 +1937,8 @@ impl RunProperties {
                 space: 0.0,
             }),
             lang: self.lang.as_deref().map(str::to_string),
-            lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
-            lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
+            lang_east_asia: regional(&self.lang_east_asia),
+            lang_bidi: regional(&self.lang_bidi),
             lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..TextRun::default()
         }
@@ -1940,7 +1957,7 @@ impl RunProperties {
     /// every run (RFC 5646 §4.4.1 lets an implementation bound tag length).
     fn class_language_fact(&self, language: Option<&str>) -> Option<String> {
         match language {
-            Some(tag) if tag.encode_utf16().count() > MAX_CANVAS_LANGUAGE_TAG_UNITS => {
+            Some(tag) if !utf16_units_within(tag, MAX_CANVAS_LANGUAGE_TAG_UNITS) => {
                 Some(String::new())
             }
             Some(tag) => Some(tag.to_string()),
@@ -1999,12 +2016,19 @@ const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
 /// their long-standing values. UTF-16 units never exceed UTF-8 bytes, so short
 /// values skip the count.
 fn regional_language_admitted(value: &str) -> bool {
-    value.len() <= MAX_CANVAS_LANGUAGE_TAG_UNITS
-        || value.encode_utf16().count() <= MAX_CANVAS_LANGUAGE_TAG_UNITS
+    utf16_units_within(value, MAX_CANVAS_LANGUAGE_TAG_UNITS)
 }
 
-fn admitted_regional_language(value: String) -> Option<String> {
-    regional_language_admitted(&value).then_some(value)
+/// Whether `value` is at most `limit` UTF-16 units, counting no further than
+/// one unit past the limit so an oversized value costs a bounded scan.
+fn utf16_units_within(value: &str, limit: usize) -> bool {
+    value.len() <= limit || {
+        let mut units = 0usize;
+        value.chars().all(|c| {
+            units += c.len_utf16();
+            units <= limit
+        })
+    }
 }
 
 fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
@@ -2157,8 +2181,7 @@ thread_local! {
 /// (`RunProperties::names_language`), so every class keeps an explicit fact.
 fn canvas_language_atom(fonts: &FontFaces, tag: &str) -> Atom {
     // UTF-16 units never exceed UTF-8 bytes, so short tags skip the count.
-    if tag.len() > MAX_CANVAS_LANGUAGE_TAG_UNITS
-        && tag.encode_utf16().count() > MAX_CANVAS_LANGUAGE_TAG_UNITS
+    if !utf16_units_within(tag, MAX_CANVAS_LANGUAGE_TAG_UNITS)
     {
         fonts.atom("")
     } else {
@@ -2390,5 +2413,24 @@ pub(super) fn libreoffice_automatic_color(background: &str) -> &'static str {
         "ffffff"
     } else {
         "000000"
+    }
+}
+
+#[cfg(test)]
+mod language_bound_tests {
+    use super::*;
+
+    #[test]
+    fn utf16_bound_counts_units_not_bytes_and_stops_early() {
+        assert!(utf16_units_within(&"a".repeat(64), 64));
+        assert!(!utf16_units_within(&"a".repeat(65), 64));
+        // BMP scalars are one unit though three bytes: units, not bytes, count.
+        assert!(utf16_units_within(&"\u{3042}".repeat(64), 64));
+        assert!(!utf16_units_within(&"\u{3042}".repeat(65), 64));
+        // Astral scalars are two units each.
+        assert!(utf16_units_within(&"\u{1d11e}".repeat(32), 64));
+        assert!(!utf16_units_within(&"\u{1d11e}".repeat(33), 64));
+        assert!(regional_language_admitted("ja-JP"));
+        assert!(!regional_language_admitted(&"x".repeat(10_000)));
     }
 }
