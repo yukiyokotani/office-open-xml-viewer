@@ -320,6 +320,41 @@ fn fields_and_ruby_bases_take_the_language_of_their_own_text() {
 }
 
 #[test]
+fn a_mixed_class_ruby_base_takes_a_language_its_classes_share() {
+    // Latin and Asian classes naming one tag (ja-JP): the base `a字` keeps it.
+    let same = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="ja" fo:country="JP" style:language-asian="ja" style:country-asian="JP" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+    let base = |automatic: &'static str| {
+        let document = read_fixture(Fixture {
+            automatic,
+            body: "<text:p><text:span text:style-name=\"T\"><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+            ..Fixture::default()
+        });
+        let runs: Vec<(String, Option<String>, bool)> = text_runs(paragraphs(&document.body)[0])
+            .iter()
+            .map(|run| {
+                (
+                    run.text.clone(),
+                    run.lang_script_class.clone(),
+                    run.ruby.is_some(),
+                )
+            })
+            .collect();
+        runs
+    };
+    // One run, one annotation, the shared tag (the complex class, absent
+    // from the base, does not take part).
+    assert_eq!(
+        base(same),
+        [("a\u{5B57}".to_string(), Some("ja-JP".to_string()), true)]
+    );
+    // Classes naming different languages: no one language.
+    assert_eq!(
+        base(THREE_LANGUAGES),
+        [("a\u{5B57}".to_string(), Some(String::new()), true)]
+    );
+}
+
+#[test]
 fn class_language_tags_carry_script_and_rfc_language_tags() {
     let automatic = r#"<style:style style:name="S" style:family="text"><style:text-properties fo:language="sr" fo:script="latn" fo:country="rs" style:language-asian="zh" style:script-asian="Hant" style:country-asian="TW"/></style:style><style:style style:name="F" style:family="text"><style:text-properties fo:language="sl" fo:country="SI" style:rfc-language-tag="sl-rozaj"/></style:style><style:style style:name="N" style:family="text" style:parent-style-name="R"><style:text-properties fo:language="de" fo:country="DE"/></style:style>"#;
     // R is a common style: N, an automatic style, inherits from it.

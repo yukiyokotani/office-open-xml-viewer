@@ -1037,6 +1037,20 @@ impl<'a> Reader<'a> {
                         Item::Ruby { base, .. } => Some(text_class(base, previous_class)),
                         Item::Run(_) | Item::NoteReference { .. } => None,
                     };
+                    // The classes a base of several classes holds (Table 22
+                    // classes of its classified characters).
+                    let mixed_classes = match (&own_class, &inline.items[item as usize]) {
+                        (Some(None), Item::Ruby { base, .. }) => {
+                            let mut classes: Vec<ScriptClass> = Vec::new();
+                            for class in base.chars().filter_map(table_22) {
+                                if !classes.contains(&class) {
+                                    classes.push(class);
+                                }
+                            }
+                            classes
+                        }
+                        _ => Vec::new(),
+                    };
                     let language = match own_class {
                         None => None,
                         Some(Some(class)) if class == previous_class => None,
@@ -1049,9 +1063,37 @@ impl<'a> Reader<'a> {
                             }
                             Some(languages[&key].clone().unwrap_or_default())
                         }
-                        // Text of several classes in one run names no one
-                        // language.
-                        Some(None) => Some(String::new()),
+                        // A ruby base of several classes is one run with one
+                        // annotation (ODF 1.3 Part 3 §6.4 text:ruby). Where
+                        // every class it holds names the same language, that
+                        // is the base's language; classes naming different
+                        // languages (or one naming none) leave it no one
+                        // language. Bounded policy: per-range languages
+                        // inside one ruby base are not represented, since a
+                        // ruby base is shaped as one run.
+                        Some(None) => {
+                            let mut shared: Option<Option<String>> = None;
+                            let mut agree = true;
+                            for &class in &mixed_classes {
+                                let key = (context, class);
+                                if let std::collections::hash_map::Entry::Vacant(entry) =
+                                    languages.entry(key)
+                                {
+                                    entry.insert(self.class_language(contexts, context, class)?);
+                                }
+                                let language = &languages[&key];
+                                match &shared {
+                                    None => shared = Some(language.clone()),
+                                    Some(first) if first == language => {}
+                                    Some(_) => agree = false,
+                                }
+                            }
+                            Some(if agree {
+                                shared.flatten().unwrap_or_default()
+                            } else {
+                                String::new()
+                            })
+                        }
                     };
                     let properties = &cache[&key];
                     let run = self.item_run(
