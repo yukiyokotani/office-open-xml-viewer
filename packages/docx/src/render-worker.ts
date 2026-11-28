@@ -78,6 +78,7 @@ import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import {
   renderWorkerLayoutMeta,
+  renderWorkerCommentAnchors,
   projectRenderWorkerLayoutMeta,
   type RenderWorkerReviewIndexInput,
 } from './render-worker-metadata.js';
@@ -659,6 +660,22 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
       post({ type: 'runsCollected', id, runs });
+      return;
+    }
+    if (req.type === 'collectCommentAnchors') {
+      if (!doc || !reviewIndexInput) throw new Error('Document not loaded');
+      const anchors = renderWorkerCommentAnchors(
+        doc,
+        reviewIndexInput,
+        req.currentDateMs,
+        req.showTrackedChanges,
+      );
+      post({
+        type: 'commentAnchorsCollected',
+        id,
+        ranges: anchors.commentAnchorRanges ?? [],
+        placements: anchors.commentAnchorPlacements,
+      });
       return;
     }
     if (req.type === 'hitTestElement') {

@@ -20,7 +20,7 @@ import type {
   ReadOnlyCommentThreadGeometry,
 } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
 import { relativeElementRect } from '@silurus/ooxml-core/internal/dom-geometry';
-import { resolveCommentAnchorRuns, type CommentAnchorRange } from './comments.js';
+import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage, type CommentAnchorRange } from './comments.js';
 import { sourceKey } from './layout/source-key.js';
 import type { DocxTextRunInfo } from './renderer.js';
 import type { DocComment } from './types.js';
@@ -34,8 +34,11 @@ export interface DocxCommentMarginModel {
   readonly comments: readonly DocComment[];
   readonly anchors: readonly CommentAnchorRange[];
   /** The page the margin is built for. A range decided for the whole
-   * document (CommentAnchorRange.cardOwner) carries its card only on its
-   * `cardPageIndex`; without a page index every page that shows it does. */
+   * document (CommentAnchorRange.cardOwner) carries its card only on the
+   * page it was placed on (CommentAnchorPlacement.cardPageIndex), and an
+   * anchor shown at one end of a run that crosses a page break is shown on
+   * the page that holds that end; without a page index every page that
+   * shows the range does both. */
   readonly pageIndex?: number;
 }
 
@@ -55,6 +58,7 @@ interface ResolvedPageCommentAnchor {
 export function resolvePageCommentAnchors(
   anchors: readonly Readonly<CommentAnchorRange>[],
   runs: readonly Readonly<DocxTextRunInfo>[],
+  pageIndex?: number,
 ): readonly ResolvedPageCommentAnchor[] {
   const pageSources = new Set<string>();
   for (const run of runs) {
@@ -68,7 +72,7 @@ export function resolvePageCommentAnchors(
       (anchor.geometryFallback !== undefined &&
         pageSources.has(sourceKey(anchor.geometryFallback.source)));
     if (!mayResolve) continue;
-    const resolved = resolveCommentAnchorRuns(anchor, runs);
+    const resolved = resolveCommentAnchorRunsOnPage(anchor, runs, pageIndex);
     if (resolved.length === 0) continue;
     const boxes = overlayBoxes(resolved);
     if (boxes.length > 0) pageAnchors.push({ anchor, runs: resolved, boxes });
@@ -179,7 +183,7 @@ export function buildDocxCommentMargin(
     readOnlyCommentAuthorAccent(thread.root.author),
   ]));
   const visibleThreadIds = new Set(threads.map((thread) => thread.root.id));
-  const resolvedPageAnchors = resolvePageCommentAnchors(model.anchors, runs);
+  const resolvedPageAnchors = resolvePageCommentAnchors(model.anchors, runs, model.pageIndex);
   const resolvedAnchorSet = new Set(resolvedPageAnchors.map(({ anchor }) => anchor));
   const pageSources = new Set<string>();
   for (const run of runs) {
@@ -192,8 +196,9 @@ export function buildDocxCommentMargin(
   // other page draws the card; nothing is decided per page.
   for (const anchor of model.anchors) {
     if (!anchor.cardOwner || !visibleThreadIds.has(anchor.commentId)) continue;
-    if (model.pageIndex === undefined || anchor.cardPageIndex === undefined
-      || anchor.cardPageIndex === model.pageIndex) cardAnchor.set(anchor.commentId, anchor);
+    const cardPageIndex = commentAnchorPlacement(anchor)?.cardPageIndex;
+    if (model.pageIndex === undefined || cardPageIndex === undefined
+      || cardPageIndex === model.pageIndex) cardAnchor.set(anchor.commentId, anchor);
     else cardElsewhere.add(anchor.commentId);
   }
   for (const anchor of model.anchors) {
@@ -209,7 +214,7 @@ export function buildDocxCommentMargin(
     const mayBeHere = pageSources.has(sourceKey(anchor.source))
       || pageSources.has(sourceKey(anchor.reference.source))
       || (anchor.geometryFallback !== undefined && pageSources.has(sourceKey(anchor.geometryFallback.source)));
-    if (!mayBeHere || resolveCommentAnchorRuns(anchor, runs).length === 0) cardElsewhere.add(id);
+    if (!mayBeHere || resolveCommentAnchorRunsOnPage(anchor, runs, model.pageIndex).length === 0) cardElsewhere.add(id);
   }
   const anchorRects = new Map<string, ReadOnlyCommentRect[]>();
   const markerAnchorById = new Map<string, Readonly<{

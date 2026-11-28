@@ -5,6 +5,7 @@ import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocComment, DocxClipRegion, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
 import type { ReviewAnchorProjectionOptions } from './review-projection.js';
+import type { SplitRunIndex } from './layout/text-index.js';
 
 export interface CommentAnchorRange {
   readonly commentId: string;
@@ -27,22 +28,82 @@ export interface CommentAnchorRange {
    * earlier page of the same paragraph, shows nothing of it and does not
    * resolve it from the reference boundary. */
   readonly coveredGeometry?: true;
-  /** For a point anchor (equal bounds) collected with its run index: the
-   * source run the point shows, chosen against every laid-out run of its
-   * paragraph (the first at or after the point, else the last before it).
-   * A page that does not hold that run, such as the page before it of the
-   * same paragraph, shows nothing of the point. */
-  readonly pointRunIndex?: number;
   /** Set on the one range of a comment that carries the comment's margin
    * card and marker: the first, in document order, of which a page shows
    * something (assignCommentCardOwners). Absent for ranges not decided
    * against a laid-out document; the card then stands with the first range
    * a page shows. */
   readonly cardOwner?: true;
-  /** With `cardOwner`: the first page that shows something of this range,
+}
+
+/** Where one laid-out document places an anchor. It belongs to the layout
+ * the anchor was collected against and is kept beside the anchor
+ * (commentAnchorPlacement), not on it: another layout of the same document
+ * (the tracked-change view) collects its own anchors and places them anew. */
+export interface CommentAnchorPlacement {
+  /** For an anchor none of whose covered runs has geometry (a point, or a
+   * range of content that is not laid out): the one run that stands in for
+   * it, chosen against every laid-out run of the document. `from` names the
+   * anchor's source it lies in (its own, its reference's or its geometry
+   * fallback's). A page that does not hold that run shows nothing of the
+   * anchor. */
+  readonly standIn?: Readonly<{
+    from: 'anchor' | 'reference' | 'fallback';
+    runIndex: number;
+    /** When the run crosses a page break: the pages that hold a fragment
+     * of it other than the one next to the anchor (the run's first
+     * fragment for a run that follows the anchor, its last for one that
+     * precedes it). They show nothing of the anchor. */
+    otherPages?: readonly number[];
+  }>;
+  /** With `cardOwner`: the first page that shows something of the range,
    * where the card and marker stand. Later pages that show the range, such
    * as the next page of a paragraph that crosses a page break, tint it only. */
   readonly cardPageIndex?: number;
+}
+
+const PLACEMENTS = new WeakMap<Readonly<CommentAnchorRange>, CommentAnchorPlacement>();
+const ADOPTED = new WeakSet<readonly Readonly<CommentAnchorRange>[]>();
+const RUNS_PAGE = new WeakMap<readonly Readonly<DocxTextRunInfo>[], number>();
+
+/** The placement of an anchor in the layout it was collected against;
+ * undefined for an anchor that was not decided against a laid-out document. */
+export function commentAnchorPlacement(
+  anchor: Readonly<CommentAnchorRange>,
+): CommentAnchorPlacement | undefined {
+  return PLACEMENTS.get(anchor);
+}
+
+/** The placements of `anchors`, index-aligned, to send with them to another
+ * realm (the render worker's metadata); undefined when none has one. */
+export function commentAnchorPlacementsOf(
+  anchors: readonly Readonly<CommentAnchorRange>[],
+): (CommentAnchorPlacement | null)[] | undefined {
+  const placements = anchors.map((anchor) => PLACEMENTS.get(anchor) ?? null);
+  return placements.some((placement) => placement !== null) ? placements : undefined;
+}
+
+/** Join anchors received from another realm with their placements
+ * (commentAnchorPlacementsOf). Done once for an array of anchors. */
+export function adoptCommentAnchorPlacements(
+  anchors: readonly Readonly<CommentAnchorRange>[],
+  placements: readonly (CommentAnchorPlacement | null)[] | undefined,
+): void {
+  if (!placements || ADOPTED.has(anchors)) return;
+  ADOPTED.add(anchors);
+  anchors.forEach((anchor, index) => {
+    const placement = placements[index];
+    if (placement) PLACEMENTS.set(anchor, placement);
+  });
+}
+
+/** Record the page that `runs` were collected for, so that an anchor joined
+ * to them (resolveCommentAnchorRuns) is placed on that page. */
+export function noteCollectedRunsPage(
+  runs: readonly Readonly<DocxTextRunInfo>[],
+  pageIndex: number,
+): void {
+  RUNS_PAGE.set(runs, pageIndex);
 }
 
 export interface CommentAnchorPoint {
@@ -245,7 +306,8 @@ function nearestProjectedText(
  * range crosses a page break. `sourcePages` names the pages that hold
  * runs of each paragraph source and `runsForPage` projects a page; only the
  * pages of undecided ranges are projected, each once. Ranges are returned in
- * their order, the owners marked (`cardOwner`). */
+ * their order, the owners marked (`cardOwner`) and placed on their page
+ * (CommentAnchorPlacement.cardPageIndex). */
 export function assignCommentCardOwners(
   anchors: readonly CommentAnchorRange[],
   sourcePages: ReadonlyMap<string, readonly number[]>,
@@ -269,7 +331,7 @@ export function assignCommentCardOwners(
       for (const page of [...pages].sort((left, right) => left - right)) {
         let runs = projected.get(page);
         if (!runs) projected.set(page, runs = runsForPage(page));
-        if (overlayBoxes(resolveCommentAnchorRuns(anchor, runs)).length > 0) {
+        if (overlayBoxes(resolveCommentAnchorRunsOnPage(anchor, runs, page)).length > 0) {
           owners.set(index, page);
           break owner;
         }
@@ -277,10 +339,13 @@ export function assignCommentCardOwners(
     }
   }
   if (owners.size === 0) return anchors;
-  return Object.freeze(anchors.map((anchor, index) => (
-    owners.has(index)
-      ? Object.freeze({ ...anchor, cardOwner: true as const, cardPageIndex: owners.get(index)! })
-      : anchor)));
+  return Object.freeze(anchors.map((anchor, index) => {
+    const cardPageIndex = owners.get(index);
+    if (cardPageIndex === undefined) return anchor;
+    const owner = Object.freeze({ ...anchor, cardOwner: true as const });
+    PLACEMENTS.set(owner, Object.freeze({ ...PLACEMENTS.get(anchor), cardPageIndex }));
+    return owner;
+  }));
 }
 
 /** Resolve one document story's §17.13.4 marks. Kept module-public for focused
@@ -290,11 +355,13 @@ export function collectStoryCommentRanges(
   paragraphs: readonly ParagraphVisit[],
   validCommentIds: ReadonlySet<string>,
   renderedRuns: readonly Readonly<DocxTextRunInfo>[] = [],
+  splitRuns?: SplitRunIndex,
 ): CommentAnchorRange[] {
   return collectIndexedStoryCommentRanges(
     paragraphs,
     validCommentIds,
     indexRenderedRuns(renderedRuns),
+    splitRuns,
   );
 }
 
@@ -302,6 +369,7 @@ function collectIndexedStoryCommentRanges(
   paragraphs: readonly ParagraphVisit[],
   validCommentIds: ReadonlySet<string>,
   renderedRunIndex: RenderedRunIndex,
+  splitRuns?: SplitRunIndex,
 ): CommentAnchorRange[] {
   const validByValue = new Map<string, string>();
   const ambiguousValues = new Set<string>();
@@ -357,6 +425,8 @@ function collectIndexedStoryCommentRanges(
       const fallbackOrigin = start.paragraphIndex === end.paragraphIndex
         && start.boundary === end.boundary ? start : reference;
       const geometryFallback = nearestProjectedText(fallbackOrigin, projectedTextIndex);
+      const fallbackSide = geometryFallback && compareMarkLocations(geometryFallback, fallbackOrigin) < 0
+        ? 'last' as const : 'first' as const;
       // One segment per paragraph of the range. A segment that covers no run
       // (the range starts at the end of a paragraph, ends at the start of
       // one, or crosses an empty one) marks nothing beside the segments that
@@ -378,12 +448,12 @@ function collectIndexedStoryCommentRanges(
             coveredGeometry = rendered.has(runIndex);
           }
         }
-        segments.push(frozenRange(id, {
+        segments.push(placed(frozenRange(id, {
           paragraphIndex: index,
           source: visit.source,
           boundary: from,
           runCount: normalizedBoundary(visit.paragraph, visit.paragraph.runs.length),
-        }, reference, geometryFallback, Math.max(from, to), coveredGeometry));
+        }, reference, geometryFallback, Math.max(from, to), coveredGeometry), fallbackSide));
       }
       const covering = segments.filter((segment) => segment.endRunIndex > segment.startRunIndex);
       ranges.push(...(covering.length > 0 ? covering : segments.slice(0, 1)));
@@ -397,26 +467,79 @@ function collectIndexedStoryCommentRanges(
     if (start && end) continue;
     const point = loneBoundary ?? reference;
     const geometryFallback = nearestProjectedText(point, projectedTextIndex);
-    ranges.push(frozenRange(id, point, reference, geometryFallback));
+    ranges.push(placed(
+      frozenRange(id, point, reference, geometryFallback),
+      geometryFallback && compareMarkLocations(geometryFallback, point) < 0 ? 'last' : 'first',
+    ));
   }
-  return ranges.map((range) => withPointRun(range, renderedRunIndex));
+  return ranges;
+
+  function placed(range: CommentAnchorRange, fallbackSide: 'first' | 'last'): CommentAnchorRange {
+    const standIn = standInRun(range, renderedRunIndex, splitRuns, fallbackSide);
+    if (standIn) PLACEMENTS.set(range, Object.freeze({ standIn }));
+    return range;
+  }
 }
 
-/** Fix a point anchor's run against the whole laid-out document
- * (CommentAnchorRange.pointRunIndex), as resolveCommentAnchorRuns would
- * choose it if every run of the paragraph were on one page. */
-function withPointRun(range: CommentAnchorRange, renderedRunIndex: RenderedRunIndex): CommentAnchorRange {
-  if (range.startRunIndex !== range.endRunIndex) return range;
-  const rendered = renderedRunIndex.get(sourceKey(range.source));
-  if (!rendered || rendered.size === 0) return range;
+/** The run of `source` nearest `boundary` among the laid-out ones: the first
+ * at or after it or the last before it, the `prefer`red side first. `side`
+ * tells which fragment of that run lies next to the boundary. */
+function nearestLaidOutRun(
+  source: Readonly<DocxStorySource>,
+  boundary: number,
+  prefer: 'following' | 'preceding',
+  renderedRunIndex: RenderedRunIndex,
+): Readonly<{ runIndex: number; side: 'first' | 'last' }> | undefined {
   let following: number | undefined;
   let preceding: number | undefined;
-  for (const index of rendered) {
-    if (index >= range.startRunIndex) {
+  for (const index of renderedRunIndex.get(sourceKey(source)) ?? []) {
+    if (index >= boundary) {
       if (following === undefined || index < following) following = index;
     } else if (preceding === undefined || index > preceding) preceding = index;
   }
-  return Object.freeze({ ...range, pointRunIndex: (following ?? preceding)! });
+  const first = following === undefined ? undefined : { runIndex: following, side: 'first' as const };
+  const last = preceding === undefined ? undefined : { runIndex: preceding, side: 'last' as const };
+  return prefer === 'following' ? first ?? last : last ?? first;
+}
+
+/** Fix, against the whole laid-out document, the run that stands in for an
+ * anchor none of whose covered runs has geometry
+ * (CommentAnchorPlacement.standIn), in the order resolveCommentAnchorRuns
+ * chooses it on one page: the run at a point anchor's own boundary, then
+ * the run at the authored reference, then the geometry fallback. A run that
+ * crosses a page break stands in with the fragment next to the anchor only. */
+function standInRun(
+  range: CommentAnchorRange,
+  renderedRunIndex: RenderedRunIndex,
+  splitRuns: SplitRunIndex | undefined,
+  fallbackSide: 'first' | 'last',
+): CommentAnchorPlacement['standIn'] {
+  if (range.coveredGeometry) return undefined;
+  const fallback = range.geometryFallback;
+  const chosen = (range.startRunIndex === range.endRunIndex
+    ? at('anchor', range.source, nearestLaidOutRun(range.source, range.startRunIndex, 'following', renderedRunIndex))
+    : undefined)
+    ?? at('reference', range.reference.source, nearestLaidOutRun(
+      range.reference.source, range.reference.runIndex, range.reference.affinity, renderedRunIndex))
+    ?? (fallback && renderedRunIndex.get(sourceKey(fallback.source))?.has(fallback.sourceRunIndex)
+      ? at('fallback', fallback.source, { runIndex: fallback.sourceRunIndex, side: fallbackSide })
+      : undefined);
+  return chosen;
+
+  function at(
+    from: 'anchor' | 'reference' | 'fallback',
+    source: Readonly<DocxStorySource>,
+    run: Readonly<{ runIndex: number; side: 'first' | 'last' }> | undefined,
+  ): CommentAnchorPlacement['standIn'] {
+    if (!run) return undefined;
+    const split = splitRuns?.get(sourceKey(source))?.get(run.runIndex);
+    const otherPages = split ? (run.side === 'first' ? split.continued : split.continues) : undefined;
+    return Object.freeze({
+      from,
+      runIndex: run.runIndex,
+      ...(otherPages && otherPages.length > 0 ? { otherPages: Object.freeze([...otherPages]) } : {}),
+    });
+  }
 }
 
 /** Resolve comment ranges in every retained story (body, headers, footers,
@@ -425,6 +548,7 @@ export function collectLayoutSourceCommentRanges(
   comments: readonly Readonly<{ id: string }>[],
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  splitRuns?: SplitRunIndex,
 ): CommentAnchorRange[] {
   const validCommentIds = new Set(comments.map(({ id }) => id));
   const byStory = new Map<string, ParagraphVisit[]>();
@@ -437,7 +561,7 @@ export function collectLayoutSourceCommentRanges(
     visits.push({ paragraph: block, source: blockSource });
   }
   return [...byStory.values()].flatMap((paragraphs) =>
-    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex));
+    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex, splitRuns));
 }
 
 /** Avoid any story walk for the common comment-free document. */
@@ -448,7 +572,7 @@ export function collectLayoutSourceCommentRangesIfPresent(
   options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  const collected = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  const collected = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex, options.splitRuns);
   const completed = options.completedSourceKeys;
   const ranges = completed === undefined ? collected : collected.filter((range) => {
     const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
@@ -494,6 +618,18 @@ export function resolveCommentAnchorRuns(
   anchor: Readonly<CommentAnchorRange>,
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxTextRunInfo>[] {
+  return resolveCommentAnchorRunsOnPage(anchor, runs, RUNS_PAGE.get(runs));
+}
+
+/** resolveCommentAnchorRuns for the runs of page `pageIndex`. An anchor
+ * placed against a laid-out document (CommentAnchorPlacement.standIn) is
+ * joined to the run fixed there, on the page that holds the fragment next to
+ * the anchor; without a page index every page that holds the run shows it. */
+export function resolveCommentAnchorRunsOnPage(
+  anchor: Readonly<CommentAnchorRange>,
+  runs: readonly Readonly<DocxTextRunInfo>[],
+  pageIndex: number | undefined,
+): readonly Readonly<DocxTextRunInfo>[] {
   const addressable = runs.filter((run) =>
     run.sourceRunIndex !== undefined && sameStorySource(run.source, anchor.source));
   const covered = addressable.filter((run) =>
@@ -507,8 +643,13 @@ export function resolveCommentAnchorRuns(
   // A lone rangeStart/rangeEnd or reference-only comment is a point anchor at
   // the range's own source/boundary (§17.13.4.3/.4). The separately-authored
   // commentReference may be elsewhere and must not displace that point.
-  if (anchor.pointRunIndex !== undefined) {
-    return addressable.filter((run) => run.sourceRunIndex === anchor.pointRunIndex);
+  const standIn = PLACEMENTS.get(anchor)?.standIn;
+  if (standIn) {
+    if (pageIndex !== undefined && standIn.otherPages?.includes(pageIndex)) return [];
+    const source = standIn.from === 'anchor' ? anchor.source
+      : standIn.from === 'reference' ? anchor.reference.source : anchor.geometryFallback?.source;
+    return source === undefined ? [] : runs.filter((run) =>
+      run.sourceRunIndex === standIn.runIndex && sameStorySource(run.source, source));
   }
   if (anchor.startRunIndex === anchor.endRunIndex && addressable.length > 0) {
     const followingIndex = addressable.reduce<number | undefined>((nearest, run) => {
@@ -590,6 +731,18 @@ export function resolveDocxCommentThreads(
   runs: readonly Readonly<DocxTextRunInfo>[],
   options: ResolveDocxCommentThreadsOptions = {},
 ): readonly Readonly<ResolvedDocxCommentThread>[] {
+  return resolveDocxCommentThreadsOnPage(comments, anchors, runs, RUNS_PAGE.get(runs), options);
+}
+
+/** resolveDocxCommentThreads for the runs of page `pageIndex`
+ * (resolveCommentAnchorRunsOnPage). */
+export function resolveDocxCommentThreadsOnPage(
+  comments: readonly Readonly<DocComment>[],
+  anchors: readonly Readonly<CommentAnchorRange>[],
+  runs: readonly Readonly<DocxTextRunInfo>[],
+  pageIndex: number | undefined,
+  options: ResolveDocxCommentThreadsOptions = {},
+): readonly Readonly<ResolvedDocxCommentThread>[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const roots = comments.filter((comment) => comment.parentId === undefined);
   const rootById = new Map(roots.map((root) => [root.id, root]));
@@ -628,7 +781,7 @@ export function resolveDocxCommentThreads(
       (anchor.geometryFallback !== undefined &&
         pageSources.has(sourceKey(anchor.geometryFallback.source)));
     if (!mayResolve) continue;
-    const resolvedRuns = resolveCommentAnchorRuns(anchor, runs);
+    const resolvedRuns = resolveCommentAnchorRunsOnPage(anchor, runs, pageIndex);
     if (resolvedRuns.length === 0) continue;
     // An anchor whose content the page hides whole (clipped away) is not
     // visible on it: it has no highlight, and is no anchor of the page.

@@ -12,4 +12,9 @@ export interface ReviewAnchorProjectionOptions {
     sourcePages: ReadonlyMap<string, readonly number[]>;
     runsForPage: (pageIndex: number) => readonly Readonly<import('./types.js').DocxTextRunInfo>[];
   }>;
+  /** The runs of the laid-out document that cross a page break
+   * (text-index.ts ReviewProjectionIndex.splitRuns): a comment shown at one
+   * end of such a run stands on the page that holds that end. Comment
+   * anchors only. */
+  readonly splitRuns?: import('./layout/text-index.js').SplitRunIndex;
 }

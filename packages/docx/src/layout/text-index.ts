@@ -986,7 +986,19 @@ export interface ReviewProjectionIndex {
   readonly completedSourceKeys: ReadonlySet<string>;
   /** The pages, in order, that hold laid-out runs of each paragraph source. */
   readonly sourcePages: ReadonlyMap<string, readonly number[]>;
+  /** The runs that a paragraph crossing pages holds on more than one of
+   * them, by paragraph source then run index. `continued` lists the pages
+   * whose fragment of the run follows an earlier one (the run starts on an
+   * earlier page), `continues` those whose fragment is followed by a later
+   * one (the run ends on a later page). A paragraph repeated whole on
+   * several pages (a header) splits nothing. */
+  readonly splitRuns: SplitRunIndex;
 }
+
+export type SplitRunIndex = ReadonlyMap<string, ReadonlyMap<number, Readonly<{
+  continued: readonly number[];
+  continues: readonly number[];
+}>>>;
 
 /** Build every index needed by comment/revision projection in one canonical
  * geometry traversal. Progressive publications call this only when review data
@@ -997,6 +1009,10 @@ export function reviewProjectionIndexForDocument(
   const renderedRunIndex = new Map<string, Set<number>>();
   const completedSourceKeys = new Set<string>();
   const sourcePages = new Map<string, number[]>();
+  const splitRuns = new Map<string, Map<number, { continued: number[]; continues: number[] }>>();
+  // Paragraphs whose last fragment so far continues: run index -> the last
+  // page that holds a fragment of it.
+  const continuing = new Map<string, Map<number, number>>();
   for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
     const page = pageGeometryIndex(layout, pageIndex, {
       collectTextRuns: false,
@@ -1011,10 +1027,31 @@ export function reviewProjectionIndexForDocument(
       const pages = sourcePages.get(key);
       if (pages) pages.push(pageIndex);
       else sourcePages.set(key, [pageIndex]);
+      const earlier = continuing.get(key);
+      if (earlier) {
+        for (const index of pageIndices) {
+          const previousPage = earlier.get(index);
+          if (previousPage === undefined) continue;
+          const bySource = splitRuns.get(key) ?? new Map<number, { continued: number[]; continues: number[] }>();
+          if (!splitRuns.has(key)) splitRuns.set(key, bySource);
+          const split = bySource.get(index) ?? { continued: [], continues: [] };
+          if (!bySource.has(index)) bySource.set(index, split);
+          split.continued.push(pageIndex);
+          split.continues.push(previousPage);
+        }
+      }
+      if (!page.completedParagraphSources.has(key)) {
+        const held = earlier ?? new Map<number, number>();
+        if (!earlier) continuing.set(key, held);
+        for (const index of pageIndices) held.set(index, pageIndex);
+      }
     }
-    for (const key of page.completedParagraphSources) completedSourceKeys.add(key);
+    for (const key of page.completedParagraphSources) {
+      completedSourceKeys.add(key);
+      continuing.delete(key);
+    }
   }
-  return Object.freeze({ renderedRunIndex, completedSourceKeys, sourcePages });
+  return Object.freeze({ renderedRunIndex, completedSourceKeys, sourcePages, splitRuns });
 }
 
 /** Index selectable drawings and inline image/chart placements in page paint order. */

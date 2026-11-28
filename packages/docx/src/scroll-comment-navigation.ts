@@ -1,6 +1,7 @@
 import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
-import { resolveCommentAnchorRuns } from './comments';
+import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage } from './comments';
+import { overlayBoxes } from './overlay-geometry';
 
 type ScrollBehavior = { behavior?: 'auto' | 'smooth' };
 
@@ -16,8 +17,12 @@ interface CommentNavigationHooks {
 }
 
 /** DOCX anchor-to-page index for application-owned comment list navigation.
- * Pages are indexed in order because repeated header anchors must resolve to
- * their earliest occurrence; run collection is shared by concurrent requests. */
+ * A comment is reached where it is seen: on the page that carries its card
+ * (CommentAnchorPlacement.cardPageIndex), else on the first page that shows
+ * something of an anchor of it, at the first run with a visible part. A run
+ * its clips hide whole is not a destination. Pages are indexed in order
+ * because repeated header anchors must resolve to their earliest occurrence;
+ * run collection is shared by concurrent requests. */
 export class DocxScrollCommentNavigation {
   private readonly pageById = new Map<string, number>();
   private readonly runsByPage = new Map<number, {
@@ -48,7 +53,8 @@ export class DocxScrollCommentNavigation {
     anchors: ReturnType<DocxDocument['commentAnchorRanges']>): void {
     if (this.indexedPages.has(page)) return;
     for (const anchor of anchors) {
-      if (!this.pageById.has(anchor.commentId) && resolveCommentAnchorRuns(anchor, runs).length > 0) {
+      if (!this.pageById.has(anchor.commentId)
+        && overlayBoxes(resolveCommentAnchorRunsOnPage(anchor, runs, page)).length > 0) {
         this.pageById.set(anchor.commentId, page);
       }
     }
@@ -96,7 +102,14 @@ export class DocxScrollCommentNavigation {
     if (requestedPage !== undefined && (!Number.isInteger(requestedPage) || requestedPage < 0)) {
       return false;
     }
-    let page = requestedPage ?? this.pageById.get(commentId);
+    const cardPage = (): number | undefined => {
+      for (const anchor of anchors) {
+        const page = commentAnchorPlacement(anchor)?.cardPageIndex;
+        if (page !== undefined) return page;
+      }
+      return undefined;
+    };
+    let page = requestedPage ?? cardPage() ?? this.pageById.get(commentId);
     const scanAvailablePages = async (): Promise<void> => {
       const allAnchors = doc.commentAnchorRanges();
       while (page === undefined && this.frontier < doc.pageCount) {
@@ -121,15 +134,18 @@ export class DocxScrollCommentNavigation {
       this.runsByPage.clear();
       this.indexedPages.clear();
       this.frontier = 0;
-      page = requestedPage;
-      if (requestedPage === undefined && anchors.length > 0) await scanAvailablePages();
+      page = requestedPage ?? cardPage();
+      if (page === undefined && anchors.length > 0) await scanAvailablePages();
     }
     if (anchors.length === 0 || page === undefined ||
         (requestedPage !== undefined && requestedPage >= doc.pageCount)) return false;
     const runs = await this.runsForPage(page, doc);
     if (this.hooks.destroyed()) throw new Error('DocxScrollViewer is destroyed');
     if (this.hooks.document() !== doc || generation !== this.generation || !runs) return false;
-    const target = anchors.flatMap((anchor) => resolveCommentAnchorRuns(anchor, runs))[0];
+    const shownPage = page;
+    const target = anchors
+      .flatMap((anchor) => resolveCommentAnchorRunsOnPage(anchor, runs, shownPage))
+      .find((run) => overlayBoxes([run]).length > 0);
     if (!target) return false;
     this.hooks.select(commentId, page, target, opts);
     return true;

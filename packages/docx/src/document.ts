@@ -88,8 +88,10 @@ import {
 } from './element-context.js';
 import type { DocxElementContext, DocxPagePoint } from './selection-context.js';
 import {
+  adoptCommentAnchorPlacements,
   collectLayoutSourceCommentRangesIfPresent,
-  resolveDocxCommentThreads,
+  noteCollectedRunsPage,
+  resolveDocxCommentThreadsOnPage,
   type CommentAnchorRange,
   type ResolvedDocxCommentThread,
   type ResolveDocxCommentThreadsOptions,
@@ -362,6 +364,10 @@ function sameLayoutView(
     && left.currentDateMs === right.currentDateMs
     && (left.showTrackedChanges === true) === (right.showTrackedChanges === true);
 }
+
+/** The comment anchors collected from a complete layout other than the
+ * active view's (DocxDocument._commentAnchorRangesForView). */
+const COMMENT_ANCHOR_RANGES_BY_LAYOUT = new WeakMap<object, readonly CommentAnchorRange[]>();
 
 /** Identity-stable empties for the two anchor projections.
  *  `commentAnchorRanges()` is polled per draw and consumers cache on identity
@@ -1318,6 +1324,7 @@ export class DocxDocument {
       diagnostics: partial.diagnostics,
       resourceDiagnostics: partial.review?.resourceDiagnostics ?? this._meta?.resourceDiagnostics,
       commentAnchorRanges: partial.commentAnchorRanges,
+      commentAnchorPlacements: partial.commentAnchorPlacements,
       revisionAnchorRanges: partial.revisionAnchorRanges,
     };
     if (partial.review) {
@@ -1349,6 +1356,7 @@ export class DocxDocument {
         pageSizes: selected.pageSizes,
         bookmarkPages: selected.bookmarkPages,
         commentAnchorRanges: selected.commentAnchorRanges,
+        commentAnchorPlacements: selected.commentAnchorPlacements,
         revisionAnchorRanges: selected.revisionAnchorRanges,
       };
     }
@@ -1811,7 +1819,13 @@ export class DocxDocument {
    * before treating an empty or partial result as whole-document authority.
    */
   commentAnchorRanges(): readonly CommentAnchorRange[] {
-    if (this._meta) return this._meta.commentAnchorRanges ?? NO_COMMENT_ANCHOR_RANGES;
+    if (this._meta) {
+      const ranges = this._meta.commentAnchorRanges ?? NO_COMMENT_ANCHOR_RANGES;
+      // Where the worker's layout places each range travels beside the
+      // ranges; join the two once.
+      adoptCommentAnchorPlacements(ranges, this._meta.commentAnchorPlacements);
+      return ranges;
+    }
     if (!this._document || !this._source) return [];
     const comments = this._reviewSnapshot().comments;
     if (comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
@@ -1843,9 +1857,66 @@ export class DocxDocument {
           sourcePages: this._reviewProjectionIndex.sourcePages,
           runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
         },
+        splitRuns: this._reviewProjectionIndex.splitRuns,
       },
     );
     return this._commentAnchorRanges;
+  }
+
+  /** The comment anchors of the layout that `view` selects, placed against
+   * that layout: the active view's are `commentAnchorRanges()`; another
+   * view's (the tracked-change view of a document shown in its final state)
+   * are collected from its own layout, where other runs have geometry, and
+   * kept with it. */
+  private async _commentAnchorRangesForView(
+    view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
+  ): Promise<readonly CommentAnchorRange[]> {
+    const runtime = documentLayoutRuntimeOf(this);
+    const requested = normalizeLayoutOptions(
+      view.currentDate,
+      runtime.defaultCurrentDateMs,
+      view.showTrackedChanges === true,
+    );
+    const active = runtime.activeLayoutOptions
+      ?? normalizeLayoutOptions(undefined, runtime.defaultCurrentDateMs);
+    if (sameLayoutView(active, requested)) return this.commentAnchorRanges();
+    if (this._mode === 'worker') {
+      if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
+      const res = await this._bridge.request(
+        (id) => ({
+          type: 'collectCommentAnchors',
+          id,
+          currentDateMs: requested.currentDateMs,
+          showTrackedChanges: requested.showTrackedChanges === true,
+        }) satisfies RenderWorkerRequest,
+      );
+      const collected = res as Extract<RenderWorkerResponse, { type: 'commentAnchorsCollected' }>;
+      adoptCommentAnchorPlacements(collected.ranges, collected.placements);
+      return collected.ranges;
+    }
+    if (!this._document || !this._source) return [];
+    const comments = this._reviewSnapshot().comments;
+    if (comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
+    const services = runtime.services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    const store = layoutVariantStoreOf(services);
+    if (!store) throw new Error('Document layout variant store is not initialized');
+    const layout = store.layoutFor(requested);
+    let ranges = COMMENT_ANCHOR_RANGES_BY_LAYOUT.get(layout);
+    if (!ranges) {
+      const index = reviewProjectionIndexForDocument(layout);
+      ranges = collectLayoutSourceCommentRangesIfPresent(comments, this._source, index.renderedRunIndex, {
+        ...((this._layoutLifecycle?.complete ?? true) ? {} : { completedSourceKeys: index.completedSourceKeys }),
+        cardOwners: {
+          sourcePages: index.sourcePages,
+          runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
+        },
+        splitRuns: index.splitRuns,
+      });
+      // A layout still being published is collected again when it has grown.
+      if (this._layoutLifecycle?.complete ?? true) COMMENT_ANCHOR_RANGES_BY_LAYOUT.set(layout, ranges);
+    }
+    return ranges;
   }
 
   /** ECMA-376 §17.13.5 revision containers resolved to normalized source-run
@@ -2202,18 +2273,24 @@ export class DocxDocument {
       const res = await this._bridge.request(
         (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
-      return (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
+      const collected = (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
+      noteCollectedRunsPage(collected, pageIndex);
+      return collected;
     }
     const runtime = documentLayoutRuntimeOf(this);
     const services = runtime.services;
     if (!services) throw new Error('Document layout services are not initialized');
-    return textRunsForSelectedPage(services, pageIndex, {
+    const runs = textRunsForSelectedPage(services, pageIndex, {
       currentDate: wireOpts.currentDate,
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
       showTrackedChanges: wireOpts.showTrackedChanges,
       textAdvances: textAdvanceLookupOf(services),
     });
+    // The runs carry no page of their own: a comment anchor joined to them
+    // (resolveCommentAnchorRuns) is placed on the page they were collected for.
+    noteCollectedRunsPage(runs, pageIndex);
+    return runs;
   }
 
   /**
@@ -2228,11 +2305,21 @@ export class DocxDocument {
     options: DocxPageCommentThreadsOptions = {},
   ): Promise<readonly Readonly<ResolvedDocxCommentThread>[]> {
     const { includeResolved, ...runOptions } = options;
-    const runs = await this.collectPageRuns(pageIndex, runOptions);
-    return resolveDocxCommentThreads(
+    // The anchors and the runs of one layout: the layout these options
+    // select, which is the active view's only when they say nothing else.
+    const view = this._withActiveView({
+      ...(runOptions.currentDate === undefined ? {} : { currentDate: runOptions.currentDate }),
+      ...(runOptions.showTrackedChanges === undefined ? {} : { showTrackedChanges: runOptions.showTrackedChanges }),
+    });
+    const [runs, anchors] = await Promise.all([
+      this.collectPageRuns(pageIndex, runOptions),
+      this._commentAnchorRangesForView(view),
+    ]);
+    return resolveDocxCommentThreadsOnPage(
       this.comments,
-      this.commentAnchorRanges(),
+      anchors,
       runs,
+      pageIndex,
       { includeResolved },
     );
   }

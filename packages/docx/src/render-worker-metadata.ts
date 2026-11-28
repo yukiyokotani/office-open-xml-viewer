@@ -1,5 +1,5 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
-import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
+import { collectLayoutSourceCommentRangesIfPresent, commentAnchorPlacementsOf } from './comments.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
@@ -36,8 +36,19 @@ export function projectRenderWorkerLayoutMeta(
           sourcePages: reviewIndex.sourcePages,
           runsForPage: (pageIndex: number) => textRunsForPage(layout as DocumentLayout, pageIndex, { scale: 1 }),
         },
+        splitRuns: reviewIndex.splitRuns,
       }
     : undefined;
+  const commentAnchorRanges = hasComments
+    ? collectLayoutSourceCommentRangesIfPresent(
+        review.comments,
+        source,
+        reviewIndex!.renderedRunIndex,
+        reviewProjection,
+      )
+    : [];
+  // A placement is kept beside its range, so it is sent beside the ranges.
+  const commentAnchorPlacements = commentAnchorPlacementsOf(commentAnchorRanges);
   return {
     diagnostics: layout.diagnostics,
     pageCount: layout.pages.length,
@@ -46,14 +57,9 @@ export function projectRenderWorkerLayoutMeta(
       heightPt: page.geometry.heightPt,
     })),
     bookmarkPages: [...buildBookmarkPageMap(layout)],
-    commentAnchorRanges: hasComments
-      ? collectLayoutSourceCommentRangesIfPresent(
-          review.comments,
-          source,
-          reviewIndex!.renderedRunIndex,
-          reviewProjection,
-        )
-      : [],
+    commentAnchorRanges,
+    // Always present: a view switch replaces the previous view's placements.
+    commentAnchorPlacements: commentAnchorPlacements ?? [],
     revisionAnchorRanges: hasRevisions
       ? collectLayoutSourceRevisionRangesIfPresent(
           review.revisions,
@@ -81,4 +87,36 @@ export function renderWorkerLayoutMeta(
     showTrackedChanges,
   ));
   return projectRenderWorkerLayoutMeta(layout, source, review);
+}
+
+const COMMENT_ANCHORS_BY_LAYOUT = new WeakMap<object, Pick<
+  DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'
+>>();
+
+/** The comment anchors of one retained worker variant, placed against it,
+ * without selecting it: the host joins them to runs it collects for a view
+ * other than the active one. Kept with the layout. */
+export function renderWorkerCommentAnchors(
+  doc: RetainedRenderWorkerDocumentLayout,
+  review: RenderWorkerReviewIndexInput,
+  currentDateMs: number,
+  showTrackedChanges: boolean,
+): Pick<DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'> {
+  const source = layoutSourceStoreOf(doc.layoutServices);
+  if (!source) throw new Error('Document layout source is not initialized');
+  const layout = doc.layoutVariants.layoutFor(normalizeLayoutOptions(
+    currentDateMs,
+    doc.defaultCurrentDateMs,
+    showTrackedChanges,
+  ));
+  let anchors = COMMENT_ANCHORS_BY_LAYOUT.get(layout);
+  if (!anchors) {
+    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] });
+    anchors = {
+      commentAnchorRanges: meta.commentAnchorRanges,
+      commentAnchorPlacements: meta.commentAnchorPlacements,
+    };
+    COMMENT_ANCHORS_BY_LAYOUT.set(layout, anchors);
+  }
+  return anchors;
 }

@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DocxDocument } from './document.js';
 import type { CommentAnchorRange } from './comments.js';
+import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 import type { DocComment, DocxTextRunInfo } from './types.js';
 
 describe('DocxDocument.getCommentThreads', () => {
   it('returns only threads rendered on the requested page', async () => {
     const document = Object.create(DocxDocument.prototype) as DocxDocument;
+    // The requested view is compared with the active one of the runtime.
+    attachDocumentLayoutRuntime(document, 0);
     const comments: DocComment[] = [
       { id: '1', author: 'Ada', text: 'Visible root' },
       { id: '2', parentId: '1', author: 'Bob', text: 'Reply' },
@@ -67,6 +70,8 @@ describe('DocxDocument.getCommentThreads', () => {
 
   it('does not scan page runs once per off-page anchor', async () => {
     const document = Object.create(DocxDocument.prototype) as DocxDocument;
+    // The requested view is compared with the active one of the runtime.
+    attachDocumentLayoutRuntime(document, 0);
     const visibleSource = { story: 'body' as const, storyInstance: 'body', path: [0] };
     const offPageAnchors: CommentAnchorRange[] = Array.from({ length: 5_000 }, (_, index) => {
       const source = { story: 'body' as const, storyInstance: 'body', path: [index + 1] };
