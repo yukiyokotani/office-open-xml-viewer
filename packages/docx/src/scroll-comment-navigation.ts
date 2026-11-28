@@ -2,6 +2,7 @@ import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
 import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage } from './comments';
 import { overlayBoxes } from './overlay-geometry';
+import { visiblePieces } from './run-clip';
 
 type ScrollBehavior = { behavior?: 'auto' | 'smooth' };
 
@@ -13,14 +14,32 @@ interface CommentNavigationHooks {
   currentDate(): Date | number | undefined;
   showTrackedChanges(): boolean;
   waitForLayout(doc: DocxDocument): Promise<void>;
-  select(commentId: string, page: number, run: Readonly<DocxTextRunInfo>, options?: ScrollBehavior): void;
+  /** `point` (page CSS px) lies in the part of the comment that is seen. */
+  select(commentId: string, page: number, point: Readonly<{ x: number; y: number }>, options?: ScrollBehavior): void;
+}
+
+/** A point of what the page shows of `run`: the middle of the first piece
+ * of its first marking box that survives its clips (overlay-geometry.ts);
+ * undefined for a run the clips hide whole. */
+function visiblePoint(run: Readonly<DocxTextRunInfo>): Readonly<{ x: number; y: number }> | undefined {
+  for (const box of overlayBoxes([run])) {
+    const piece = visiblePieces(box, box.clips)[0];
+    if (!piece) continue;
+    return {
+      x: piece.reduce((sum, point) => sum + point.x, 0) / piece.length,
+      y: piece.reduce((sum, point) => sum + point.y, 0) / piece.length,
+    };
+  }
+  return undefined;
 }
 
 /** DOCX anchor-to-page index for application-owned comment list navigation.
  * A comment is reached where it is seen: on the page that carries its card
  * (CommentAnchorPlacement.cardPageIndex), else on the first page that shows
- * something of an anchor of it, at the first run with a visible part. A run
- * its clips hide whole is not a destination. Pages are indexed in order
+ * something of an anchor of it, at the first run with a visible part, and
+ * at a point of that part: the middle of the run's own box may lie where a
+ * clip hides it (a picture wider than its fixed cell). A run its clips hide
+ * whole is not a destination. Pages are indexed in order
  * because repeated header anchors must resolve to their earliest occurrence;
  * run collection is shared by concurrent requests. */
 export class DocxScrollCommentNavigation {
@@ -143,9 +162,14 @@ export class DocxScrollCommentNavigation {
     if (this.hooks.destroyed()) throw new Error('DocxScrollViewer is destroyed');
     if (this.hooks.document() !== doc || generation !== this.generation || !runs) return false;
     const shownPage = page;
-    const target = anchors
-      .flatMap((anchor) => resolveCommentAnchorRunsOnPage(anchor, runs, shownPage))
-      .find((run) => overlayBoxes([run]).length > 0);
+    let target: Readonly<{ x: number; y: number }> | undefined;
+    for (const anchor of anchors) {
+      for (const run of resolveCommentAnchorRunsOnPage(anchor, runs, shownPage)) {
+        target = visiblePoint(run);
+        if (target) break;
+      }
+      if (target) break;
+    }
     if (!target) return false;
     this.hooks.select(commentId, page, target, opts);
     return true;

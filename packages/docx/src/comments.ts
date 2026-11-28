@@ -64,7 +64,39 @@ export interface CommentAnchorPlacement {
 
 const PLACEMENTS = new WeakMap<Readonly<CommentAnchorRange>, CommentAnchorPlacement>();
 const ADOPTED = new WeakSet<readonly Readonly<CommentAnchorRange>[]>();
-const RUNS_PAGE = new WeakMap<readonly Readonly<DocxTextRunInfo>[], number>();
+const RUNS_ORIGIN = new WeakMap<readonly Readonly<DocxTextRunInfo>[], CollectedRunsOrigin>();
+const COUNTERPARTS = new WeakMap<readonly Readonly<CommentAnchorRange>[], Map<string, Readonly<CommentAnchorRange>>>();
+
+/** Where an array of runs was collected: its page, and, when they come from
+ * a layout other than the one the document's anchors were collected against
+ * (the tracked-change view of a document shown in its final state), the
+ * anchors of that layout. */
+export interface CollectedRunsOrigin {
+  readonly pageIndex: number;
+  readonly anchors?: () => readonly Readonly<CommentAnchorRange>[];
+}
+
+const anchorKey = (anchor: Readonly<CommentAnchorRange>): string =>
+  `${anchor.commentId}\u0000${sourceKey(anchor.source)}\u0000${anchor.startRunIndex}\u0000${anchor.endRunIndex}`;
+
+/** The anchor to join to `runs` for `anchor`: the same authored range as the
+ * layout of the runs collected and placed it. Geometry that belongs to a
+ * layout (which covered runs are laid out, the run that stands in, the
+ * fallback) is read from the layout the runs come from, whichever layout the
+ * given anchor was collected against. */
+function anchorOfRunsLayout(
+  anchor: Readonly<CommentAnchorRange>,
+  origin: CollectedRunsOrigin | undefined,
+): Readonly<CommentAnchorRange> {
+  const anchors = origin?.anchors?.();
+  if (!anchors) return anchor;
+  let counterparts = COUNTERPARTS.get(anchors);
+  if (!counterparts) {
+    counterparts = new Map(anchors.map((own) => [anchorKey(own), own]));
+    COUNTERPARTS.set(anchors, counterparts);
+  }
+  return counterparts.get(anchorKey(anchor)) ?? anchor;
+}
 
 /** The placement of an anchor in the layout it was collected against;
  * undefined for an anchor that was not decided against a laid-out document. */
@@ -74,17 +106,8 @@ export function commentAnchorPlacement(
   return PLACEMENTS.get(anchor);
 }
 
-/** The placements of `anchors`, index-aligned, to send with them to another
- * realm (the render worker's metadata); undefined when none has one. */
-export function commentAnchorPlacementsOf(
-  anchors: readonly Readonly<CommentAnchorRange>[],
-): (CommentAnchorPlacement | null)[] | undefined {
-  const placements = anchors.map((anchor) => PLACEMENTS.get(anchor) ?? null);
-  return placements.some((placement) => placement !== null) ? placements : undefined;
-}
-
 /** Join anchors received from another realm with their placements
- * (commentAnchorPlacementsOf). Done once for an array of anchors. */
+ * (ReviewAnchorProjectionOptions.commentAnchorPlacements). Done once for an array of anchors. */
 export function adoptCommentAnchorPlacements(
   anchors: readonly Readonly<CommentAnchorRange>[],
   placements: readonly (CommentAnchorPlacement | null)[] | undefined,
@@ -97,13 +120,13 @@ export function adoptCommentAnchorPlacements(
   });
 }
 
-/** Record the page that `runs` were collected for, so that an anchor joined
- * to them (resolveCommentAnchorRuns) is placed on that page. */
-export function noteCollectedRunsPage(
+/** Record where `runs` were collected, so that an anchor joined to them
+ * (resolveCommentAnchorRuns) is placed on their page of their layout. */
+export function noteCollectedRuns(
   runs: readonly Readonly<DocxTextRunInfo>[],
-  pageIndex: number,
+  origin: CollectedRunsOrigin,
 ): void {
-  RUNS_PAGE.set(runs, pageIndex);
+  RUNS_ORIGIN.set(runs, origin);
 }
 
 export interface CommentAnchorPoint {
@@ -596,7 +619,11 @@ export function collectLayoutSourceCommentRangesIfPresent(
       || completed.has(sourceKey(range.reference.source));
   });
   const owners = options.cardOwners;
-  return owners ? [...assignCommentCardOwners(ranges, owners.sourcePages, owners.runsForPage)] : ranges;
+  const placed = owners ? [...assignCommentCardOwners(ranges, owners.sourcePages, owners.runsForPage)] : ranges;
+  // The placements leave beside the ranges for a caller that sends both to
+  // another realm.
+  options.commentAnchorPlacements?.push(...placed.map((range) => PLACEMENTS.get(range) ?? null));
+  return placed;
 }
 
 function sameStorySource(
@@ -618,7 +645,8 @@ export function resolveCommentAnchorRuns(
   anchor: Readonly<CommentAnchorRange>,
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxTextRunInfo>[] {
-  return resolveCommentAnchorRunsOnPage(anchor, runs, RUNS_PAGE.get(runs));
+  const origin = RUNS_ORIGIN.get(runs);
+  return resolveCommentAnchorRunsOnPage(anchorOfRunsLayout(anchor, origin), runs, origin?.pageIndex);
 }
 
 /** resolveCommentAnchorRuns for the runs of page `pageIndex`. An anchor
@@ -731,17 +759,22 @@ export function resolveDocxCommentThreads(
   runs: readonly Readonly<DocxTextRunInfo>[],
   options: ResolveDocxCommentThreadsOptions = {},
 ): readonly Readonly<ResolvedDocxCommentThread>[] {
-  return resolveDocxCommentThreadsOnPage(comments, anchors, runs, RUNS_PAGE.get(runs), options);
+  const origin = RUNS_ORIGIN.get(runs);
+  return resolveDocxCommentThreadsOnPage(comments, anchors, runs, origin?.pageIndex, options,
+    (anchor) => anchorOfRunsLayout(anchor, origin));
 }
 
 /** resolveDocxCommentThreads for the runs of page `pageIndex`
- * (resolveCommentAnchorRunsOnPage). */
+ * (resolveCommentAnchorRunsOnPage). `placed` gives, for each anchor, the one
+ * to join to the runs when they come from another layout than the anchors
+ * (anchorOfRunsLayout); the threads list the anchors as given. */
 export function resolveDocxCommentThreadsOnPage(
   comments: readonly Readonly<DocComment>[],
   anchors: readonly Readonly<CommentAnchorRange>[],
   runs: readonly Readonly<DocxTextRunInfo>[],
   pageIndex: number | undefined,
   options: ResolveDocxCommentThreadsOptions = {},
+  placed: (anchor: Readonly<CommentAnchorRange>) => Readonly<CommentAnchorRange> = (anchor) => anchor,
 ): readonly Readonly<ResolvedDocxCommentThread>[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const roots = comments.filter((comment) => comment.parentId === undefined);
@@ -776,12 +809,13 @@ export function resolveDocxCommentThreadsOnPage(
   for (const anchor of anchors) {
     const rootId = rootIdByCommentId.get(anchor.commentId);
     if (rootId === undefined) continue;
-    const mayResolve = pageSources.has(sourceKey(anchor.source)) ||
-      pageSources.has(sourceKey(anchor.reference.source)) ||
-      (anchor.geometryFallback !== undefined &&
-        pageSources.has(sourceKey(anchor.geometryFallback.source)));
+    const own = placed(anchor);
+    const mayResolve = pageSources.has(sourceKey(own.source)) ||
+      pageSources.has(sourceKey(own.reference.source)) ||
+      (own.geometryFallback !== undefined &&
+        pageSources.has(sourceKey(own.geometryFallback.source)));
     if (!mayResolve) continue;
-    const resolvedRuns = resolveCommentAnchorRunsOnPage(anchor, runs, pageIndex);
+    const resolvedRuns = resolveCommentAnchorRunsOnPage(own, runs, pageIndex);
     if (resolvedRuns.length === 0) continue;
     // An anchor whose content the page hides whole (clipped away) is not
     // visible on it: it has no highlight, and is no anchor of the page.
@@ -791,7 +825,7 @@ export function resolveDocxCommentThreadsOnPage(
     if (!resolvedByRoot.has(rootId)) resolvedByRoot.set(rootId, resolved);
     resolved.push(Object.freeze({
       anchor,
-      kind: resolvedAnchorKind(anchor, resolvedRuns),
+      kind: resolvedAnchorKind(own, resolvedRuns),
       rects,
     }));
   }

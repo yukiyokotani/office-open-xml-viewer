@@ -3,6 +3,7 @@ import {
   adoptCommentAnchorPlacements,
   collectLayoutSourceCommentRangesIfPresent,
   commentAnchorPlacement,
+  resolveCommentAnchorRuns,
   resolveDocxCommentThreads,
   resolveDocxCommentThreadsOnPage,
   type CommentAnchorRange,
@@ -19,9 +20,11 @@ import { layoutSourceStore } from './layout-source-model-adapter.js';
 import { projectRenderWorkerLayoutMeta, renderWorkerCommentAnchors } from './render-worker-metadata.js';
 import { DocxScrollCommentNavigation } from './scroll-comment-navigation.js';
 import { installDom, makeEl } from './scroll-viewer-test-dom.js';
-import { oracleMeasureContext, paintedDocument } from './test-support/painted-glyphs.test-support.js';
+import {
+  inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART,
+} from './test-support/painted-glyphs.test-support.js';
 import { textRunsForPage } from './text-run-projection.js';
-import type { DocxDocumentModel, DocxTextRunInfo } from './types.js';
+import type { DocxDocumentModel } from './types.js';
 
 const COMMENT_PART = {
   parts: {
@@ -178,6 +181,14 @@ describe('comment threads asked for a view other than the active one', () => {
     // The markup view lays the deleted run out: the point stands at it.
     const [marked] = await doc.getCommentThreads(0, { showTrackedChanges: true });
     expect(marked!.anchors[0]!.rects[0]!.x).toBeCloseTo(deleted.x, 6);
+    // The public resolvers, given the markup view's runs and the document's
+    // own anchors, place the point as the markup layout does.
+    const anchors = doc.commentAnchorRanges();
+    const [joined] = resolveDocxCommentThreads(doc.comments, anchors, markup);
+    expect(joined!.anchors[0]!.anchor).toBe(anchors[0]);
+    expect(joined!.anchors[0]!.rects[0]!.x).toBeCloseTo(deleted.x, 6);
+    expect(resolveCommentAnchorRuns(anchors[0]!, markup).map((run) => run.text)).toEqual([deleted.text]);
+    expect(resolveCommentAnchorRuns(anchors[0]!, final).map((run) => run.text)).toEqual(['After']);
     // The active view's anchors are untouched.
     const [again] = await doc.getCommentThreads(0);
     expect(again!.anchors[0]!.rects[0]!.x).toBeCloseTo(shown!.anchors[0]!.rects[0]!.x, 6);
@@ -211,22 +222,21 @@ describe('navigation to a comment that starts in clipped text and ends on a late
     + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${sized('Shown')}<w:commentRangeEnd w:id="1"/>${REFERENCE}</w:p>`;
 
   const navigate = async (anchors: (layout: DocumentLayout, model: DocxDocumentModel) => readonly CommentAnchorRange[],
-    pageIndex?: number) => {
-    const { layout, model } = await paintedDocument(body, COMMENT_PART);
-    expect(layout.pages).toHaveLength(2);
+    pageIndex?: number, document = body, parts: Parameters<typeof paintedDocument>[1] = COMMENT_PART, scale = 1) => {
+    const { layout, model } = await paintedDocument(document, parts);
     const ranges = anchors(layout, model);
     const doc = {
       comments: model.comments ?? [],
       pageCount: layout.pages.length,
       layoutComplete: true,
       commentAnchorRanges: () => ranges,
-      collectPageRuns: async (page: number) => textRunsForPage(layout, page, { scale: 1 }),
+      collectPageRuns: async (page: number) => textRunsForPage(layout, page, { scale }),
     } as unknown as DocxDocument;
-    const select = vi.fn<(commentId: string, page: number, run: Readonly<DocxTextRunInfo>) => void>();
+    const select = vi.fn<(commentId: string, page: number, point: Readonly<{ x: number; y: number }>) => void>();
     const navigation = new DocxScrollCommentNavigation({
       document: () => doc,
       destroyed: () => false,
-      scale: () => 1,
+      scale: () => scale,
       pageWidth: () => 612,
       currentDate: () => undefined,
       showTrackedChanges: () => false,
@@ -234,25 +244,52 @@ describe('navigation to a comment that starts in clipped text and ends on a late
       select,
     });
     const reached = await navigation.goToComment('1', pageIndex === undefined ? undefined : { pageIndex });
-    return { reached, select };
+    return { reached, select, layout };
+  };
+  /** Whether `point` lies in the box of the run `text` on `page`. */
+  const inRun = (layout: DocumentLayout, page: number, text: string, point: Readonly<{ x: number; y: number }>) => {
+    const run = textRunsForPage(layout, page, { scale: 1 }).find((candidate) => candidate.text === text)!;
+    return point.x > run.x && point.x < run.x + run.w && point.y > run.y && point.y < run.y + run.h;
   };
 
   it('goes to the page of the card, at the text that is seen', async () => {
-    const { reached, select } = await navigate(placedAnchors);
+    const { reached, select, layout } = await navigate(placedAnchors);
+    expect(layout.pages).toHaveLength(2);
     expect(reached).toBe(true);
     expect(select).toHaveBeenCalledTimes(1);
     expect(select.mock.calls[0]![1]).toBe(1);
-    expect(select.mock.calls[0]![2].text).toBe('Shown');
+    expect(inRun(layout, 1, 'Shown', select.mock.calls[0]![2])).toBe(true);
   });
 
   it('finds that page for anchors that carry no card placement', async () => {
-    const { reached, select } = await navigate((layout, model) => {
+    const { reached, select, layout } = await navigate((layout, model) => {
       const index = reviewProjectionIndexForDocument(layout);
       return collectLayoutSourceCommentRangesIfPresent(model.comments, layoutSourceStore(model), index.renderedRunIndex);
     });
     expect(reached).toBe(true);
     expect(select.mock.calls[0]![1]).toBe(1);
-    expect(select.mock.calls[0]![2].text).toBe('Shown');
+    expect(inRun(layout, 1, 'Shown', select.mock.calls[0]![2])).toBe(true);
+  });
+
+  it('goes to the part of a picture that its fixed cell shows, not to the middle of the picture', async () => {
+    // A 450pt picture in a fixed 100pt cell, at 2 CSS px per point: the cell
+    // shows its first 100pt (page x 144..344 px); the middle of the picture's
+    // own box (x 594 px) lies where the cell hides it.
+    const picture = exactRowCell(1200, `<w:p><w:commentRangeStart w:id="1"/>${inlinePictureRun(450, 40)}`
+      + `<w:commentRangeEnd w:id="1"/>${REFERENCE}</w:p>`).replace('<w:tblCellMar>', '<w:tblCellMar>'
+      + '<w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/>') + '<w:p/>';
+    const { reached, select } = await navigate(placedAnchors, undefined, picture, {
+      parts: { ...COMMENT_PART.parts, ...PICTURE_PART.parts },
+      relationships: COMMENT_PART.relationships + PICTURE_PART.relationships,
+      contentTypes: COMMENT_PART.contentTypes + PICTURE_PART.contentTypes,
+    }, 2);
+    expect(reached).toBe(true);
+    const point = select.mock.calls[0]![2];
+    expect(Object.keys(point).sort()).toEqual(['x', 'y']);
+    expect(point.x).toBeGreaterThan(144);
+    expect(point.x).toBeLessThan(344);
+    expect(point.y).toBeGreaterThan(144);
+    expect(point.y).toBeLessThan(144 + 80);
   });
 
   it('does not go to a page that shows nothing of the comment', async () => {

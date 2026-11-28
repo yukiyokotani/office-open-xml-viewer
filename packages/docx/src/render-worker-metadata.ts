@@ -1,5 +1,5 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
-import { collectLayoutSourceCommentRangesIfPresent, commentAnchorPlacementsOf } from './comments.js';
+import { collectLayoutSourceCommentRangesIfPresent, type CommentAnchorPlacement } from './comments.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
@@ -37,18 +37,11 @@ export function projectRenderWorkerLayoutMeta(
           runsForPage: (pageIndex: number) => textRunsForPage(layout as DocumentLayout, pageIndex, { scale: 1 }),
         },
         splitRuns: reviewIndex.splitRuns,
+        // A placement is kept beside its range, so it is sent beside the
+        // ranges: the collector fills this as it returns them.
+        commentAnchorPlacements: [] as (CommentAnchorPlacement | null)[],
       }
     : undefined;
-  const commentAnchorRanges = hasComments
-    ? collectLayoutSourceCommentRangesIfPresent(
-        review.comments,
-        source,
-        reviewIndex!.renderedRunIndex,
-        reviewProjection,
-      )
-    : [];
-  // A placement is kept beside its range, so it is sent beside the ranges.
-  const commentAnchorPlacements = commentAnchorPlacementsOf(commentAnchorRanges);
   return {
     diagnostics: layout.diagnostics,
     pageCount: layout.pages.length,
@@ -57,9 +50,17 @@ export function projectRenderWorkerLayoutMeta(
       heightPt: page.geometry.heightPt,
     })),
     bookmarkPages: [...buildBookmarkPageMap(layout)],
-    commentAnchorRanges,
-    // Always present: a view switch replaces the previous view's placements.
-    commentAnchorPlacements: commentAnchorPlacements ?? [],
+    commentAnchorRanges: hasComments
+      ? collectLayoutSourceCommentRangesIfPresent(
+          review.comments,
+          source,
+          reviewIndex!.renderedRunIndex,
+          reviewProjection,
+        )
+      : [],
+    // Evaluated after the ranges above. Always present: a view switch
+    // replaces the previous view's placements.
+    commentAnchorPlacements: reviewProjection?.commentAnchorPlacements ?? [],
     revisionAnchorRanges: hasRevisions
       ? collectLayoutSourceRevisionRangesIfPresent(
           review.revisions,

@@ -17,4 +17,9 @@ export interface ReviewAnchorProjectionOptions {
    * end of such a run stands on the page that holds that end. Comment
    * anchors only. */
   readonly splitRuns?: import('./layout/text-index.js').SplitRunIndex;
+  /** Filled with the placement of each collected comment range, in their
+   * order (comments.ts CommentAnchorPlacement; null for a range without
+   * one). The render worker sends them beside the ranges. Comment anchors
+   * only. */
+  readonly commentAnchorPlacements?: (import('./comments.js').CommentAnchorPlacement | null)[];
 }

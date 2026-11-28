@@ -458,7 +458,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._activeCommentId = commentId;
       this._activeCommentPage = page;
       this._selection.clearElementContext();
-      this._scrollToPageTarget(page, target, options);
+      this._navigation.scrollToPoint(page, target.x, target.y, options);
       for (const [mountedPage, slot] of this._slots) this._redrawSlotComments(mountedPage, slot);
       this._selection.emitChange();
     },
@@ -1142,13 +1142,6 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   scrollToPage(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
     this._navigation.scrollToUnit(index, opts);
-  }
-
-  private _scrollToPageTarget(page: number,
-    target: Readonly<{ x: number; y: number; w: number; h: number }>,
-    opts?: { behavior?: 'auto' | 'smooth' }): void {
-    this._navigation.scrollToPoint(page, target.x + target.w / 2,
-      target.y + target.h / 2, opts);
   }
 
   /** Reveal an authored comment through the DOCX anchor navigation adapter. */
