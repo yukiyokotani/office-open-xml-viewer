@@ -373,7 +373,9 @@ export function createProductionTextLayoutService(
       // It is selected after the font: assigning the font settles the
       // reference-em plan (core reference-advances.ts) in the context's
       // ambient state, a per-font decision no run language changes.
-      previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
+      if (request.fontRoute.lang !== undefined) {
+        previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
+      }
       context.letterSpacing = `${request.letterSpacingPt}px`;
       if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
       const metrics = context.measureText(request.text);
@@ -408,7 +410,7 @@ export function createProductionTextLayoutService(
         context.textAlign = previousTextAlign;
       }
       // The ambient language first, so restoring the font plans in it too.
-      restoreCanvasLanguage(context, previousLang);
+      if (previousLang !== undefined) restoreCanvasLanguage(context, previousLang);
       context.font = previousFont;
       context.letterSpacing = previousLetterSpacing;
       if (request.kerning != null) context.fontKerning = previousKerning;

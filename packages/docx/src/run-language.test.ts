@@ -13,6 +13,20 @@ vi.mock('@silurus/ooxml-core/internal/script-preload-accumulator', async (import
     containsHanScript: (text: string) => { scanned.units += text.length; return original.containsHanScript(text); },
   };
 });
+const langHelperCalls = vi.hoisted(() => ({ count: 0 }));
+vi.mock('@silurus/ooxml-core/internal/canvas-language', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@silurus/ooxml-core/internal/canvas-language')>();
+  const counted = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
+    langHelperCalls.count += 1;
+    return fn(...args);
+  };
+  return {
+    ...original,
+    selectCanvasLanguage: counted(original.selectCanvasLanguage),
+    restoreCanvasLanguage: counted(original.restoreCanvasLanguage),
+    saveCanvasState: counted(original.saveCanvasState),
+  };
+});
 vi.mock('@silurus/ooxml-core', async (importOriginal) => {
   const original = await importOriginal<typeof import('@silurus/ooxml-core')>();
   return {
@@ -699,6 +713,34 @@ describe('Canvas lang at measure and paint', () => {
     };
     expect(await drawn('ar-SA')).toEqual(['\u0633\u0644\u0627\u0645']);
     expect(await drawn('AR-sa')).toEqual(['\u0633\u0644\u0627\u0645']);
+  });
+
+  it('takes the direct path for untagged text: no language access, no helper call', async () => {
+    const { canvas, ctx, draws } = recordingCanvas();
+    // The recording double reads `lang` inside measureText and fillText; any
+    // other access is the renderer's.
+    let inDouble = false;
+    let accesses = 0;
+    let value = 'inherit';
+    Object.defineProperty(ctx, 'lang', {
+      get: () => { if (!inDouble) accesses += 1; return value; },
+      set: (next: string) => { accesses += 1; value = next; },
+    });
+    for (const name of ['measureText', 'fillText'] as const) {
+      const original = ctx[name] as (...args: never[]) => unknown;
+      (ctx as Record<string, unknown>)[name] = function (this: unknown, ...args: never[]) {
+        inDouble = true;
+        try { return original.apply(this, args); } finally { inDouble = false; }
+      };
+    }
+    langHelperCalls.count = 0;
+    await renderDocumentToCanvas(documentOf([run('plain text'), run(' more', { bold: true })]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.length).toBeGreaterThan(0);
+    expect(accesses).toBe(0);
+    expect(langHelperCalls.count).toBe(0);
+    // A tagged run does use them.
+    await renderDocumentToCanvas(documentOf([run('tagged', { lang: 'sr-rs' })]), canvas, 0, { dpr: 1, width: 600 });
+    expect(langHelperCalls.count).toBeGreaterThan(0);
   });
 
   it('measures overlay slices in the run language', () => {

@@ -323,7 +323,8 @@ function paintLineContents(
     // The route's language is part of what layout measured; draw in it too.
     // Untagged routes (no language) save and draw exactly as before.
     const lang = placement.fontRoute.lang;
-    const previousLang = selectCanvasLanguage(ctx, lang);
+    // An untagged route takes the direct path: no language helper is called.
+    const previousLang = lang === undefined ? undefined : selectCanvasLanguage(ctx, lang);
     for (const op of placement.paintOps) {
       // §17.3.3.29: an unselected optional hyphen must not affect display.
       // Strip only the paint string, preserving all retained UTF-16 source
@@ -339,7 +340,8 @@ function paintLineContents(
       const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
       const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
       if (op.glyphOrientation === 'upright') {
-        saveCanvasState(ctx, lang);
+        if (lang === undefined) ctx.save();
+        else saveCanvasState(ctx, lang);
         ctx.translate(originXPt, originYPt);
         ctx.rotate(-Math.PI / 2);
         // The enclosing vertical page transform maps the run's advance axis
@@ -359,7 +361,8 @@ function paintLineContents(
         else draw();
         ctx.restore();
       } else if (op.glyphOrientation === 'rotate') {
-        saveCanvasState(ctx, lang);
+        if (lang === undefined) ctx.save();
+        else saveCanvasState(ctx, lang);
         ctx.translate(originXPt, originYPt);
         if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
         ctx.textAlign = 'center';
@@ -368,7 +371,8 @@ function paintLineContents(
         fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt, lang);
         ctx.restore();
       } else if (op.scaleX !== 1) {
-        saveCanvasState(ctx, lang);
+        if (lang === undefined) ctx.save();
+        else saveCanvasState(ctx, lang);
         ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
         ctx.scale(op.scaleX, 1);
         ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
@@ -381,7 +385,7 @@ function paintLineContents(
     }
     ctx.letterSpacing = previousLetterSpacing;
     ctx.fontKerning = previousKerning;
-    restoreCanvasLanguage(ctx, previousLang);
+    if (lang !== undefined) restoreCanvasLanguage(ctx, previousLang);
     if (placement.ruby) {
       const uprightRuby = context.textBoxVerticalMode === 'eaVert'
         || context.textBoxVerticalMode === 'mongolianVert';
