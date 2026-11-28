@@ -267,6 +267,28 @@ describe('DOCX render worker with a model source', () => {
     }
   });
 
+  it.each([
+    ['ODT script class naming none', { type: 'text', text: 'a', langScriptClass: '', langEastAsia: 'ja-jp' }],
+    ['automatic East Asian axis', { type: 'text', text: 'a', langEastAsia: 'ja-jp', langEastAsiaAutomatic: true }],
+  ])('keeps a document whose only language facts shaping suppresses in the worker: %s', async (_label, run) => {
+    const actual = await vi.importActual<typeof import('./vertical-render-capability.js')>('./vertical-render-capability.js');
+    workerMocks.capabilities.mockImplementationOnce(
+      actual.documentRenderCapabilities as unknown as (...args: unknown[]) => never,
+    );
+    workerMocks.oracleAvailable.mockReturnValue(false);
+    vi.stubGlobal('OffscreenCanvas', class { getContext() { return { lang: 'inherit' }; } });
+    try {
+      const { dispatch, posts } = await loadWorker();
+      workerMocks.opens.push(async () => modelSource({ body: [{ type: 'paragraph', runs: [run] }] }).opened);
+      await dispatch({ data: parseRequest(31) } as MessageEvent);
+      expect(posted(posts, 'parsedMeta', 31)).toHaveLength(1);
+      expect(posted(posts, 'mainThreadVerticalFallback', 31)).toHaveLength(0);
+      expect(workerMocks.oracleAvailable).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not let a deferred old parse publish or close the newer source', async () => {
     const { dispatch, posts } = await loadWorker();
     let release!: () => void;

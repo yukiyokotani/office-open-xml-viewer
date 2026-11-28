@@ -1,4 +1,4 @@
-import { isLanguageRunRecord, LANGUAGE_FACT_KEYS, recordNamesRunLanguage } from './run-language-capability.js';
+import { isLanguageRunRecord, recordNamesRunLanguage } from './run-language-capability.js';
 import type { DocxDocumentModel } from './types.js';
 
 const DOM_VERTICAL_PAGE_DIRECTIONS = new Set(['tbRl', 'tbRlV', 'tbLrV']);
@@ -26,6 +26,11 @@ export interface DocumentRenderCapabilities {
 export interface DomVerticalGlyphLayoutRequired {
   readonly requiresDomVerticalGlyphLayout: true;
   readonly carriesRunLanguage?: undefined;
+}
+
+function factsNameRunLanguage(facts: unknown): boolean {
+  return facts !== null && typeof facts === 'object' && !Array.isArray(facts)
+    && recordNamesRunLanguage(facts as Record<string, unknown>);
 }
 
 /**
@@ -72,8 +77,15 @@ export function documentRenderCapabilities(
     const record = value as Record<string, unknown>;
     // Only run objects carry a run language; a property merely named `lang`
     // elsewhere (a font-table key) must not route the document.
-    if (!carriesRunLanguage && isLanguageRunRecord(record) && recordNamesRunLanguage(record)) {
-      carriesRunLanguage = true;
+    // Ruby guides are shaped untagged, so only the run's own tags count. The
+    // non-content glyph facts are read from the records that own them
+    // (paragraph mark, numbering level, inline object host), not by testing
+    // every enumerated property name.
+    if (!carriesRunLanguage) {
+      carriesRunLanguage = (isLanguageRunRecord(record) && recordNamesRunLanguage(record))
+        || factsNameRunLanguage(record.paragraphMarkFontFacts)
+        || factsNameRunLanguage(record.fontFacts)
+        || factsNameRunLanguage(record.__inlineObjectFontFacts);
     }
     for (const key of Object.keys(record)) {
       const field = record[key];
@@ -81,10 +93,6 @@ export function documentRenderCapabilities(
         && typeof field === 'string' && DOM_VERTICAL_PAGE_DIRECTIONS.has(field)) {
         if (stopOnVerticalLayout) return { requiresDomVerticalGlyphLayout: true };
         requiresDomVerticalGlyphLayout = true;
-      }
-      if (!carriesRunLanguage && LANGUAGE_FACT_KEYS.has(key) && field !== null && typeof field === 'object'
-        && !Array.isArray(field) && recordNamesRunLanguage(field as Record<string, unknown>)) {
-        carriesRunLanguage = true;
       }
       if (requiresDomVerticalGlyphLayout && carriesRunLanguage) {
         return { requiresDomVerticalGlyphLayout, carriesRunLanguage };

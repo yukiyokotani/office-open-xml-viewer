@@ -34,6 +34,21 @@ describe('run-language capability', () => {
       .toBe(true);
   });
 
+  it('applies the shaping rules to script-class precedence and automatic axes', () => {
+    const only = (run: Record<string, unknown>) => documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', ...run }] }] }));
+    expect(only({ langScriptClass: '', langEastAsia: 'ja-jp', lang: 'en-us' })).toBe(false);
+    expect(only({ langScriptClass: 'ja-jp' })).toBe(true);
+    expect(only({ langEastAsia: 'ja-jp', langEastAsiaAutomatic: true })).toBe(false);
+    expect(only({ langBidi: 'ar-sa', langBidiAutomatic: true })).toBe(false);
+    expect(only({ langEastAsia: 'ja-jp', langEastAsiaAutomatic: true, lang: 'en-us' })).toBe(true);
+    expect(only({ langEastAsia: 'x-none', langBidi: 'zh-cmn-hans' })).toBe(false);
+    const facts = (value: Record<string, unknown>) =>
+      documentCarriesRunLanguage(model({ body: [{ runs: [], paragraphMarkFontFacts: value }] }));
+    expect(facts({ langScriptClass: '', langEastAsia: 'ja-jp' })).toBe(false);
+    expect(facts({ langBidi: 'ar-sa', langBidiAutomatic: true })).toBe(false);
+    expect(facts({ langBidi: 'ar-sa' })).toBe(true);
+  });
+
   it('reads language properties only on runs and run facts', () => {
     let reads = 0;
     const counted = () => Object.defineProperty({ type: 'paragraph', runs: [{ type: 'image' }] }, 'lang', {
