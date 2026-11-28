@@ -634,10 +634,6 @@ function processMathSegment(context: BreakOpportunityIteratorContext, seg: Layou
 function processImageSegment(context: BreakOpportunityIteratorContext, seg: LayoutImageSeg): void {
   const { breakerState, flush, addToLine, scale, availW } = context;
 
-  if (seg.anchor) {
-    seg.measuredWidth = 0;
-    return;
-  }
   if (seg.markerMetric) {
     seg.measuredWidth = 0;
     context.admitLineMetric(seg, seg.heightPt, seg.heightPt * scale);
@@ -1349,6 +1345,26 @@ function settleLineStartKernedSpacePair(
   return { ...frame, w: frame.w - pair, wForFit: frame.wForFit - pair };
 }
 
+/** WORD_OVERLONG_HEAD_AFTER_ANCHOR. Floating anchors are no queue items: the
+ * line breaker lays out the paragraph without them (prepareBreakQueue). The
+ * one registered case where an anchor still decides a line is this rule's
+ * scope policy: outside its measured scope (overlongAnchorLineInScope, SEA
+ * dictionary units) the anchor keeps a line of its own before the unit that
+ * follows it. `s` heads the current, still empty line directly after an
+ * anchor, and that anchor line has not been ended yet. */
+function headsLineAfterAnchor(context: BreakOpportunityIteratorContext, s: LayoutTextSeg): boolean {
+  const { breakerState } = context;
+  return s.followsAnchor === true && s.src?.charOffset === 0
+    && breakerState.currentLine.length === 0 && breakerState.anchorLineEndedBefore !== s;
+}
+
+/** End the anchor's own line before the unit `s` (headsLineAfterAnchor). */
+function endAnchorLine(context: BreakOpportunityIteratorContext, s: LayoutTextSeg): void {
+  context.breakerState.anchorLineFlush = true;
+  context.flush(undefined, false, s.src);
+  context.breakerState.anchorLineEndedBefore = s;
+}
+
 /** For a unit wider than the full band, the narrowed/vertically displaced
  * observation is mode-15 only. The separately measured full-band case applies in every mode. Compare the
  * physical query origin so an ordinary later line is not mistaken for a
@@ -1409,10 +1425,12 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     splitCjkOverflow(context, frame);
   } else if (s.seaBreaks !== undefined && s.hardJoinPrev !== true) {
     splitSeaOverflow(context, frame);
-  } else if (breakerState.currentLine.length === 0
-    || (s.listLabel === undefined && breakerState.currentWidth < availW()
+  } else if ((breakerState.currentLine.length === 0
+      && !(headsLineAfterAnchor(context, s) && !overlongAnchorLineInScope(context, wForFit)))
+    || (breakerState.currentLine.length > 0 && s.listLabel === undefined && breakerState.currentWidth < availW()
       && breakerState.currentLine.every(isListLabelItem))
-    || breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, wForFit)) {
+    || (breakerState.currentLine.length > 0
+      && breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, wForFit))) {
     // `word-overlong-token-emergency-break`: for a single non-CJK token wider
     // than a full line, fit the widest character prefix (at least one
     // character), draw it, and re-queue the remainder. Segments are already
@@ -1544,7 +1562,7 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     const unmeasuredDecimalFallback = lastTab !== undefined && 'isTab' in lastTab
       && lastTab.resolvedAlignment === 'decimal' && !s.text.includes('.')
       && !alignedCellHasDecimalSeparator(context);
-    if (!unmeasuredDecimalFallback
+    if (!unmeasuredDecimalFallback && breakerState.currentLine.length > 0
       && breakerState.currentLine.every((item) => 'isTab' in item && !item.ptab) && !glueLineNarrowed(context)
       && wordTabGlueUnit(s, breakerState.queue.peek(), context.characterGrid?.type === 'snapToChars', context.baseRtl)) {
       const remaining = availW() - breakerState.currentWidth;
@@ -1580,7 +1598,8 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     // whole column — the empty-line branch above breaks it at the character level
     // (overflow-wrap). Re-queueing rather than force-adding is what lets that
     // over-long-word path run instead of letting the word spill the column.
-    flush(undefined, false, s.src);
+    if (breakerState.currentLine.length === 0) endAnchorLine(context, s);
+    else flush(undefined, false, s.src);
     breakerState.queue.unshift(s);
   }
 }
@@ -1623,10 +1642,11 @@ function prepareAtomicTextFit(
     && breakerState.currentWidth < availW()
     && breakerState.currentLine.length > 0
     && breakerState.currentLine.every(isListLabelItem);
+  const afterAnchor = headsLineAfterAnchor(context, s);
   if (
     !s.joinPrev &&
     !listLabelOnlyLine &&
-    breakerState.currentLine.length > 0 &&
+    (breakerState.currentLine.length > 0 || afterAnchor) &&
     (follower?.joinPrev || preferWholeWord && follower?.explicitBreakBefore) &&
     ((breakerState.queue.peek() as LayoutTextSeg | undefined)?.hardJoinPrev === true ||
       !hasCJKBreakOpportunity(s.text)) &&
@@ -1652,7 +1672,8 @@ function prepareAtomicTextFit(
       !(mixedCandidateMayShrink(breakerState, group.pieces.map((piece) => piece.text).join(''), group.pieces[0]?.segment)
         && context.mixedSpaceRequirement({ pieces: group.pieces, fitWidth: groupFitWidth }) !== undefined)
     ) {
-      flush(undefined, false, s.src);
+      if (afterAnchor) endAnchorLine(context, s);
+      else flush(undefined, false, s.src);
     }
   }
 
@@ -2171,6 +2192,11 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         seaBreaks: rebaseSeaBreaks(s.seaBreaks, split),
       });
     }
+  } else if (headsLineAfterAnchor(context, s)) {
+    // WORD_OVERLONG_HEAD_AFTER_ANCHOR is measured for Latin words only: a
+    // SEA dictionary word after an anchor keeps the anchor's own line.
+    endAnchorLine(context, s);
+    breakerState.queue.unshift(s);
   } else if (breakerState.currentLine.length > 0) {
     // No whole word fits the remaining band — move the run to a fresh line and
     // re-process (Latin-word style). If `s` would then LEAD the next line with

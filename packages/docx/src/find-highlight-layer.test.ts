@@ -127,10 +127,8 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
-  it('draws a box per run for a cross-run match', () => {
+  it('draws one box over the touching runs of a cross-run match, and a box per run across a gap', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
-    const layer = makeEl('div');
-    const runs = [run({ text: 'Hel', x: 0 }), run({ text: 'lo', x: 21 })];
     const matches: DocxHighlightMatch[] = [
       {
         slices: [
@@ -140,11 +138,17 @@ describe('buildDocxHighlightLayer', () => {
         active: false,
       },
     ];
-    // cssWidth = 100 so the percentage reads directly as the px value.
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-    expect(layer.children).toHaveLength(2);
-    expect(layer.children[0].style.left).toBe('0%'); // run 0 origin (0/100)
-    expect(layer.children[1].style.left).toBe(`${(21 / 100) * 100}%`); // run 1 origin
+    const boxes = (secondX: number) => {
+      const layer = makeEl('div');
+      // cssWidth = 100 so the percentage reads directly as the px value.
+      buildDocxHighlightLayer(layer as unknown as HTMLDivElement,
+        [run({ text: 'Hel', x: 0 }), run({ text: 'lo', x: secondX })], matches, 100, 100, measureForFont);
+      return layer.children.map((box) => box.style.left);
+    };
+    // `Hel` ends where `lo` starts: one match, one box.
+    expect(boxes(21)).toEqual(['0%']);
+    // Something else stands between the runs: it is not highlighted.
+    expect(boxes(30)).toEqual(['0%', `${(30 / 100) * 100}%`]);
   });
 
   it('carries the run transform for a vertical (tbRl) page', () => {
@@ -226,5 +230,81 @@ describe('buildDocxHighlightLayer', () => {
     buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
     expect(layer.innerHTML).toBe('');
     expect(layer.children).toHaveLength(0);
+  });
+});
+
+describe('highlights in right-to-left runs', () => {
+  const hebrew = '\u05d0\u05d1\u05d2';
+  const boxes = (runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], measure = measureForFont) => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measure);
+    return layer.children.map((child) => {
+      const css = child.style.cssText;
+      const rounded = (value: string) => Math.round(Number(value) * 1e9) / 1e9;
+      return [rounded(/left:([-\d.e]+)%/.exec(css)![1]!), rounded(/width:([-\d.e]+)%/.exec(css)![1]!)];
+    });
+  };
+
+  it('covers the painted cluster boxes, which carry their tracking', () => {
+    // 7px glyphs tracked by 2px. Painted left to right: gimel, bet, alef,
+    // each box with its tracking on its left (after it in reading order).
+    // The boxes are final: no tracking is added or taken off.
+    const rtl = run({ text: hebrew, direction: 'rtl', letterSpacingPx: 2, w: 27,
+      clusterBoxes: [0, 1, 2].map((index) => ({ start: index, end: index + 1, x: (2 - index) * 9, width: 9, rtl: true })) });
+    const hit = (start: number, end: number) => boxes([rtl], [{ slices: [{ runIndex: 0, start, end }], active: false }]);
+    expect(hit(1, 2)).toEqual([[9, 9]]);
+    expect(hit(0, 1)).toEqual([[18, 9]]);
+    expect(hit(0, 2)).toEqual([[9, 18]]);
+    // A run without boxes measures its text, leaving out the final tracking.
+    const ltr = run({ text: 'abc', letterSpacingPx: 2, w: 27 });
+    expect(boxes([ltr], [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }])).toEqual([[9, 7]]);
+  });
+
+  it('takes a fitted run\'s final cluster box as it is', () => {
+    // A fitted run: its final cluster box is cut to the fitted width.
+    const boxesOf = (trackingExcluded: boolean) => boxes([run({ text: 'ab', letterSpacingPx: 2, w: 16,
+      clusterBoxes: [{ start: 0, end: 1, x: 0, width: 9, rtl: false },
+        { start: 1, end: 2, x: 9, width: 7, rtl: false, ...(trackingExcluded ? { trackingExcluded: true as const } : {}) }] })],
+    [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }]);
+    expect(boxesOf(true)).toEqual([[9, 7]]);
+    expect(boxesOf(false)).toEqual([[9, 7]]);
+  });
+
+  it('measures nothing for a run that carries its cluster boxes', () => {
+    let measured = 0;
+    const measure = () => (value: string) => { measured += value.length; return value.length * W; };
+    const length = 300;
+    const text = hebrew.repeat(length / 3);
+    const clusterBoxes = Array.from({ length }, (_, index) => ({ start: index, end: index + 1,
+      x: (length - 1 - index) * W, width: W, rtl: true }));
+    const matches = Array.from({ length }, (_, start) => ({ slices: [{ runIndex: 0, start, end: start + 1 }], active: false }));
+    const placed = boxes([run({ text, direction: 'rtl', clusterBoxes })], matches, measure);
+    expect(placed).toHaveLength(length);
+    expect(placed[0]).toEqual([(length - 1) * W, W]);
+    expect(measured).toBe(0);
+  });
+});
+
+describe('tate-chu-yoko highlights', () => {
+  it('places the characters side by side across the turned run', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // A tbRl run turned 90deg at (100, 50): '２' and '９' stand side by side
+    // across its 8px cell.
+    const runs = [run({
+      text: '２９', x: 100, y: 50, w: 8, h: 10, fontSize: 8, transform: 'rotate(90deg)', eastAsianVert: true,
+      clusterBoxes: [
+        { start: 0, end: 1, x: 0, width: 8, rtl: false, y: 8, height: 6 },
+        { start: 1, end: 2, x: 0, width: 8, rtl: false, y: 2, height: 6 },
+      ],
+    })];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs,
+      [{ slices: [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 0, start: 1, end: 2 }], active: false }],
+      200, 200, measureForFont);
+    const [two, nine] = layer.children;
+    expect([two!.style.left, two!.style.top]).toEqual(['46%', '25%']);
+    expect([nine!.style.left, nine!.style.top]).toEqual(['49%', '25%']);
+    expect([two!.style.width, two!.style.height]).toEqual(['4%', '3%']);
   });
 });

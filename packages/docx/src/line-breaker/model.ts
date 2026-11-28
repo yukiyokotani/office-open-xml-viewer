@@ -22,11 +22,18 @@ export interface LineBoundary {
   /** Source END after consuming a terminal §17.3.3.1 break, before laying
    * out the empty line it opened. Bare END means that line is complete. */
   trailingEmptyLine?: true;
+  /** The end of an anchor's own line (`LayoutLine.anchorLine`): the anchors
+   * directly before this boundary are already placed, on that line. */
+  afterAnchorLine?: true;
 }
 
 
 export interface LayoutSegSource {
   src?: LineBoundary;
+  /** An anchor placement item directly precedes this segment in the segment
+   * array (set by prepareBreakQueue, which keeps those items out of the
+   * queue). Read only by the WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy. */
+  followsAnchor?: true;
   /** Complete unchanged single-source partition; minted before line splitting. */
   sourceCursorStart?: number;
   /** Parser-boundary run occurrence retained independently of mutable source
@@ -112,6 +119,13 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating-drawing anchor host that keeps
+   * only its position; it carries no face or line metrics. */
+  anchorHostWithoutMetric?: true;
+  /** An anchor host inside the text piece that follows it in the built
+   * segment array: its UTF-16 offset in that piece (absent: directly before
+   * it). attachAnchorPlacements selects the host's line by it. */
+  anchorTextOffset?: number;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
    * metric-only segment keeps. Never display text, glyph ownership, source
@@ -574,8 +588,117 @@ export interface LayoutLineBreak extends LayoutSegSource {
 
 export type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutLineBreak | LayoutTabSeg;
 
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: a position-only item of the segment
+ * stream: a floating drawing's anchor host, or a floating picture/chart
+ * payload. It marks where the drawing is anchored and nothing else: it has
+ * no advance and takes no part in any line metric, leading rule, grid class,
+ * position reference or trailing-break state. The break queue leaves it out,
+ * so no metric accumulator sees it; `attachAnchorPlacements` returns it to
+ * its line afterwards, and every reader of a line's segments for metrics
+ * skips it by this test. */
+export function isAnchorPlacementSegment(segment: LayoutSeg): boolean {
+  return ('text' in segment && segment.anchorHostWithoutMetric === true)
+    || ('imagePath' in segment && segment.anchor === true);
+}
+
+/**
+ * Place the anchor placement items of `segs` on the finished lines of the
+ * paragraph the line breaker laid out without them. A host goes to the line
+ * that holds its source position, directly before the piece that holds or
+ * follows that position (a trailing host: the end of the last line). Line
+ * metrics, boundaries and the lines' own segments are untouched: no piece is
+ * split; line planning places the host inside the piece by its offset in
+ * the paragraph's occurrence domain. A floating payload holds no place
+ * on a line: it is positioned from its host or on its own.
+ */
+export function attachAnchorPlacements(
+  lines: LayoutLine[],
+  segs: readonly LayoutSeg[],
+  startBoundary: LineBoundary | undefined,
+): LayoutLine[] {
+  if (lines.length === 0 || !segs.some(isAnchorPlacementSegment)) return lines;
+  /** Source order of a boundary against offset `charOffset` of segment `segIndex`. */
+  const compare = (boundary: LineBoundary, segIndex: number, charOffset: number): number =>
+    boundary.segIndex - segIndex || boundary.charOffset - charOffset;
+  // Each segment's next content segment, in one backward pass.
+  const nextContent = new Array<number>(segs.length);
+  for (let index = segs.length - 1, next = segs.length; index >= 0; index -= 1) {
+    nextContent[index] = next;
+    if (!isAnchorPlacementSegment(segs[index]!)) next = index;
+  }
+  const additions = new Map<number, { at: number; host: LayoutSeg }[]>();
+  let lineIndex = 0;
+  // Position reached in the current line's segments: targets never decrease.
+  let at = 0;
+  for (let index = 0; index < segs.length; index += 1) {
+    const host = segs[index]!;
+    if (!isAnchorPlacementSegment(host) || !('text' in host)) continue;
+    // The host's source position: `offset` of the content segment `target`.
+    const target = nextContent[index]!;
+    const offset = target < segs.length ? host.anchorTextOffset ?? 0 : 0;
+    // An earlier fragment of the paragraph already holds that position.
+    if (startBoundary && target < segs.length) {
+      const order = compare(startBoundary, target, offset);
+      if (order > 0 || (order === 0 && startBoundary.afterAnchorLine === true)) continue;
+    }
+    // The first line that ends past the position, or the anchor's own line
+    // ending exactly there; hosts are visited in source order.
+    while (lineIndex < lines.length - 1) {
+      const line = lines[lineIndex]!;
+      const order = line.consumedEnd ? compare(line.consumedEnd, target, offset) : 1;
+      if (order > 0 || (order === 0 && line.anchorLine === true)) break;
+      lineIndex += 1;
+      at = 0;
+    }
+    const line = lines[lineIndex]!;
+    // Before the piece that holds or follows the position.
+    while (at < line.segments.length) {
+      const piece = line.segments[at]!;
+      const src = piece.src;
+      if (src !== undefined) {
+        const order = compare(src, target, offset);
+        if (order >= 0) break;
+        if (src.segIndex === target && 'text' in piece && src.charOffset + piece.text.length > offset) break;
+      }
+      at += 1;
+    }
+    let list = additions.get(lineIndex);
+    if (!list) additions.set(lineIndex, list = []);
+    list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0 } });
+  }
+  if (additions.size === 0) return lines;
+  return lines.map((line, index) => {
+    const hosts = additions.get(index);
+    if (!hosts) return line;
+    const segments: LayoutLine['segments'] = [];
+    let next = 0;
+    for (let position = 0; position <= line.segments.length; position += 1) {
+      while (next < hosts.length && hosts[next]!.at === position) {
+        segments.push(hosts[next]!.host as LayoutLine['segments'][number]);
+        next += 1;
+      }
+      if (position < line.segments.length) segments.push(line.segments[position]!);
+    }
+    // The retained gap plan keeps addressing the line's content segments
+    // (metricSegments): line planning distributes the line without its
+    // anchors as well (planLine).
+    return { ...line, segments };
+  });
+}
+
+/** A line's segments as metric and classification decisions see them:
+ * without anchor placement items. The same array when it holds none. */
+export function metricSegments<S extends LayoutSeg>(segments: readonly S[]): readonly S[] {
+  return segments.some(isAnchorPlacementSegment)
+    ? segments.filter((segment) => !isAnchorPlacementSegment(segment)) : segments;
+}
+
 
 export interface LayoutLine {
+  /** An anchor's own line, ended before the unit that follows the anchor
+   * (WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy). It consumes no content;
+   * the anchors directly before its end boundary are placed on it. */
+  anchorLine?: true;
   /** A list-label line (`LayoutSegSource.listLabel`) after the paragraph's
    * first: it still starts at the first-line indent because the body has
    * not begun on an earlier line. */

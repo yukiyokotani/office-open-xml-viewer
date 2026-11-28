@@ -1,4 +1,5 @@
 import { isCjkBreakChar } from '@silurus/ooxml-core';
+import { isFloatingPayloadRun } from './anchor-classification.js';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
@@ -604,9 +605,21 @@ export const WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS = defineCompatibilityRule({
   id: 'word-mixed-anchor-visible-line-metrics',
   evidence: {
     kind: 'library-policy',
-    reference: 'packages/docx/src/anchor-host-metrics.test.ts#reserves host line height without using its zero-ink box for a visible run baseline',
+    reference: 'packages/docx/src/anchor-host-metrics.test.ts#reserves the label metric height without using its zero-ink box for a visible run baseline',
   },
-  description: 'A zero-ink drawing anchor host reserves its line and grid height while visible neighboring glyphs retain their own ascent, descent, and design-line baseline. Library policy, no Office measurement: line metrics choice for mixed anchor and visible content (PR #1035); nothing measured.',
+  description: 'A zero-ink metric host (a picture list label\'s metric run, a note reference whose mark is suppressed, a reserved separator participant) reserves its line and grid height while visible neighboring glyphs retain their own ascent, descent, and design-line baseline. Library policy, no Office measurement: line metrics choice for mixed metric-host and visible content (PR #1035); nothing measured. A floating drawing\'s anchor host is no such host: it has no line metric at all (WORD_ANCHOR_HOST_NO_LINE_METRIC).',
+});
+
+export const WORD_ANCHOR_HOST_NO_LINE_METRIC = defineCompatibilityRule({
+  id: 'word-anchor-host-no-line-metric',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'anchor-host-inline-object-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.3 anchors a floating drawing in a run, but the anchoring character has no glyph and the standard does not give it line metrics. Windows Word 16.0.20527 controls (Times New Roman 10pt and 11pt paragraphs, a wrapNone DrawingML picture anchored in a 10pt or 40pt run beside an inline 16pt picture, unpositioned or lowered 15pt; an anchored picture alone in its paragraph; and one beside text) size no line from the anchoring run: every paragraph with the inline picture is exactly as tall as without the anchor, also with the 40pt anchoring run, and a paragraph holding only the anchor is as tall as an empty paragraph of its mark (12.65pt for an 11pt Times New Roman mark, not the 40pt run). This holds in compatibility modes 15, 14, 12 and omitted, on a 20pt lines grid (each paragraph one cell), and in body paragraphs, headers and table cells. The anchor host therefore keeps its position but contributes no metrics beside other line content, and a host-only paragraph takes its paragraph mark line (ascii face, WORD_EMPTY_MARK_ASCII_FACE). In footnotes and text boxes the same controls lay the picture out inline in its 40pt run instead of floating it, so no anchor host is left there. Pagination follows the same classification: 48 Windows Word controls (compatibility mode 14 with useFELayout, Times New Roman 11pt marks, a paragraph holding only a 40x20pt square, topAndBottom or wrapNone picture beside an empty-paragraph reference, 9.65 to 20.5pt left at the page bottom, with and without keepNext, with and without a 20pt lines grid) move or keep the anchor-only paragraph exactly as its empty paragraph in every wrapNone and square cell, apart from the floats\' own wrap effects (a topAndBottom picture pushes the mark below itself; a square picture over the mark line cancels the grid page-edge relief). One square keepNext cell (13.15pt left, no grid) keeps the paragraph where the empty mark moves; it is not modelled. Two further sets on Windows Word 16.0.20625 (compatibility mode 15, 11pt paragraphs) confirm the rule for East Asian anchoring runs: 31 controls (an 18pt lines grid and no grid; a 10, 20 or 24pt anchoring run in Times New Roman, in MS Mincho, or in Times New Roman with hint eastAsia; a DrawingML picture, a wps shape in mc:AlternateContent, or a VML shape; East Asian or Latin text beside the anchor, or the anchor alone) and 15 controls that add useFELayout with the other Far East compatibility flags, a Yu Mincho default Latin font, right alignment and the hint with an East Asian font. Every anchored paragraph is exactly as tall as the same paragraph without the anchor: one grid cell beside text even when the anchoring run exceeds the pitch, and an anchor-only paragraph equals its empty paragraph also where that empty paragraph takes two cells. The classification places the paragraph in the active revision view; it never omits content: continuous-section mark roles, which omit a source-empty mark, do not apply to it, and a painted list marker stays ink for the look-ahead. Layout holds this by construction rather than per decision: a paragraph is measured, classified and paginated from its metric-visible runs (no floating drawing, no anchoring character, nothing the revision view omits; metric-visible-runs.ts), the segment builder builds the content of the paragraph without its anchors and adds them as position-only items, the line breaker lays out the content without those items and the finished lines receive them by source position, and line planning aligns and justifies the content alone. Library policy beyond the measured controls: an anchor also opens no break opportunity, takes no justification cell and is no predecessor for hanging punctuation; identically formatted text before and after an anchor stays one shaping sequence with the break opportunities of the unanchored text, and the anchor is placed at its cluster boundary inside that text; a paragraph that shows only revisions the view omits is its empty mark as well; and in a table cell a final paragraph holding only anchors is the same structural mark as the empty one. The one decision an anchor still takes is the registered scope policy of WORD_OVERLONG_HEAD_AFTER_ANCHOR.',
 });
 
 export const WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION = defineCompatibilityRule({
@@ -1282,6 +1295,18 @@ export const WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION = defineCompatibilityRule({
   description: 'Expand a multi-character fitText region to its authored width by distributing the residual evenly across interior character gaps. Evidence (observed Office behaviour): Word PDF of a corpus document in PR #918; [MS-OI29500] §2.1.78(d) supports ignoring authored spacing, not the even-gap formula.',
 });
 
+export const WORD_FIT_TEXT_REGION_DRAWING = defineCompatibilityRule({
+  id: 'word-fit-text-region-drawing',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'fitfloat1',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.2.14 links consecutive fitText runs with one id into a region and does not say what a drawing among them does. Windows Word 16.0.20625 controls (compatibility mode 15; Times New Roman 10pt; fitText 24pt with id 1 on two two-letter runs, Latin left-to-right and Hebrew right-to-left; a 6pt DrawingML picture inline, floating wrapNone and floating square; glyph origins read from the exported PDF; controls: two adjacent runs with one id form one 24pt region, with two ids two 24pt regions): (1) a run without fitText between the two fitted runs ends the region whatever it holds: an inline picture stands between two 24pt regions, and a run that holds only a floating picture leaves two 24pt regions exactly as the two-id control, although the picture takes no width; (2) a floating picture first, in the middle or last inside the fitted run, or in its own run carrying the same fitText id, does not end the region and takes no width: one 24pt region as the one-id control (in left-to-right text with the picture in the middle, one letter is drawn 1.68pt left of its control position; region edges and the other letters agree); (3) an inline picture first, in the middle or last inside the fitted run, or in its own run carrying the same fitText id, keeps one region that is not fitted: letters and picture stand at their natural advances, both where they exceed the 24pt (24.8pt, left-to-right) and where they fall short of it (22.9pt, right-to-left). wrapNone and square agree in every row, and so do the two directions. Library scope: the parsed model does not keep the fitText of a run that holds a drawing, so (1) is applied to every drawing run: a floating drawing in the middle of a fitted run or in its own run with the same id divides the region where Word keeps one, and the text around an inline drawing inside a region is fitted where Word leaves it at natural advances; a floating drawing first or last in the fitted run agrees with Word.',
+});
+
 export const WORD_FIT_TEXT_OMITTED_ID_LINKING = defineCompatibilityRule({
   id: 'word-fit-text-omitted-id-linking',
   evidence: {
@@ -1683,9 +1708,9 @@ type InlineObjectRunFacts = Readonly<{
 /** An inline picture or drawing shape run; the placeholder of an unavailable
  * inline picture is its picture. */
 export function isInlineDrawingRun(run: InlineObjectRunFacts): boolean {
-  return (run.type === 'image' && run.anchor !== true)
-    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image' && run.anchorAcquisitionInput === undefined)
-    || (run.type === 'shape' && run.inline === true);
+  return (run.type === 'image' || run.type === 'shape'
+    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image'))
+    && !isFloatingPayloadRun(run);
 }
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */

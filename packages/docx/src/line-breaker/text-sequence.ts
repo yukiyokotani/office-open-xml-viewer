@@ -1,4 +1,4 @@
-import { revisionIsOmitted } from '../layout/revision-visibility.js';
+import { runIsOmitted } from '../layout/revision-visibility.js';
 import type { ParagraphLayoutRun, ParagraphTextBearingRun } from '../layout/text.js';
 import type { LineLayoutEnvironment } from './model.js';
 import { resolveFieldText } from './text-runs.js';
@@ -146,8 +146,7 @@ export function acquireTextSequences(
     // ECMA-376 §17.13.5: deleted/moved-away content has no final-view glyphs or breaks.
     // It contributes neither formatting nor a shaping seam to visible neighbors;
     // markup view retains its own revision formatting and source ownership.
-    const revisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
-    if (revisionIsOmitted(revisionKind, environment.showTrackedChanges)) continue;
+    if (runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) continue;
     if (first && run.type === 'text' && 'optionalHyphen' in run && run.optionalHyphen) {
       // The unselected marker has no glyph and no shaping seam, even when
       // its conditional glyph uses a different font or paint style. Preserve

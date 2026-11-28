@@ -5,7 +5,7 @@ import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { prepareFloatWrap, type PreparedFloatWrap } from './float-layout.js';
 import { cloneSegmentsForLinePass, convergeLineWrap } from './layout/line-wrap-convergence.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
-import { type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
+import { attachAnchorPlacements, type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
 import { DEFAULT_TAB_PT, hasRtlDecimalTabCapability, type BidiTabOrderPolicy } from './line-breaker/tabs.js';
 import { runLineBreakerPass, type LineFitWidth } from './line-breaker/pass-driver.js';
 import type { CjkClosingMarkHang } from './layout/line-compatibility.js';
@@ -166,7 +166,9 @@ export function layoutLines(
     // still exclude its lines. An unwrapped line with a wrap context therefore
     // takes the same exclusion fixed point and publishes the same allocation
     // provenance as a bounded one. Intrinsic measurement has no placement.
-    if (!wrapCtx || widthPolicy === 'intrinsic') return runPass(null);
+    // The passes lay out the paragraph without its floating anchors
+    // (prepareBreakQueue); the finished lines receive them here.
+    if (!wrapCtx || widthPolicy === 'intrinsic') return attachAnchorPlacements(runPass(null), segs, startBoundary);
     const preparedFloatWrap = wrapCtx.lineWindow
       ? undefined
       : prepareFloatWrap(wrapCtx.floats);
@@ -186,7 +188,7 @@ export function layoutLines(
       wrapCtx.resolveLineAdvances,
     );
     const advances = wrapCtx.resolveLineAdvances?.(lines);
-    return lines.map((line, index) => ({
+    return attachAnchorPlacements(lines.map((line, index) => ({
       ...line,
       // Publish provenance only after exact-state convergence confirms the
       // same physical partition, probes and tops, never on an exploratory pass.
@@ -199,7 +201,7 @@ export function layoutLines(
           line.inlinePictureTextSingle, line.latinGridCountSingle,
         ),
       }),
-    }));
+    })), segs, startBoundary);
   }
   return runLineBreakerPass({
     ctx, segs, maxWidth, firstIndent, scale, tabStops, wrapCtx,

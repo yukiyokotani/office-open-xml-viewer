@@ -219,6 +219,17 @@ export interface RunLayoutContext {
   readonly characterGrid: CharacterGridPolicy;
 }
 
+/** The context facts a paragraph's runs (rather than its properties)
+ * decide; every other ParagraphLayoutContext field comes from paragraph,
+ * section, story and document properties. Measurement and line planning
+ * take them from the metric-visible paragraph (metricVisibleParagraph), so
+ * revisions the view omits decide nothing. */
+export function paragraphContentFacts(
+  paragraph: ParagraphLayoutSource,
+): Readonly<Pick<ParagraphLayoutContext, 'hasRuby' | 'hasEastAsianText'>> {
+  return { hasRuby: paragraphHasRuby(paragraph), hasEastAsianText: paragraphHasEastAsianText(paragraph) };
+}
+
 function paragraphHasRuby(paragraph: ParagraphLayoutSource): boolean {
   return paragraph.runs.some(
     (run) => run.type === 'text' && Boolean((run as DocxTextRun).ruby),
@@ -461,8 +472,7 @@ export function resolveParagraphLayoutContext(
     isJustified: jcIsFullyJustified(paragraph.alignment),
     stretchLastLine: jcStretchesLastLine(paragraph.alignment),
     tabStops: effectiveParagraphTabStops(paragraph),
-    hasRuby: paragraphHasRuby(paragraph),
-    hasEastAsianText: paragraphHasEastAsianText(paragraph),
+    ...paragraphContentFacts(paragraph),
     kinsoku: paragraphOffAdmitted ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
     ...(paragraphOffAdmitted ? { documentKinsoku: settings.kinsoku } : {}),
     ...withParagraphOffLineEdges(paragraphOffLineEdges(settings, paragraph, paragraphOffAdmitted)),

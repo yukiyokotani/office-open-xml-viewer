@@ -211,13 +211,16 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
   });
 
   it('leaves right-to-left lines to their previous geometry', () => {
-    // A line with right-to-left text is outside the rule: its line-end space
-    // and a trailing anchor host keep their cells, so seven gaps share the
-    // 10 pt of slack (350 pt natural width) as before the rule.
+    // A line with right-to-left text is outside the rule: six gaps share the
+    // 10 pt of slack (350 pt natural width) as before the rule. A floating
+    // anchor after the line-end space is no cell and changes nothing
+    // (WORD_ANCHOR_HOST_NO_LINE_METRIC).
     const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
-    const [line] = lines(para([textRun('אאאא bbbb cccc dddd eeee ffff gggg '), host, textRun('hhhh')], 'both'));
-    const last = texts(line!).find((p) => p.text.startsWith('gggg'))!;
-    expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 10 / 7), 6);
+    for (const anchor of [[], [host]]) {
+      const [line] = lines(para([textRun('אאאא bbbb cccc dddd eeee ffff gggg '), ...anchor, textRun('hhhh')], 'both'));
+      const last = texts(line!).find((p) => p.text.startsWith('gggg'))!;
+      expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 10 / 6), 6);
+    }
   });
 
   it('keeps the line-end spaces of a wordWrap-off paragraph in the line', () => {

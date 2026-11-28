@@ -4,6 +4,7 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
+import { WORD_ANCHOR_HOST_NO_LINE_METRIC } from './line-compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import type {
   LineLayout,
@@ -154,6 +155,8 @@ const GRID_PLAIN_TEXT_KEYS = new Set([
   'trailingSpaceCompressionPt', 'color', 'fontRoute', 'fontSizePt',
   'fontWeight', 'fontStyle', 'direction', 'writingMode', 'characterSpacingPt',
   'characterScale', 'fitText', 'kerning', 'ownedTrailingSlackPt', 'hyperlink',
+  // Position data for readers of the piece's geometry, not paint.
+  'kashidaInsertions',
 ]);
 // Acquisition may still carry basePaintOps beside the final glyph operations.
 // Both contain glyph paint only; a future effect must opt in explicitly.
@@ -166,6 +169,30 @@ const GRID_PLAIN_TYPOGRAPHY_KEYS = new Set([
   'caps', 'smallCaps', 'strike', 'doubleStrike', 'verticalAlign', 'positionPt', 'emphasis',
 ]);
 
+const floatingDrawingIds = new WeakMap<ParagraphLayout['drawings'], ReadonlySet<string>>();
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the placements of a line that belong to
+ * its flow: everything but the position-only hosts of floating drawings and
+ * the drawings placed through them. */
+export function wordFlowPlacements(
+  paragraph: Pick<ParagraphLayout, 'drawings'>,
+  line: Pick<LineLayout, 'placements'>,
+): LineLayout['placements'] {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  if (!line.placements.some((placement) => placement.kind === 'anchor-host' || placement.kind === 'drawing')) {
+    return line.placements;
+  }
+  // One set per paragraph: every line of the paragraph asks.
+  let floating = floatingDrawingIds.get(paragraph.drawings);
+  if (!floating) {
+    floating = new Set(paragraph.drawings.flatMap((drawing) => drawing.anchorLayer ? [drawing.id] : []));
+    floatingDrawingIds.set(paragraph.drawings, floating);
+  }
+  return line.placements.filter((placement) => placement.kind === 'anchor-host'
+    ? placement.anchorOccurrenceId === undefined
+    : placement.kind !== 'drawing' || !floating.has(placement.drawingId));
+}
+
 function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout): boolean {
   // Windows Word 16.0.20430, trr3 family C (144 controls): modes 14/15,
   // automatic overflow/hard break/pageBreakBefore, empty/text/break-only,
@@ -175,8 +202,9 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
   // full first-line fit moves the paragraph; glyph-content relief would split
   // it. Only a whole source paragraph with no placements on any acquired line
   // loses relief (break-only/empty-line-only, bookmarks allowed). Placements
-  // include tabs, anchor hosts, resources and drawings as well as text; this
-  // is not a glyph test. Mixed paragraphs are unmeasured and keep v0.89 relief,
+  // include tabs, resources and inline drawings as well as text (floating
+  // drawings and their hosts are not flow placements: wordFlowPlacements);
+  // this is not a glyph test. Mixed paragraphs are unmeasured and keep v0.89 relief,
   // including blank prefixes and blank-only continuations after earlier
   // placements.
   // The caller carries the whole-paragraph fact across slicing/reacquisition.
@@ -184,15 +212,20 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
   // split when their full advances fit. Metric-only empty paragraph marks
   // have their separate allowance. These endpoint probes do
   // not establish automatic grid pitch, caret-to-line geometry or other faces.
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: floating drawings, their text boxes and
+  // their hosts are not the line's paint (wordFlowPlacements); a float that
+  // wraps text cancels the relief through its exclusion alone.
+  const floatsOnly = paragraph.drawings.every((drawing) => drawing.anchorLayer !== undefined);
   return Object.entries(paragraph).every(([key, value]) => value === undefined
     || GRID_PLAIN_PARAGRAPH_KEYS.has(key)
+    || ((key === 'drawings' || key === 'textBoxes') && floatsOnly)
     || (['borders', 'drawings', 'textBoxes'].includes(key)
       && Array.isArray(value) && value.length === 0))
     && paragraph.lines.every(candidate => (candidate.barTabRules?.length ?? 0) === 0)
     && Object.entries(line).every(([key, value]) => value === undefined
       || GRID_PLAIN_LINE_KEYS.has(key)
       || (key === 'barTabRules' && Array.isArray(value) && value.length === 0))
-    && line.placements.every(placement => placement.kind === 'text'
+    && wordFlowPlacements(paragraph, line).every(placement => placement.kind === 'text'
       && Object.entries(placement).every(([key, value]) => value === undefined
         || GRID_PLAIN_TEXT_KEYS.has(key)
         || ((key === 'paintOps' || key === 'basePaintOps') && Array.isArray(value)
@@ -462,13 +495,16 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
-  const hasUnprovedTransformedInk = finalLine.placements.some((placement) =>
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: the line's ink is its flow content; a
+  // floating drawing and its host take no part in the line's admission.
+  const flowPlacements = wordFlowPlacements(input.paragraph, finalLine);
+  const hasUnprovedTransformedInk = flowPlacements.some((placement) =>
     placement.kind === 'text'
     && (placement.paintOps ?? []).some((operation) =>
       operation.glyphOrientation !== undefined
       && operation.blockAxisInkBounds === undefined));
   if (hasUnprovedTransformedInk) return input.logicalLineBoxExtentPt;
-  const visibleEnds = finalLine.placements.flatMap((placement) => {
+  const visibleEnds = flowPlacements.flatMap((placement) => {
     const endPt = placementVisibleBlockEndPt(placement);
     return endPt === null ? [] : [endPt];
   });
@@ -496,6 +532,89 @@ export function wordEmptyKeepNextBridgesSuccessor(input: Readonly<{
   return input.keepNext && input.inkless && input.undecoratedMark;
 }
 
+type InklessMarkBlockFacts = Readonly<{
+  inkless?: boolean;
+  markOnlyView?: Readonly<{ final: boolean; markup: boolean }>;
+}>;
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph with source content displays
+ * only its mark in the given revision view: nothing but floating drawings
+ * and content the view omits (displaysOnlyParagraphMark). */
+export function wordMarkOnlyViewBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  const view = block.markOnlyView;
+  return view !== undefined && (showTrackedChanges === true ? view.markup : view.final);
+}
+
+/** The one classification of a paragraph's mark for page admission and
+ * spacing: an empty paragraph, or one whose metric-visible runs display
+ * nothing but the mark (only floating drawings and omitted revisions),
+ * which WORD_ANCHOR_HOST_NO_LINE_METRIC paginates as its empty mark (page-top
+ * spacing suppression, keepNext bridging, trailing-mark admission). It decides how
+ * the paragraph is placed, never whether its content (anchors, numbering,
+ * revision-visible text) is kept: no path may omit content through it. */
+export function wordInklessMarkBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
+  return block.inkless === true || wordMarkOnlyViewBlock(block, showTrackedChanges);
+}
+
+/** Whether a later paragraph puts ink on the page (look-ahead): anything but
+ * an inkless mark, and any paragraph whose list marker is painted. */
+export function wordBlockHasInk(
+  block: InklessMarkBlockFacts & Readonly<{ visibleNumbering?: true }>,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  return !wordInklessMarkBlock(block, showTrackedChanges) || block.visibleNumbering === true;
+}
+
+type InkLookaheadSequence = readonly BodyLayoutSequenceEntryFor<Readonly<{ startType: string }>>[];
+const followingInkByView = new WeakMap<InkLookaheadSequence, Map<boolean | undefined, readonly boolean[]>>();
+
+/** Whether ink content follows from `startIndex` before a page or section
+ * boundary. One backward pass per sequence and revision view answers every
+ * start index, so a run of inkless marks is not rescanned from each mark. */
+export function wordFollowingInkContent(
+  sequence: InkLookaheadSequence,
+  startIndex: number,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  let views = followingInkByView.get(sequence);
+  if (!views) followingInkByView.set(sequence, views = new Map());
+  let suffix = views.get(showTrackedChanges);
+  if (!suffix) {
+    const answers = new Array<boolean>(sequence.length + 1).fill(false);
+    for (let index = sequence.length - 1; index >= 0; index -= 1) {
+      answers[index] = followingInkAt(sequence[index]!, answers[index + 1]!, showTrackedChanges);
+    }
+    views.set(showTrackedChanges, suffix = answers);
+  }
+  return suffix[Math.min(Math.max(startIndex, 0), sequence.length)]!;
+}
+
+function followingInkAt(
+  entry: InkLookaheadSequence[number],
+  after: boolean,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  if (entry.kind === 'consume-source') return after;
+  if (entry.kind === 'authored-break') return entry.break === 'lastRenderedPageBreak' && after;
+  if (entry.kind === 'begin-section') return entry.section.startType === 'continuous' && after;
+  const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
+  if (block.kind !== 'paragraph') return true;
+  if (block.pageBreakBefore) return false;
+  return wordBlockHasInk(block, showTrackedChanges) || after;
+}
+
+/** A mark that takes a continuous-section role: one that displays nothing
+ * but itself in every revision view, either source-empty or holding only
+ * floating drawings (WORD_ANCHOR_HOST_NO_LINE_METRIC: the drawings change
+ * nothing), and whose list marker is not painted. */
+function continuousRoleMark(block: InklessMarkBlockFacts & Readonly<{ visibleNumbering?: true }>): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  const markOnly = block.inkless === true
+    || (block.markOnlyView?.final === true && block.markOnlyView.markup === true);
+  return markOnly && block.visibleNumbering !== true;
+}
+
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
 export function wordContinuousSectionRole(
   sequence: readonly BodyLayoutSequenceEntryFor<Readonly<{ startType: string }>>[],
@@ -505,15 +624,20 @@ export function wordContinuousSectionRole(
   if (entry?.kind !== 'body-block' || entry.block.kind !== 'paragraph') return undefined;
   const next = sequence[index + 1];
   const afterNext = sequence[index + 2];
-  const suppressBefore = entry.block.inkless === true
+  // These roles are projected once for every revision view, so they take
+  // only marks that display nothing in any view (continuousRoleMark). A
+  // collapsed mark that anchors floating drawings is still acquired for
+  // them, without flow extent (body-paginator), and a painted list marker
+  // keeps its paragraph out of every role.
+  const suppressBefore = continuousRoleMark(entry.block)
     && next?.kind === 'begin-section'
     && next.section.startType === 'continuous';
   if (suppressBefore && entry.block.spaceBeforePt === 0) return 'collapse-mark';
   if (suppressBefore) return 'suppress-before';
-  return entry.block.inkless === true
+  return continuousRoleMark(entry.block)
     && next?.kind === 'body-block'
     && next.block.kind === 'paragraph'
-    && next.block.inkless === true
+    && continuousRoleMark(next.block)
     && next.block.spaceBeforePt === 0
     && afterNext?.kind === 'begin-section'
     && afterNext.section.startType === 'continuous'

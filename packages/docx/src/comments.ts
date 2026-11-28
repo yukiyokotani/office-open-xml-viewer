@@ -1,8 +1,9 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
+import { overlayBoxes } from './overlay-geometry.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
-import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
+import type { DocComment, DocxClipRegion, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
 import type { ReviewAnchorProjectionOptions } from './review-projection.js';
 
 export interface CommentAnchorRange {
@@ -20,6 +21,18 @@ export interface CommentAnchorRange {
    * neither the covered interval nor the authored reference has text geometry.
    * Absent when that story contains no projected text run. */
   readonly geometryFallback?: CommentAnchorGeometryFallback;
+  /** Set when a covered run has geometry somewhere in the laid-out document
+   * (known only to anchors collected with its run index). The range is then
+   * shown where those runs are: a page that holds none of them, such as an
+   * earlier page of the same paragraph, shows nothing of it and does not
+   * resolve it from the reference boundary. */
+  readonly coveredGeometry?: true;
+  /** Set on the one range of a comment with several ranges that carries the
+   * comment's margin card and marker: the first, in document order, of which
+   * a page shows something (assignCommentCardOwners). Absent for a comment
+   * with one range, and for ranges not decided against a laid-out document;
+   * the card then stands with the first range a page shows. */
+  readonly cardOwner?: true;
 }
 
 export interface CommentAnchorPoint {
@@ -37,13 +50,21 @@ export interface CommentAnchorGeometryFallback {
 
 export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
 
-/** UI-neutral rectangle for one continuous highlighted line segment. */
+/** UI-neutral rectangle for one continuous highlighted line segment: text
+ * painted without a gap on one line. */
 export interface DocxCommentHighlightRect {
   readonly x: number;
   readonly y: number;
   readonly width: number;
   readonly height: number;
   readonly transform?: string;
+  /** The clips of the highlighted text (DocxTextRunInfo.clips). The
+   *  rectangle is where the text's glyphs are painted inside them (across
+   *  the line, the text's font box); text that the clips hide wholly yields
+   *  no rectangle. For a clip turned against the text the rectangle bounds
+   *  the visible part, and a host cuts the drawn highlight to the clips, for
+   *  example with nested `overflow:hidden` containers. */
+  readonly clips?: readonly Readonly<DocxClipRegion>[];
 }
 
 /** One authored anchor resolved against the text geometry supplied for a page. */
@@ -115,6 +136,7 @@ function frozenRange(
   reference: MarkLocation,
   geometryFallback: MarkLocation | undefined,
   endRunIndex = location.boundary,
+  coveredGeometry = false,
 ): CommentAnchorRange {
   return Object.freeze({
     commentId,
@@ -128,6 +150,7 @@ function frozenRange(
         sourceRunIndex: geometryFallback.boundary,
       }),
     }),
+    ...(coveredGeometry ? { coveredGeometry: true as const } : {}),
   });
 }
 
@@ -201,6 +224,51 @@ function nearestProjectedText(
   return frozenPoint(reference).affinity === 'following'
     ? following ?? preceding
     : preceding ?? following;
+}
+
+/** Decide, once for a laid-out document, which range of each comment with
+ * several ranges carries its margin card: the first range, in document
+ * order, of which some page shows something (its runs have geometry inside
+ * their clips there). Every page then draws the card with that range and no
+ * other, so a comment whose first paragraph is clipped away, on this page or
+ * on another, still has one card. `sourcePages` names the pages that hold
+ * runs of each paragraph source and `runsForPage` projects a page; only the
+ * pages of undecided ranges are projected, each once. Ranges are returned in
+ * their order, the owners marked (`cardOwner`). */
+export function assignCommentCardOwners(
+  anchors: readonly CommentAnchorRange[],
+  sourcePages: ReadonlyMap<string, readonly number[]>,
+  runsForPage: (pageIndex: number) => readonly Readonly<DocxTextRunInfo>[],
+): readonly CommentAnchorRange[] {
+  const byComment = new Map<string, number[]>();
+  anchors.forEach((anchor, index) => {
+    const indices = byComment.get(anchor.commentId);
+    if (indices) indices.push(index);
+    else byComment.set(anchor.commentId, [index]);
+  });
+  const projected = new Map<number, readonly Readonly<DocxTextRunInfo>[]>();
+  const owners = new Set<number>();
+  for (const indices of byComment.values()) {
+    if (indices.length < 2) continue;
+    owner: for (const index of indices) {
+      const anchor = anchors[index]!;
+      const pages = new Set<number>();
+      for (const source of [anchor.source, anchor.reference.source, anchor.geometryFallback?.source]) {
+        for (const page of source ? sourcePages.get(sourceKey(source)) ?? [] : []) pages.add(page);
+      }
+      for (const page of [...pages].sort((left, right) => left - right)) {
+        let runs = projected.get(page);
+        if (!runs) projected.set(page, runs = runsForPage(page));
+        if (overlayBoxes(resolveCommentAnchorRuns(anchor, runs)).length > 0) {
+          owners.add(index);
+          break owner;
+        }
+      }
+    }
+  }
+  if (owners.size === 0) return anchors;
+  return Object.freeze(anchors.map((anchor, index) => (
+    owners.has(index) ? Object.freeze({ ...anchor, cardOwner: true as const }) : anchor)));
 }
 
 /** Resolve one document story's §17.13.4 marks. Kept module-public for focused
@@ -277,19 +345,42 @@ function collectIndexedStoryCommentRanges(
       const fallbackOrigin = start.paragraphIndex === end.paragraphIndex
         && start.boundary === end.boundary ? start : reference;
       const geometryFallback = nearestProjectedText(fallbackOrigin, projectedTextIndex);
+      // One segment per paragraph of the range. A segment that covers no run
+      // (the range starts at the end of a paragraph, ends at the start of
+      // one, or crosses an empty one) marks nothing beside the segments that
+      // do: kept, it would resolve as a point to the run before it, outside
+      // the range. A range with no covered run at all stays one point.
+      const segments: CommentAnchorRange[] = [];
       for (let index = start.paragraphIndex; index <= end.paragraphIndex; index += 1) {
         const visit = paragraphs[index]!;
         const from = index === start.paragraphIndex ? start.boundary : 0;
         const to = index === end.paragraphIndex
           ? end.boundary
           : normalizedBoundary(visit.paragraph, visit.paragraph.runs.length);
-        ranges.push(frozenRange(id, {
+        // Whether a covered run is laid out anywhere in the document: the
+        // range then belongs to the pages that hold those runs.
+        const rendered = renderedRunIndex.get(sourceKey(visit.source));
+        let coveredGeometry = false;
+        if (rendered) {
+          for (let runIndex = from; runIndex < to && !coveredGeometry; runIndex += 1) {
+            coveredGeometry = rendered.has(runIndex);
+          }
+        }
+        segments.push(frozenRange(id, {
           paragraphIndex: index,
           source: visit.source,
           boundary: from,
           runCount: normalizedBoundary(visit.paragraph, visit.paragraph.runs.length),
-        }, reference, geometryFallback, Math.max(from, to)));
+        }, reference, geometryFallback, Math.max(from, to), coveredGeometry));
       }
+      const covering = segments.filter((segment) => segment.endRunIndex > segment.startRunIndex);
+      // Fallback (the reference boundary, the adjacent text) stands in for a
+      // range, not for one of its segments: where some segment's covered runs
+      // are laid out, a segment none of whose runs are (deleted text in the
+      // final view) shows nothing, and is not resolved to text outside the
+      // range.
+      const laidOut = covering.filter((segment) => segment.coveredGeometry);
+      ranges.push(...(laidOut.length > 0 ? laidOut : covering.length > 0 ? covering : segments.slice(0, 1)));
       continue;
     }
 
@@ -334,10 +425,9 @@ export function collectLayoutSourceCommentRangesIfPresent(
   options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  const ranges = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  const collected = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
   const completed = options.completedSourceKeys;
-  if (completed === undefined) return ranges;
-  return ranges.filter((range) => {
+  const ranges = completed === undefined ? collected : collected.filter((range) => {
     const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
     const hasCoveredRun = range.startRunIndex < range.endRunIndex
       ? [...sourceIndices].some((index) =>
@@ -358,6 +448,8 @@ export function collectLayoutSourceCommentRangesIfPresent(
       || completed.has(sourceKey(range.source))
       || completed.has(sourceKey(range.reference.source));
   });
+  const owners = options.cardOwners;
+  return owners ? [...assignCommentCardOwners(ranges, owners.sourcePages, owners.runsForPage)] : ranges;
 }
 
 function sameStorySource(
@@ -385,6 +477,9 @@ export function resolveCommentAnchorRuns(
     (run.sourceRunIndex as number) >= anchor.startRunIndex
     && (run.sourceRunIndex as number) < anchor.endRunIndex);
   if (covered.length > 0) return covered;
+  // The covered runs are laid out on another page: nothing of the range is
+  // here, and its reference boundary does not stand in for it.
+  if (anchor.coveredGeometry && anchor.startRunIndex < anchor.endRunIndex) return [];
 
   // A lone rangeStart/rangeEnd or reference-only comment is a point anchor at
   // the range's own source/boundary (§17.13.4.3/.4). The separately-authored
@@ -451,45 +546,16 @@ function resolvedAnchorKind(
 function highlightRects(
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxCommentHighlightRect>[] {
-  const rects = runs
-    .map((run): DocxCommentHighlightRect => {
-      const bounds = run.highlightBounds;
-      return {
-        x: bounds?.x ?? run.x,
-        y: bounds?.y ?? run.y,
-        width: bounds?.width ?? run.w,
-        height: bounds?.height ?? run.h,
-        ...(run.transform ? { transform: run.transform } : {}),
-      };
-    })
-    .filter(({ width, height }) => width > 0 && height > 0)
-    .sort((left, right) => left.y - right.y || left.x - right.x);
-  const merged: DocxCommentHighlightRect[] = [];
-  for (const rect of rects) {
-    const previous = merged.at(-1);
-    if (
-      previous
-      && previous.y === rect.y
-      && previous.height === rect.height
-      && previous.transform === rect.transform
-    ) {
-      const left = Math.min(previous.x, rect.x);
-      const right = Math.max(previous.x + previous.width, rect.x + rect.width);
-      merged[merged.length - 1] = Object.freeze({
-        ...previous,
-        x: left,
-        width: right - left,
-      });
-    } else {
-      merged.push(Object.freeze({ ...rect }));
-    }
-  }
-  return Object.freeze(merged);
+  // The same boxes as the viewer's tint (overlay-geometry.ts): the glyphs of
+  // the anchored runs inside their clips, joined only where they touch.
+  return Object.freeze(overlayBoxes(runs)
+    .sort((left, right) => left.y - right.y || left.x - right.x)
+    .map((box) => Object.freeze(box)));
 }
 
 /** Resolve page-visible DOCX comments into UI-neutral threads and continuous
  * highlight rectangles. This absorbs thread ancestry, anchor joining, Word's
- * text-highlight bounds, and same-line run merging without owning any DOM,
+ * text-highlight bounds, and the joining of touching highlights without owning any DOM,
  * selection state, styling, or framework lifecycle. Invalid orphan/cyclic
  * replies are not promoted to roots. */
 export function resolveDocxCommentThreads(
@@ -538,12 +604,16 @@ export function resolveDocxCommentThreads(
     if (!mayResolve) continue;
     const resolvedRuns = resolveCommentAnchorRuns(anchor, runs);
     if (resolvedRuns.length === 0) continue;
+    // An anchor whose content the page hides whole (clipped away) is not
+    // visible on it: it has no highlight, and is no anchor of the page.
+    const rects = highlightRects(resolvedRuns);
+    if (rects.length === 0) continue;
     const resolved = resolvedByRoot.get(rootId) ?? [];
     if (!resolvedByRoot.has(rootId)) resolvedByRoot.set(rootId, resolved);
     resolved.push(Object.freeze({
       anchor,
       kind: resolvedAnchorKind(anchor, resolvedRuns),
-      rects: highlightRects(resolvedRuns),
+      rects,
     }));
   }
 

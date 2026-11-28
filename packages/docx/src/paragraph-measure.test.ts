@@ -1811,3 +1811,148 @@ it('converges partition-dependent allocations beside tall tight polygons', () =>
     }
   }
 });
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs', () => {
+  const host = { type: 'anchorHost', fontSize: 40, fontFamily: 'Arial', fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const measureAdvance = (runs: DocParagraph['runs'], eastAsianDocument: boolean, grid: boolean) => {
+    const measured = measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 20, defaultFontFamily: 'Arial',
+        defaultFontFamilyEastAsia: 'Yu Mincho' } as Partial<DocParagraph>),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0, hasEastAsianText: eastAsianDocument,
+        ...(grid ? { lineGrid: { active: true, pitchPt: 20 } } : {}) }),
+      placement({ startYPt: 0 }), measurer, environment({ documentHasEastAsianText: eastAsianDocument }),
+    );
+    return measured.contentEndYPt - (measured.lines[0]?.topYPt ?? measured.contentStartYPt);
+  };
+  it.each([[false, false], [true, false], [true, true], [false, true]] as const)(
+    'measures an anchor-only paragraph as its empty mark (East Asian document %s, grid %s)',
+    (eastAsianDocument, grid) => {
+      expect(measureAdvance([host], eastAsianDocument, grid)).toBeCloseTo(measureAdvance([], eastAsianDocument, grid), 6);
+    });
+});
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs share the empty-mark path', () => {
+  const host = { type: 'anchorHost', fontSize: 40, fontFamily: 'Small Mark', fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const text = createTextLayoutService({
+    fonts: createFontResolver(['Small Mark', 'Theme Mark'].map((family) => ({
+      requestedFamily: family, resolvedFamily: family, source: 'local' as const,
+    }))),
+    measurer: {
+      fingerprint: 'theme-mark-taller-than-direct-mark',
+      measure: (request) => ({
+        advancePt: request.fontSizePt * 0.5,
+        ascentPt: request.fontSizePt * (request.fontRoute.familyList.includes('Theme Mark') ? 1.6 : 0.8),
+        descentPt: request.fontSizePt * 0.2,
+      }),
+    },
+  });
+  const advance = (runs: DocParagraph['runs'], mark: Partial<ParagraphMeasurementEnvironment['paragraphMarkShapeInput'] & object>) =>
+    measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 10, defaultFontFamily: 'Small Mark' }),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({
+        layoutServices: { text } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+        paragraphMarkShapeInput: {
+          fonts: { ascii: 'Small Mark', highAnsi: 'Small Mark', eastAsia: 'Small Mark' },
+          fontSizePt: 10, weight: 400, style: 'normal', complexScript: false,
+          ...mark,
+        },
+      }),
+    ).contentEndYPt;
+  const softHyphen = { type: 'text', ...textRun('\u00AD', { fontSize: 30 }) } as DocParagraph['runs'][number];
+  it.each([
+    ['a theme ascii font over the direct one', { themeFonts: { ascii: 'Theme Mark' }, themeFontPresence: { ascii: true } }],
+    ['a bold mark', { weight: 700 }],
+    ['an italic mark', { style: 'italic' as const }],
+  ])('measures an anchor-only paragraph exactly as its empty mark with %s', (_, mark) => {
+    const empty = advance([], mark);
+    expect(advance([host], mark)).toBe(empty);
+    // Beside other content the paragraph is that content's paragraph.
+    expect(advance([host, softHyphen], mark)).toBe(advance([softHyphen], mark));
+  });
+
+  it('takes the synthesized bold face proof of the empty mark', () => {
+    // A host whose loaded 400 face paints bold identically (synthesized-face-line-geometry.test.ts).
+    const minchoText = createTextLayoutService({
+      fonts: createFontResolver([{
+        requestedFamily: 'MS Mincho', resolvedFamily: 'private-ms-mincho-400', source: 'local',
+        resourceIdentity: 'office-local:local("MS Mincho")', weight: 400, style: 'normal',
+        coverageProbeFamily: 'private-ms-mincho-400-coverage',
+      }]),
+      measurer: {
+        fingerprint: 'synthesized-bold-mark',
+        measure: (request) => ({
+          advancePt: [...request.text].length * request.fontSizePt,
+          ascentPt: request.fontSizePt * 0.8, descentPt: request.fontSizePt * 0.2,
+        }),
+        sameGlyphRaster: () => true,
+        ownsGlyphs: () => true,
+      },
+    });
+    // MS Mincho has no bold face: the empty mark's synthesized-face geometry
+    // applies to an anchor-only paragraph too.
+    const markAdvance = (runs: DocParagraph['runs']) => measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 14, defaultFontFamily: 'MS Mincho',
+        defaultFontFamilyEastAsia: 'MS Mincho' } as Partial<DocParagraph>),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({
+        layoutServices: { text: minchoText } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+        paragraphMarkShapeInput: {
+          fonts: { ascii: 'MS Mincho', highAnsi: 'MS Mincho', eastAsia: 'MS Mincho' },
+          fontSizePt: 14, weight: 700, style: 'normal', complexScript: false,
+        },
+      }),
+    ).contentEndYPt;
+    expect(markAdvance([])).toBeCloseTo(14 * 1.3, 8);
+    expect(markAdvance([host])).toBe(markAdvance([]));
+  });
+});
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC empty equivalent ignores hidden content', () => {
+  const host = { type: 'anchorHost', fontSize: 11, fontFamily: null, fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const deleted = (text: string, fontSize: number, extra: object = {}) => ({
+    type: 'text', ...textRun(text, { fontSize }), revision: { kind: 'deletion', author: 'A' }, ...extra,
+  }) as unknown as DocParagraph['runs'][number];
+  const advance = (runs: DocParagraph['runs'], markSize: number, contextOverrides: Partial<ParagraphLayoutContext> = {},
+    textMeasurer: TextMeasurer = measurer, env: Partial<ParagraphMeasurementEnvironment> & DocxCompatSettingsInput = {}) => {
+    const measured = measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: markSize }),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0, ...contextOverrides }),
+      placement({ startYPt: 0 }), textMeasurer, environment({ showTrackedChanges: false, ...env }),
+    );
+    return measured.contentEndYPt - measured.contentStartYPt;
+  };
+  it.each([
+    ['inline picture', { type: 'image', imagePath: 'p.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false }],
+    ['line break', { type: 'break', breakType: 'line' }],
+    ['math', { type: 'math', nodes: [{ kind: 'run', text: 'x' }], display: false, fontSize: 30 }],
+  ])('measures an anchor beside a deleted %s as the empty mark in the final view', (_, run) => {
+    const deletedRun = { ...run, revision: { kind: 'deletion', author: 'A' } } as unknown as DocParagraph['runs'][number];
+    expect(advance([host, deletedRun], 20)).toBe(advance([], 20));
+  });
+
+  it('measures an anchor beside deleted larger text as the empty mark in the final view', () => {
+    expect(advance([host, deleted('Big', 40)], 11)).toBe(advance([], 11));
+  });
+  it('measures an anchor beside a deleted ruby as the empty mark on a grid', () => {
+    const ruby = deleted('漢', 13.5, { ruby: { text: 'かん', fontSizePt: 6.75, hpsRaisePt: 12 } });
+    // The resolver derives hasRuby from the runs, deleted ones included.
+    const grid = { lineGrid: { active: true, pitchPt: 20 } };
+    // A 1.5em mark box: 20.25pt at 13.5pt.
+    const tall: TextMeasurer = { context: makeContext(1.2, 0.3), fontFamilyClasses: {} };
+    const fe = { useFeLayout: true, documentHasEastAsianText: true };
+    const empty = advance([], 13.5, grid, tall, fe);
+    expect(empty).toBe(20);
+    // A ruby the context still counts would take two cells (40pt).
+    expect(advance([], 13.5, { ...grid, hasRuby: true }, tall, fe)).toBe(40);
+    expect(advance([host, ruby], 13.5, { ...grid, hasRuby: true, hasEastAsianText: true }, tall, fe)).toBe(empty);
+  });
+});

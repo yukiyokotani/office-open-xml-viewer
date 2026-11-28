@@ -226,6 +226,29 @@ describe('comment data projections', () => {
     }]);
   });
 
+  it('does not tint text outside a range whose segment in one paragraph is deleted text only', () => {
+    // The range starts right before a tracked deletion in paragraph one and
+    // ends after "Visible" in paragraph two, before "Outside". The deleted
+    // segment has no geometry; the range shows "Visible" only.
+    const first = {
+      type: 'paragraph',
+      runs: [{ type: 'text', text: 'kept' }, { type: 'text', text: 'gone', revision: { kind: 'deletion' } }],
+      commentMarks: [mark('5', 'rangeStart', 1)],
+    } as unknown as DocParagraph;
+    const second = para(['Visible', 'Outside'], [mark('5', 'rangeEnd', 1), mark('5', 'reference', 1)]);
+    const rendered = [
+      { source: source([0]), sourceRunIndex: 0, text: 'kept', x: 0, y: 0, width: 40, height: 10 },
+      { source: source([1]), sourceRunIndex: 0, text: 'Visible', x: 0, y: 20, width: 70, height: 10 },
+      { source: source([1]), sourceRunIndex: 1, text: 'Outside', x: 70, y: 20, width: 70, height: 10 },
+    ] as unknown as DocxTextRunInfo[];
+    const anchors = collectStoryCommentRanges([
+      { paragraph: first, source: source([0]) },
+      { paragraph: second, source: source([1]) },
+    ], valid('5'), rendered);
+    expect(anchors.flatMap((anchor) => resolveCommentAnchorRuns(anchor, rendered).map((run) => run.text)))
+      .toEqual(['Visible']);
+  });
+
   it('derives cross-paragraph fallback from actual layout geometry, not field kind', () => {
     const deleted = {
       type: 'paragraph',

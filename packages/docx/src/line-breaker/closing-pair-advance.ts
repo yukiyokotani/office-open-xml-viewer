@@ -1,4 +1,5 @@
 import { compatOf } from '../layout/compat-profile.js';
+import { metricVisibleRuns } from '../layout/metric-visible-runs.js';
 import { checkedMetadataUtf16Work, checkedPrefixWorkTotal } from './prefix-work-budget.js';
 import { segmentsHaveRtl } from '../bidi-line.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -64,7 +65,9 @@ export function retainClosingPairAdvances(runs: readonly ParagraphLayoutSource['
   // A complete ordinary source class, including constituents hidden by an
   // identical-format text sequence. Fields/protected/discretionary units and
   // controls are not established pair boundaries, even if they emit no glyph.
-  if (runs.some(run => {
+  // Floating drawings and revisions the view omits are no part of that
+  // class (metricVisibleRuns): the paragraph is the one without them.
+  if (metricVisibleRuns(runs, environment.showTrackedChanges).some(run => {
     if (run.type !== 'text') return true;
     const source: ParagraphTextBearingRun = run;
     return source.ruby || source.optionalHyphen || source.noteRef || source.fitTextVal != null

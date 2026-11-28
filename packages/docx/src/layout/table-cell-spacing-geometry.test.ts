@@ -9,6 +9,10 @@ import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
 import type { TableLayout } from './types.js';
 
+/** The retained glyph advances of text clusters (overlay geometry, not
+ * placement) are left out, so the digests pin the placement bytes. */
+const withoutGlyphAdvances = (key: string, value: unknown) => key === 'glyphAdvancePt' ? undefined : value;
+
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encoder = new TextEncoder();
@@ -89,7 +93,7 @@ function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
 beforeAll(async () => { await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) }); });
 const right = (rect: { xPt: number; widthPt: number }) => rect.xPt + rect.widthPt;
 const bottom = (rect: { yPt: number; heightPt: number }) => rect.yPt + rect.heightPt;
-const fingerprint = (values: Options[]) => createHash('sha256').update(JSON.stringify(values.map((value) => geometry(value)))).digest('hex');
+const fingerprint = (values: Options[]) => createHash('sha256').update(JSON.stringify(values.map((value) => geometry(value)), withoutGlyphAdvances)).digest('hex');
 
 describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   it.each([[60, 24], [200, 4], [200, 0], [200, 24]])('reserves 2s gaps, cell border boxes and vertical outer borders (s=%s, sz=%s)', (spacing, border) => {

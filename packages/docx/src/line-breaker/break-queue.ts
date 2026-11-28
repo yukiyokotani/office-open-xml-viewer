@@ -3,7 +3,7 @@ import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { containsSeaScript, seaMixedBreakOffsets } from '@silurus/ooxml-core';
-import { type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type WrapLayoutCtx } from './model.js';
+import { isAnchorPlacementSegment, type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type WrapLayoutCtx } from './model.js';
 import { protectedNoBreakOffsets, slicedTextMetadata } from './advance.js';
 import { rebaseSeaBreaks } from './text-runs.js';
 import { resolveFitTextSegments } from './segment-builder.js';
@@ -21,9 +21,26 @@ export function prepareBreakQueue(
   measurement: LineMeasurementAdapter,
 ): LayoutSeg[] {
   startBoundary = startBoundary ? remapSourceBoundary(segs, startBoundary) : undefined;
+  // A host directly before the next content segment (not inside its text)
+  // seen since the last content segment.
+  let hostAtHead = false;
   const sourcedSegs = segs.map((seg, segIndex) => {
     seg.src = { segIndex, charOffset: 0,
       ...(seg.sourceCursorStart !== undefined ? { sourceTextStart: seg.sourceCursorStart } : {}) };
+    // Only an anchor host standing at the head of the content that follows
+    // it counts: a host inside that text (`anchorTextOffset`) or a floating
+    // payload (which holds no place on a line) does not. A pass resumed
+    // after the anchor's own line starts past that anchor.
+    if (isAnchorPlacementSegment(seg)) {
+      if ('text' in seg && !seg.anchorTextOffset) hostAtHead = true;
+    } else {
+      if (hostAtHead && !(startBoundary?.afterAnchorLine === true && startBoundary.segIndex === segIndex)) {
+        seg.followsAnchor = true;
+      } else if (seg.followsAnchor) {
+        seg.followsAnchor = undefined;
+      }
+      hostAtHead = false;
+    }
     // Issue #797 / #960 — attach the SEA (Thai/Lao/Khmer) break offsets ONCE per
     // segment (perf: never per line/char). Only for SEA text; non-SEA segments
     // keep `seaBreaks` absent so their wrap path is byte-identical. The set now
@@ -78,6 +95,13 @@ export function prepareBreakQueue(
       queue = sourcedSegs.slice(startBoundary.segIndex);
     }
   }
+
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC by construction: anchor placement items
+  // never enter the queue. Source indices keep counting them, so the line
+  // breaker lays out exactly the paragraph without its floating drawings and
+  // every boundary still indexes the complete segment array; the finished
+  // lines receive the anchors by source position (attachAnchorPlacements).
+  if (queue.some(isAnchorPlacementSegment)) queue = queue.filter((seg) => !isAnchorPlacementSegment(seg));
 
   // Mark the paragraph-final U+3000 suffix once. A backwards pass avoids the
   // O(N²) suffix rescans that would result from queue.every/reduce per segment.
@@ -282,6 +306,10 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     currentLineTopY: wrapCtx?.startPageY ?? 0,
     lineHasRuby: false,
     lineEastAsian: false,
+    /** WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy: the flush in progress
+     * ends an anchor's own line, and the unit before which one was ended. */
+    anchorLineFlush: false,
+    anchorLineEndedBefore: undefined as LayoutSeg | undefined,
     queue: new SegmentQueue(),
     trailingBreakFontSize: null as number | null,
   };

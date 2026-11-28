@@ -93,3 +93,56 @@ describe('resolvePageCommentAnchors', () => {
     expect(laterPage.margin.children).toHaveLength(0);
   });
 });
+
+describe('a comment whose text the page clips away', () => {
+  it('gets no tint and no card, while the same comment on visible text gets both', () => {
+    installDom();
+    const comments = [{ id: 'clipped', author: 'Ada', text: 'Hidden' }];
+    const anchors = [anchor('clipped', [1])];
+    const render = (clips: DocxTextRunInfo['clips']) => {
+      const tint = makeEl('div');
+      const margin = makeEl('div');
+      margin.clientHeight = 800;
+      const runs = [{ ...run([1]), clips }];
+      buildDocxCommentMargin(tint as unknown as HTMLDivElement, margin as unknown as HTMLDivElement, runs,
+        { comments, anchors }, 600, 800, null, () => undefined, 1, 260, false);
+      return { tint, margin, resolved: resolvePageCommentAnchors(anchors, runs) };
+    };
+    // The run is painted at y=20..34; the row's clip ends above it.
+    const hidden = render([{ x: 0, y: 0, width: 300, height: 12 }]);
+    expect(hidden.resolved).toEqual([]);
+    expect(hidden.tint.children).toHaveLength(0);
+    expect(hidden.margin.children).toHaveLength(0);
+    const shown = render([{ x: 0, y: 0, width: 300, height: 100 }]);
+    expect(shown.resolved).toHaveLength(1);
+    expect(shown.margin.children).toHaveLength(1);
+  });
+});
+
+describe('the card of a comment whose first paragraph the page clips away', () => {
+  const comments = [{ id: 'partly', author: 'Ada', text: 'Two paragraphs' }];
+  const anchors = [anchor('partly', [1]), anchor('partly', [2])];
+  const render = (runs: DocxTextRunInfo[]) => {
+    const tint = makeEl('div');
+    const margin = makeEl('div');
+    margin.clientHeight = 800;
+    buildDocxCommentMargin(tint as unknown as HTMLDivElement, margin as unknown as HTMLDivElement, runs,
+      { comments, anchors }, 600, 800, null, () => undefined, 1, 260, true);
+    const markers = (element: ReturnType<typeof makeEl>): number => element.children.reduce(
+      (sum, child) => sum + (child.dataset.ooxmlCommentMarker !== undefined ? 1 : 0) + markers(child), 0);
+    return { cards: margin.children.length, markers: markers(tint) };
+  };
+
+  it('stands with the first paragraph a reader can see', () => {
+    installDom();
+    // The first paragraph is painted outside its cell's clip; the second is not clipped.
+    const hidden = { ...run([1]), clips: [{ x: 200, y: 0, width: 100, height: 100 }] };
+    const shown = { ...run([2]), y: 60 };
+    expect(render([hidden, shown])).toEqual({ cards: 1, markers: 1 });
+  });
+
+  it('stays with the first paragraph when that is on another page', () => {
+    installDom();
+    expect(render([{ ...run([2]), y: 60 }])).toEqual({ cards: 0, markers: 0 });
+  });
+});

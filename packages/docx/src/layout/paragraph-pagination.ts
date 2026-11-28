@@ -1,6 +1,6 @@
 import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-policy.js';
 import type { LineBoundary } from '../line-layout.js';
-import {
+import { wordFlowPlacements,
   libreOfficeProportionalLineAdmissionExtentPt,
   libreOfficeProportionalLineAdmittedExtentPt,
   wordFinalParagraphAdmissionExtentPt,
@@ -132,7 +132,7 @@ export function selectParagraphFragment(
   // A continuation acquisition contains only the remaining source. Preserve
   // the whole paragraph's placement fact before any candidate slicing.
   const wholeParagraphHasPlacements = cursor.wholeParagraphHasPlacements
-    ?? acquired.lines.some(line => line.placements.length > 0);
+    ?? acquired.lines.some(line => wordFlowPlacements(acquired, line).length > 0);
   const lineEndLimit = policy.lineEndLimit;
   if (lineEndLimit !== undefined
     && (!Number.isInteger(lineEndLimit) || lineEndLimit < 0 || lineEndLimit >= total)) {

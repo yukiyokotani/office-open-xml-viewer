@@ -77,7 +77,7 @@ import type {
   WireRenderPageOptions,
 } from './worker-protocol';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
-import { textRunsForSelectedPage } from './text-run-projection.js';
+import { textRunsForPage, textRunsForSelectedPage } from './text-run-projection.js';
 import {
   reviewProjectionIndexForDocument,
   type ReviewProjectionIndex,
@@ -1836,7 +1836,14 @@ export class DocxDocument {
       comments,
       this._source,
       this._reviewProjectionIndex.renderedRunIndex,
-      projectionOptions,
+      {
+        ...projectionOptions,
+        // Each comment's card owner is decided once against this layout.
+        cardOwners: {
+          sourcePages: this._reviewProjectionIndex.sourcePages,
+          runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
+        },
+      },
     );
     return this._commentAnchorRanges;
   }

@@ -32,10 +32,13 @@ import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.j
 import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
-import { revisionIsOmitted } from './revision-visibility.js';
+import { runIsOmitted } from './revision-visibility.js';
+import { metricVisibleParagraph, type MetricVisibleParagraph } from './metric-visible-runs.js';
+import { isAnchorPlacementSegment, metricSegments } from '../line-breaker/model.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
+import { bidiPlacedOffsets, visualBoundaryXPt, visualClusterStartXPt } from './visual-cluster-geometry.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -49,6 +52,7 @@ import {
   effectiveParagraphTabStops,
   paragraphGridRightAdjustmentPt,
   type ParagraphLayoutContext,
+  paragraphContentFacts,
 } from '../layout-context.js';
 import {
   measureParagraph,
@@ -265,6 +269,9 @@ export type MeasuredTextPlanSegment = Readonly<
     /** A list label emitted as leading runs (`LayoutSegSource.listLabel`):
      * its spaces take no justification. */
     listLabel?: true;
+    /** The kashida plan's tatweel insertions (code point index, count) the
+     * line applied to this segment's paint text. */
+    kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
@@ -329,6 +336,7 @@ function retainedTypographyInput(
 export interface MeasuredTabPlanSegment {
   readonly kind: 'tab';
   readonly range: import('./types.js').TextRange;
+  readonly sourceRunIndex?: number;
   readonly measuredWidthPt: number;
   /** WORD_ALIGNED_TAB_CELL_FIT_BACK: gap the tab may still take from the slack. */
   readonly alignedGapLimitPt?: number;
@@ -409,6 +417,14 @@ export interface MeasuredInlineDrawingPlanSegment {
 
 export interface MeasuredAnchorHostPlanSegment {
   readonly noteReference?: TextPlacement['noteReference'];
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating drawing's anchor host, a
+   * position-only item (isAnchorPlacementSegment). planLine plans the line
+   * without it and places it at the content that follows it. */
+  readonly anchorPlacement?: true;
+  /** Where that host stands among the line's content ranges when it is not
+   * its own `range.start`: inside the undivided text piece that spans its
+   * drawing (planMeasuredLines), whose range the host then follows. */
+  readonly placeAt?: number;
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
   readonly range: import('./types.js').TextRange;
@@ -1097,58 +1113,6 @@ function levelDirection(level: number): 'ltr' | 'rtl' {
   return level % 2 === 1 ? 'rtl' : 'ltr';
 }
 
-/** WORD_CONDENSED_SPACING_ADVANCE_FLOOR splits a segment's paint at floored
- * clusters, and Canvas resolves bidirectional order only inside one
- * `fillText`. Place the split operations as the single operation they replace
- * would have been drawn: UAX#9 levels of the painted text in the paint
- * direction (Canvas applies no higher-level overrides), then each L2 reversal
- * (highest level first, down to the lowest odd level) mirrors its contiguous
- * run of operations within the run's own span. Operations are level-uniform
- * (split at level changes). A floored cluster drawn alone at an odd level
- * keeps its glyph's trailing edge on the right-to-left pen, its drawn
- * advance behind it. Work is linear per level. */
-function bidiPlacedOffsets(
-  items: readonly Readonly<{ xPt: number; advancePt: number; drawnAdvancePt?: number; level: number }>[],
-): number[] {
-  const xs = items.map((item) => item.xPt);
-  let order = items.map((_, index) => index);
-  let highest = 0;
-  let lowestOdd = Number.POSITIVE_INFINITY;
-  for (const item of items) {
-    highest = Math.max(highest, item.level);
-    if (item.level % 2 === 1) lowestOdd = Math.min(lowestOdd, item.level);
-  }
-  for (let level = highest; level >= lowestOdd; level -= 1) {
-    const next: number[] = [];
-    let cursor = 0;
-    while (cursor < order.length) {
-      if (items[order[cursor]!]!.level < level) {
-        next.push(order[cursor]!);
-        cursor += 1;
-        continue;
-      }
-      let end = cursor;
-      let startPt = Number.POSITIVE_INFINITY;
-      let endPt = Number.NEGATIVE_INFINITY;
-      while (end < order.length && items[order[end]!]!.level >= level) {
-        const index = order[end]!;
-        startPt = Math.min(startPt, xs[index]!);
-        endPt = Math.max(endPt, xs[index]! + items[index]!.advancePt);
-        end += 1;
-      }
-      for (let member = end - 1; member >= cursor; member -= 1) {
-        const index = order[member]!;
-        xs[index] = startPt + endPt - xs[index]! - items[index]!.advancePt;
-        next.push(index);
-      }
-      cursor = end;
-    }
-    order = next;
-  }
-  return items.map((item, index) => item.drawnAdvancePt !== undefined && item.level % 2 === 1
-    ? xs[index]! + item.advancePt - item.drawnAdvancePt
-    : xs[index]!);
-}
 
 /** Per-operation visible advance from the retained clusters (both run in
  * source order; clusters from `visibleEnd` on are trailing whitespace). */
@@ -1474,6 +1438,8 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[], overSide 
   }>;
   let active: ActiveDecoration[] = [];
   placements.forEach((placement, placementIndex) => {
+    // A position-only host takes no part in the line's decoration.
+    if (placement.kind === 'anchor-host') return;
     if ((placement.kind !== 'text' && placement.kind !== 'tab') || !placement.decorations) {
       active = [];
       return;
@@ -1571,7 +1537,47 @@ function withAutoSpaceExpansion(
 /** Converts a measured line snapshot into final point-space visual geometry.
  * Bidi order, alignment, compression, justification, and tab advances are
  * resolved here; paint consumes the resulting placements without source access. */
+/**
+ * WORD_ANCHOR_HOST_NO_LINE_METRIC by construction: the line is aligned,
+ * justified and ordered from its content segments alone, exactly as the same
+ * line without floating anchors; each anchor host is then placed at its
+ * source position: the leading edge of the content that follows it, the
+ * cluster boundary inside the text that holds it, or the line's end. A host
+ * takes no cell, gap or bidi position of its own and splits no text.
+ */
 export function planLine(input: PlanLineInput): LineLayout {
+  if (!input.line.segments.some(isAnchorPlacementPlanSegment)) return planContentLine(input, []);
+  const content: MeasuredLinePlanSegment[] = [];
+  const pending: MeasuredAnchorHostPlanSegment[] = [];
+  const hosts: PlannedAnchorHost[] = [];
+  for (const segment of input.line.segments) {
+    if (isAnchorPlacementPlanSegment(segment)) {
+      pending.push(segment);
+      continue;
+    }
+    // A host's position is its own offset in the paragraph's occurrence
+    // domain, which the content ranges share and which survives the
+    // planner's regrouping of segments.
+    for (const host of pending) hosts.push({ host, at: host.placeAt ?? host.range.start });
+    pending.length = 0;
+    content.push(segment);
+  }
+  for (const host of pending) hosts.push({ host, at: Number.POSITIVE_INFINITY });
+  return planContentLine({ ...input, line: { ...input.line, segments: content } }, hosts);
+}
+
+type PlannedAnchorHost = Readonly<{ host: MeasuredAnchorHostPlanSegment; at: number }>;
+
+function isAnchorPlacementPlanSegment(
+  segment: MeasuredLinePlanSegment,
+): segment is MeasuredAnchorHostPlanSegment {
+  return segment.kind === 'anchor-host' && segment.anchorPlacement === true;
+}
+
+function planContentLine(
+  input: PlanLineInput,
+  anchorHosts: readonly PlannedAnchorHost[],
+): LineLayout {
   const { line } = input;
   let segments = line.segments;
   const bidi = input.baseRtl || segmentsHaveRtl(segments);
@@ -1749,6 +1755,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           nativeBaseDirection: undefined,
           nativeVisiblePrefix: undefined,
           measuredWidthPt: segment.measuredWidthPt + plan.advanceDeltaPx,
+          kashidaInsertions: plan.insertions,
           basePaintOps: [{ ...base, text: plan.text, sourceMapping: 'kashida' }],
         };
       });
@@ -1992,9 +1999,31 @@ export function planLine(input: PlanLineInput): LineLayout {
   }
   const placements: ParagraphPlacement[] = [];
   const terminalDecorationTrims = new Map<number, number>();
+  // Each anchor host stands at its source position: inside the text segment
+  // that holds it, else at the leading edge of the first content segment at
+  // or after it; the hosts after all content stand at the line's logical end.
+  // Hosts arrive in source order, so one forward sweep finds every target.
+  // They are placed once the content is (below).
+  const plannedBefore = new Map<PlannedAnchorHost, number>();
+  const plannedInside = new Map<PlannedAnchorHost, number>();
+  let hostTarget = 0;
+  let hostAt = Number.NEGATIVE_INFINITY;
+  for (const planned of anchorHosts) {
+    if (planned.at < hostAt) hostTarget = 0;
+    hostAt = planned.at;
+    while (hostTarget < segments.length && segments[hostTarget]!.range.end <= hostAt
+      && segments[hostTarget]!.range.start < hostAt) hostTarget += 1;
+    const holder = segments[hostTarget];
+    (holder?.kind === 'text' && holder.range.start < hostAt ? plannedInside : plannedBefore).set(planned, hostTarget);
+  }
+  const lineStartXPt = xPt;
+  /** Where each segment was placed: its inline box, and its text placement. */
+  const segmentBoxes = new Map<number, Readonly<{ startPt: number; endPt: number; text?: number }>>();
   for (const segmentIndex of visual.order) {
     const segment = segments[segmentIndex];
     if (!segment) continue;
+    const segmentStartPt = xPt;
+    const placedBefore = placements.length;
     const stretch = stretchByIndex?.get(segmentIndex);
     // Each atomic source-space cell owns its existing positive allocation.
     // Non-space cuts and every legacy/negative path keep their old plan.
@@ -2027,6 +2056,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         : tabDecorations;
       placements.push({
         kind: 'tab', range: segment.range,
+        ...(segment.sourceRunIndex === undefined ? {} : { sourceRunIndex: segment.sourceRunIndex }),
         bounds,
         advancePt: segment.measuredWidthPt,
         leader: segment.leader,
@@ -2196,6 +2226,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         highlightBounds,
         advancePt: widthPt,
         clusters: textGeometry.clusters,
+        ...(segment.kashidaInsertions ? { kashidaInsertions: segment.kashidaInsertions } : {}),
         paintOps,
         decorations,
         ...(emphasis ? { emphasis } : {}),
@@ -2246,8 +2277,13 @@ export function planLine(input: PlanLineInput): LineLayout {
       placements.push(placed);
     }
     xPt += widthPt;
+    segmentBoxes.set(segmentIndex, {
+      startPt: segmentStartPt, endPt: xPt,
+      ...(placements.length > placedBefore && placements.at(-1)!.kind === 'text' ? { text: placements.length - 1 } : {}),
+    });
     if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
   }
+  const lineEndXPt = xPt;
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
   // the line's band edge. A snapToChars underline keeps
@@ -2308,6 +2344,64 @@ export function planLine(input: PlanLineInput): LineLayout {
     start = end;
   }
   coalesceAdjacentDecorations(placements, input.underlineOverSide === true);
+  // The hosts are position-only: they follow the line's content, so no
+  // adjacency rule above sees them, and each takes its position from the
+  // finished geometry of the content at its source boundary.
+  if (anchorHosts.length > 0) {
+    const textOf = (segmentIndex: number): TextPlacement | undefined => {
+      const index = segmentBoxes.get(segmentIndex)?.text;
+      const placed = index === undefined ? undefined : placements[index];
+      return placed?.kind === 'text' ? placed : undefined;
+    };
+    // The last text segment at or before each segment, in source order.
+    const textAtOrBefore: number[] = [];
+    let lastText = -1;
+    for (let index = 0; index < segments.length; index += 1) {
+      if ((textOf(index)?.clusters.length ?? 0) > 0) lastText = index;
+      textAtOrBefore.push(lastText);
+    }
+    const hostPlacements: ParagraphPlacement[] = [];
+    const place = ({ host }: PlannedAnchorHost, hostXPt: number, precedingStartPt: number | null): void => {
+      const placed: ParagraphPlacement = {
+        kind: 'anchor-host', range: host.range,
+        bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
+        baselinePt: line.baselinePt,
+        ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
+        ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
+        precedingCharacterOffsetPt: precedingStartPt === null ? null : precedingStartPt - hostXPt,
+      };
+      hostPlacements.push(placed);
+    };
+    const lastClusterStartPt = (segmentIndex: number): number | null => {
+      const text = segmentIndex >= 0 ? textOf(textAtOrBefore[segmentIndex]!) : undefined;
+      return text ? visualClusterStartXPt(text, text.clusters.length - 1) : null;
+    };
+    const cursors = new Map<number, number>();
+    for (const planned of anchorHosts) {
+      const inside = plannedInside.get(planned);
+      const target = inside ?? plannedBefore.get(planned)!;
+      const text = textOf(target);
+      if (inside !== undefined && text) {
+        // Hosts of one piece arrive in source order: one forward sweep.
+        let cluster = cursors.get(target) ?? 0;
+        while (cluster < text.clusters.length && text.clusters[cluster]!.range.start < planned.at) cluster += 1;
+        cursors.set(target, cluster);
+        place(planned, visualBoundaryXPt(text, cluster),
+          cluster > 0 ? visualClusterStartXPt(text, cluster - 1) : lastClusterStartPt(target - 1));
+        continue;
+      }
+      const box = segmentBoxes.get(target);
+      // After all content: the trailing edge of the text that ends the line
+      // in source order, else the line's logical end.
+      const ending = target >= segments.length ? textOf(segments.length - 1) : undefined;
+      const hostXPt = ending && ending.clusters.length > 0 ? visualBoundaryXPt(ending, ending.clusters.length)
+        : target >= segments.length || !box ? (input.baseRtl ? lineStartXPt : lineEndXPt)
+        : text && text.clusters.length > 0 ? visualBoundaryXPt(text, 0)
+          : visual.rtl[target] ? box.endPt : box.startPt;
+      place(planned, hostXPt, lastClusterStartPt(Math.min(target, segments.length) - 1));
+    }
+    placements.push(...hostPlacements);
+  }
   // The slack distribution (with its widening of automatic East Asian gaps)
   // and kashida elongation; natural advances, seams and tab advances excluded.
   const justificationExpansionPt = distributedWidthPt + kashidaAppliedPt;
@@ -2640,6 +2734,21 @@ function fieldDependency(run: Extract<DocRun, { type: 'field' }>): TextPlacement
   if (/^date$/i.test(run.fieldType)) return 'date';
   if (/^time$/i.test(run.fieldType)) return 'time';
   return 'document';
+}
+
+/** The run of a shared text sequence that holds the character at `offset`.
+ * Lines ask in rising offsets, so the last answer of each sequence is where
+ * the next search starts: the work over a paragraph is linear. */
+const sequenceMemberCursors = new WeakMap<object, number>();
+function sequenceMemberRunIndex(
+  sequence: readonly Readonly<{ runIndex: number; start: number; end: number }>[],
+  offset: number,
+): number | undefined {
+  let member = sequenceMemberCursors.get(sequence) ?? 0;
+  if ((sequence[member]?.start ?? 0) > offset) member = 0;
+  while (member < sequence.length - 1 && sequence[member]!.end <= offset) member += 1;
+  sequenceMemberCursors.set(sequence, member);
+  return sequence[member]?.runIndex;
 }
 
 function sourceRunIndex(segment: { sourceRunIndex?: number }): number | undefined {
@@ -3390,6 +3499,7 @@ function textPlanSegment(
     const sourceMetrics = selectedFaceSourceMetrics(segment);
     return {
       kind: 'anchor-host', measuredWidthPt: 0,
+      ...(segment.anchorHostWithoutMetric ? { anchorPlacement: true as const } : {}),
       ...(sourceRun?.type === 'text' && (sourceRun.noteRef?.kind === 'footnote' || sourceRun.noteRef?.kind === 'endnote')
         ? { noteReference: { kind: sourceRun.noteRef.kind, id: sourceRun.noteRef.id } } : {}),
       range: { start: sourceOffset, end: sourceOffset },
@@ -3433,7 +3543,7 @@ function textPlanSegment(
   }
   let precedingScalars = 0;
   let precedingPitchBearing = 0;
-  let clusters = (shapedClusters ?? []).map((cluster, index) => {
+  let clusters: TextClusterLayout[] = (shapedClusters ?? []).map((cluster, index): TextClusterLayout => {
     const prefix = segment.text.slice(0, cluster.range.start);
     const text = segment.text.slice(cluster.range.start, cluster.range.end);
     const counts = countSpacingCharacters(text);
@@ -3477,6 +3587,9 @@ function textPlanSegment(
           + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
+      // The glyph as paint draws it: its font advance, scaled, without the
+      // spacing, justification or padding added between glyphs.
+      glyphAdvancePt: cluster.advancePt * scaleX,
       advancePt:
         cluster.advancePt * scaleX
         + clusterSpacingPt
@@ -3517,7 +3630,9 @@ function textPlanSegment(
         unitStart = range.end;
         const advancePt = advances[index]! > 0 ? advances[index]! : 0;
         if (advances[index]! < 0) flooredClusterNaturalPt.set(range.start, unit.advancePx * scaleX);
-        const placed = { range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt };
+        const placed = {
+          range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt, glyphAdvancePt: unit.advancePx * scaleX,
+        };
         penPt += advancePt;
         return placed;
       });
@@ -3948,8 +4063,7 @@ function logicalOccurrenceMap(
     // Canonical sequence offsets cover displayed text only. Falling back to
     // omitted source lengths would shift a later real-format sequence when
     // the preceding visible text is partitioned into different source runs.
-    const kind = (run as { revision?: { kind?: string } }).revision?.kind;
-    if (revisionIsOmitted(kind, showTrackedChanges)) return 0;
+    if (runIsOmitted(run as { revision?: { kind?: string } }, showTrackedChanges)) return 0;
     const measuredLength = measuredLengths.get(runIndex);
     if (measuredLength !== undefined) return measuredLength;
     if (run.type === 'text') return run.text.length;
@@ -3979,6 +4093,8 @@ function segmentOccurrenceLength(segment: LayoutTextSeg | LayoutTabSeg | LayoutI
 function planMeasuredLines(
   measured: MeasuredParagraph,
   paragraph: ParagraphAcquisitionInput,
+  /** The paragraph as measurement classified it (measureParagraph). */
+  metricParagraph: MetricVisibleParagraph<ParagraphAcquisitionInput>,
   paragraphXPt: number,
   availableWidthPt: number,
   source: SourceRef,
@@ -4031,8 +4147,8 @@ function planMeasuredLines(
       : undefined;
   // LIBREOFFICE_FONT_LINE_BOX scope (keepsWordLineBoxes).
   const libreOfficeLines = textService?.libreOfficeLineBoxes === true && !verticalPageFrame
-    && !keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
-  const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
+    && !keepsWordLineBoxes(metricParagraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
+  const specifiedParagraph = specifiedTextParagraphIsHomogeneous(metricParagraph,
     context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
     const raw = measuredLine.layout;
@@ -4062,7 +4178,7 @@ function planMeasuredLines(
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.topY !== undefined,
-      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
+      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !isAnchorPlacementSegment(segment)
         && segment.inlinePicture === true),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
@@ -4088,7 +4204,9 @@ function planMeasuredLines(
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
       && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast'
         || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1));
-    const baselinePt = extraAboveLine
+    const baselinePt = measuredLine.baselineOffsetPt !== undefined
+      ? measuredLine.topYPt + measuredLine.baselineOffsetPt
+      : extraAboveLine
       ? context.lineSpacing!.rule === 'exact'
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : context.lineSpacing!.rule === 'auto'
@@ -4113,13 +4231,28 @@ function planMeasuredLines(
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
+    // This line's floating anchor hosts (indices into `segments`), and the
+    // first one not yet known to precede the text piece being planned.
+    const anchorHostIndexes: number[] = [];
+    let pendingHost = 0;
     for (const segment of raw.segments) {
       const runIndex = sourceRunIndex(segment);
       const sourceRun = runIndex === undefined ? undefined : paragraph.runs[runIndex];
       const occurrenceLength = segmentOccurrenceLength(segment);
+      let occurrenceShift = 0;
       const sequence = segment.sourceTextSequence;
+      // A sequence's text starts where its owning member run starts in the
+      // occurrence domain, so the text after a floating drawing between two
+      // members keeps the drawing's unit before it; a piece that spans the
+      // drawing stays whole (below).
+      const sequenceStart = sequence ? segment.sourceTextOffset ?? 0 : 0;
+      let sequenceOwner = sequence ? sequenceOwners.get(sequence) ?? 0 : 0;
+      if (sequence) {
+        while (sequenceOwner < sequence.length - 1 && sequence[sequenceOwner]!.end <= sequenceStart) sequenceOwner += 1;
+      }
+      const owningMember = sequence?.[sequenceOwner];
       const segmentOffset = sequence
-        ? (occurrences.runStarts[sequence[0]!.runIndex] ?? sourceOffset) + (segment.sourceTextOffset ?? 0)
+        ? (occurrences.runStarts[owningMember!.runIndex] ?? sourceOffset) + sequenceStart - owningMember!.start
         : runIndex === undefined
         ? sourceOffset
         : (occurrences.runStarts[runIndex] ?? sourceOffset) + (consumedByRun.get(runIndex) ?? 0);
@@ -4130,6 +4263,7 @@ function planMeasuredLines(
       lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength);
       if ('isTab' in segment) {
         const tab = segment as LayoutTabSeg;
+        const tabRunIndex = sequence ? sequenceMemberRunIndex(sequence, segment.sourceTextOffset ?? 0) : runIndex;
         const leader = tab.leader ?? 'none';
         let leaderShape: MeasuredTabPlanSegment['leaderShape'];
         let underline: MeasuredTabPlanSegment['underline'];
@@ -4218,6 +4352,9 @@ function planMeasuredLines(
         }
         segments.push({
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+          // The run that holds the tab character: the owning member of a
+          // shared text sequence, else the segment's own run.
+          ...(tabRunIndex === undefined ? {} : { sourceRunIndex: tabRunIndex }),
           measuredWidthPt: tab.measuredWidth, leader,
           ...(tab.alignedGapLimit ? { alignedGapLimitPt: tab.alignedGapLimit } : {}),
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
@@ -4329,18 +4466,52 @@ function planMeasuredLines(
           }
           sourceRuns = owners;
         }
-        segments.push(textPlanSegment(
+        const plannedText = textPlanSegment(
           segment as LayoutTextSeg, paragraph, segmentOffset,
           paragraphCharacterGrid(context),
           sourceRun,
           verticalGlyphMeasurement,
           sourceRuns,
-        ));
+        );
+        if (sequence && plannedText.kind === 'text') {
+          // A floating drawing anchored between two member runs inside this
+          // piece: the piece is never divided (its shaping, bidi resolution
+          // and paint operations are those of the unanchored text) and keeps
+          // one contiguous range. The drawing's unit of the occurrence domain
+          // follows the piece; its host takes that range position and keeps
+          // its place inside the piece for layout (`placeAt`).
+          const localEnd = sequenceStart + occurrenceLength;
+          for (let member = sequenceOwner; member + 1 < sequence.length
+            && sequence[member + 1]!.start < localEnd; member += 1) {
+            const before = sequence[member]!;
+            const after = sequence[member + 1]!;
+            const afterStart = occurrences.runStarts[after.runIndex] ?? 0;
+            const shift = afterStart - (occurrences.runStarts[before.runIndex] ?? 0) - (after.start - before.start);
+            if (shift <= 0 || after.start <= sequenceStart) continue;
+            // Hosts arrive in source order: one cursor over this line's hosts.
+            while (pendingHost < anchorHostIndexes.length) {
+              const index = anchorHostIndexes[pendingHost]!;
+              const host = segments[index] as MeasuredAnchorHostPlanSegment;
+              if (host.range.start >= afterStart) break;
+              if (host.range.start >= afterStart - shift) {
+                segments[index] = { ...host, range: { start: plannedText.range.end, end: plannedText.range.end },
+                  placeAt: plannedText.range.start + after.start - sequenceStart };
+              }
+              pendingHost += 1;
+            }
+            occurrenceShift += shift;
+          }
+        }
+        if (isAnchorPlacementPlanSegment(plannedText)) anchorHostIndexes.push(segments.length);
+        segments.push(plannedText);
+        lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength + occurrenceShift);
       }
-      sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
+      sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength + occurrenceShift);
     }
-    const onlyMath = raw.segments.length === 1 && 'math' in (raw.segments[0] ?? {} as object)
-      ? raw.segments[0] as LayoutMathSeg
+    // Anchor placement items are no line content (metricSegments).
+    const lineContent = metricSegments(raw.segments);
+    const onlyMath = lineContent.length === 1 && 'math' in (lineContent[0] ?? {} as object)
+      ? lineContent[0] as LayoutMathSeg
       : undefined;
     const planned = planLine({
       paragraphXPt, availableWidthPt, alignment: paragraph.alignment,
@@ -4408,7 +4579,16 @@ function planMeasuredLines(
         raw.eastAsian, raw.gridCountSingle,
       ))
       : 0;
-    const retained = context.lineGrid.active ? sealLineCopy({
+    // The empty mark's line of an anchor-only paragraph keeps the mark's own
+    // page-edge facts (its allowance, no grid-leading line relief: the mark's
+    // grid relief is the measured markGridAfterLeadingPt), never facts
+    // recomputed from the line breaker's metrics.
+    const retained = measuredLine.emptyMarkLine ? sealLineCopy({
+      ...planned,
+      markLine: true as const,
+      ...((measured.markPageEdgeOverhangPt ?? 0) > 0
+        ? { pageEdgeOverhangPt: measured.markPageEdgeOverhangPt } : {}),
+    }, [planned]) : context.lineGrid.active ? sealLineCopy({
       ...planned,
       gridAfterLeadingPt: allowsGridLeadingOverhang ? Math.max(0, Math.min(
         (measuredLine.advancePt - ownHeightPt) / 2,
@@ -4441,7 +4621,9 @@ export function attachBarTabRules(
 ): readonly LineLayout[] {
   const bars = tabStops.filter((stop) => stop.alignment === 'bar');
   if (bars.length === 0) return lines;
-  return lines.map((line) => ({
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: the mark line of an anchor-only
+  // paragraph is the empty mark, which has no line to rule.
+  return lines.map((line) => (line.markLine ? line : {
     ...line,
     barTabRules: bars.map((bar) => {
       const xPt = baseRtl
@@ -4502,6 +4684,12 @@ function rebaseMeasuredLineRanges(
 /** A mark-only paragraph still owns a real line box and baseline when numbering
  * paints there. Materializing that host through `planLine` keeps the marker on
  * the same retained geometry path as a marker followed by body text. */
+/** Baseline of an empty paragraph mark's line below its top. */
+function markLineBaselineOffsetPt(measured: MeasuredParagraph): number {
+  return measured.markPictureBaselineOffsetPt
+    ?? measured.contentEndYPt - measured.contentStartYPt - measured.lastLineBelowBaselinePt;
+}
+
 function numberingMarkerHostLine(
   measured: MeasuredParagraph,
   paragraph: ParagraphAcquisitionInput,
@@ -4521,9 +4709,7 @@ function numberingMarkerHostLine(
     line: {
       range: { start: 0, end: 0 },
       topPt: measured.contentStartYPt,
-      baselinePt: measured.markPictureBaselineOffsetPt === undefined
-        ? measured.contentEndYPt - measured.lastLineBelowBaselinePt
-        : measured.contentStartYPt + measured.markPictureBaselineOffsetPt,
+      baselinePt: measured.contentStartYPt + markLineBaselineOffsetPt(measured),
       advancePt,
       xOffsetPt: 0,
       availableWidthPt,
@@ -4979,6 +5165,33 @@ interface AcquiredAnchorOccurrence {
   readonly hostRange: import('./types.js').TextRange;
 }
 
+type LocatedAnchorHost = Readonly<{
+  lineIndex: number;
+  host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>;
+}>;
+const anchorHostsByLines = new WeakMap<readonly LineLayout[], ReadonlyMap<string, LocatedAnchorHost>>();
+
+/** Each anchor occurrence's host on the planned lines (its first, in line
+ * order), indexed once per line list: a paragraph acquires every occurrence
+ * against the same lines, and a search per occurrence would visit every
+ * placement once per anchor. */
+function anchorHostsOf(lines: readonly LineLayout[]): ReadonlyMap<string, LocatedAnchorHost> {
+  let index = anchorHostsByLines.get(lines);
+  if (!index) {
+    const hosts = new Map<string, LocatedAnchorHost>();
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      for (const placement of lines[lineIndex]!.placements) {
+        if (placement.kind === 'anchor-host' && placement.anchorOccurrenceId !== undefined
+          && !hosts.has(placement.anchorOccurrenceId)) {
+          hosts.set(placement.anchorOccurrenceId, { lineIndex, host: placement });
+        }
+      }
+    }
+    anchorHostsByLines.set(lines, index = hosts);
+  }
+  return index;
+}
+
 function acquireAnchorOccurrence(
   occurrenceId: string,
   payloads: readonly Readonly<{ run: AnchoredPayloadRun; runIndex: number }>[],
@@ -4996,18 +5209,9 @@ function acquireAnchorOccurrence(
   contentStartYPt: number,
   lineReference?: AnchorLineReference,
 ): AcquiredAnchorOccurrence | null {
-  let hostLineIndex = -1;
-  let host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> | undefined;
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const found = lines[lineIndex]?.placements.find((placement) =>
-      placement.kind === 'anchor-host' && placement.anchorOccurrenceId === occurrenceId);
-    if (found?.kind === 'anchor-host') {
-      hostLineIndex = lineIndex;
-      host = found;
-      break;
-    }
-  }
-  if (!host || hostLineIndex < 0) return null;
+  const located = anchorHostsOf(lines).get(occurrenceId);
+  if (!located) return null;
+  const { lineIndex: hostLineIndex, host } = located;
   const ordered = [...payloads].sort((a, b) =>
     (a.run.anchorAcquisitionInput?.group?.sourceIndex ?? 0)
       - (b.run.anchorAcquisitionInput?.group?.sourceIndex ?? 0)
@@ -6387,22 +6591,38 @@ function precedingCharacterStartPt(
   line: LineLayout,
   host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>,
 ): number {
-  const hostPt = host.bounds.xPt;
-  let bestEnd = -Infinity;
-  let bestStart = line.bounds.xPt;
-  for (const placement of line.placements) {
-    if (placement.kind !== 'text') continue;
-    for (const cluster of placement.clusters) {
-      const start = placement.origin.xPt + cluster.offset.xPt;
-      const end = start + cluster.advancePt;
-      if (end <= hostPt + 1e-6 && end > bestEnd) {
-        bestEnd = end;
-        bestStart = start;
+  // The line planner records the source-preceding character of each host it
+  // places; the search below serves hosts planned elsewhere.
+  const recorded = host.precedingCharacterOffsetPt;
+  if (recorded !== undefined) return recorded === null ? line.bounds.xPt : host.bounds.xPt + recorded;
+  // The line's clusters by ascending end, indexed once per placement list:
+  // every host of the line searches the same list.
+  let ends = clusterEndsByLine.get(line.placements);
+  if (!ends) {
+    const all: { end: number; start: number }[] = [];
+    for (const placement of line.placements) {
+      if (placement.kind !== 'text') continue;
+      for (const cluster of placement.clusters) {
+        const start = placement.origin.xPt + cluster.offset.xPt;
+        all.push({ end: start + cluster.advancePt, start });
       }
     }
+    // Stable: of clusters that end together, the first placed is kept.
+    all.sort((a, b) => a.end - b.end);
+    clusterEndsByLine.set(line.placements, ends = all.filter((entry, index) => index === 0 || entry.end > all[index - 1]!.end));
   }
-  return bestStart;
+  const limit = host.bounds.xPt + 1e-6;
+  let low = 0;
+  let high = ends.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (ends[middle]!.end <= limit) low = middle + 1;
+    else high = middle;
+  }
+  return low === 0 ? line.bounds.xPt : ends[low - 1]!.start;
 }
+
+const clusterEndsByLine = new WeakMap<LineLayout['placements'], readonly Readonly<{ end: number; start: number }>[]>();
 
 function wordMode14ColumnOriginApplies(
   acquisition: AnchorAcquisitionInput,
@@ -6912,6 +7132,16 @@ export function acquireParagraphResult(
 ): AcquiredParagraphResult {
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
+  }
+  // The facts runs decide (ruby, East Asian text) are those of the
+  // metric-visible paragraph in measurement and in line planning alike:
+  // revisions the view omits decide nothing (metric-visible-runs).
+  const metricParagraph = metricVisibleParagraph(paragraph, options.environment.showTrackedChanges);
+  if (metricParagraph !== paragraph) {
+    const facts = paragraphContentFacts(metricParagraph);
+    if (facts.hasRuby !== options.context.hasRuby || facts.hasEastAsianText !== options.context.hasEastAsianText) {
+      options = { ...options, context: { ...options.context, ...facts } };
+    }
   }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
@@ -7444,12 +7674,26 @@ function projectAcquiredParagraphLines(
     - planningContext.physicalIndentLeftPt
     - planningContext.physicalIndentRightPt
     - rightGridAdjustmentPt;
-  const occurrences = logicalOccurrenceMap(paragraph, measured, options.environment.showTrackedChanges);
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: an anchor-only paragraph is its empty
+  // mark; its anchors ride on that mark's line (the numbered mark host line's
+  // geometry), not on a line of their own.
+  const markAnchorLine = measured.markOnly ? measured.markAnchorLine : undefined;
+  const plannedMeasured: MeasuredParagraph = markAnchorLine ? {
+    ...measured,
+    lines: [{
+      layout: markAnchorLine,
+      topYPt: measured.contentStartYPt,
+      advancePt: measured.contentEndYPt - measured.contentStartYPt,
+      baselineOffsetPt: markLineBaselineOffsetPt(measured),
+      emptyMarkLine: true,
+    }],
+  } : measured;
+  const occurrences = logicalOccurrenceMap(paragraph, plannedMeasured, options.environment.showTrackedChanges);
   const numberingPlan = options.continuesFromPrevious
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
   let lines = planMeasuredLines(
-    measured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
+    plannedMeasured, paragraph, metricVisibleParagraph(paragraph, options.environment.showTrackedChanges), paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
     options.environment.verticalGlyphMeasurement,
     options.environment.verticalPageFrame,
@@ -7528,6 +7772,7 @@ function projectAcquiredParagraph(
     payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
   });
   const paragraphOccurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
+  const attachedDrawings = new Map<number, ParagraphPlacement[]>();
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
     const acquired = acquireAnchorOccurrence(
       occurrenceId,
@@ -7555,18 +7800,24 @@ function projectAcquiredParagraph(
     textBoxes.push(...acquired.textBoxes);
     if (acquired.exclusion) anchorExclusions.push(acquired.exclusion);
     if (acquired.collision) anchorCollisions.push(acquired.collision);
-    const hostLine = lines[acquired.hostLineIndex];
-    if (hostLine) {
-      lines = lines.map((line, lineIndex) => lineIndex === acquired.hostLineIndex ? {
-        ...line,
-        placements: [...line.placements, {
-          kind: 'drawing', range: acquired.hostRange,
-          drawingId: acquired.drawing!.id,
-          bounds: acquired.drawing!.inkBounds,
-          advancePt: 0,
-        }],
-      } : line);
+    if (lines[acquired.hostLineIndex]) {
+      const attached = attachedDrawings.get(acquired.hostLineIndex) ?? [];
+      attached.push({
+        kind: 'drawing', range: acquired.hostRange,
+        drawingId: acquired.drawing.id,
+        bounds: acquired.drawing.inkBounds,
+        advancePt: 0,
+      });
+      attachedDrawings.set(acquired.hostLineIndex, attached);
     }
+  }
+  // Each line takes its drawings once, after every occurrence has resolved
+  // against the same planned lines.
+  if (attachedDrawings.size > 0) {
+    lines = lines.map((line, lineIndex) => {
+      const attached = attachedDrawings.get(lineIndex);
+      return attached ? { ...line, placements: [...line.placements, ...attached] } : line;
+    });
   }
   const firstLineMovedMarkerEdgePx = options.continuesFromPrevious
     ? undefined : measured.lines[0]?.layout.numberingFirstLine?.leadingEdgePx

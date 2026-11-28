@@ -345,6 +345,11 @@ export interface TextClusterLayout {
   readonly range: TextRange;
   readonly offset: PointPt;
   readonly advancePt: number;
+  /** The advance paint draws the cluster's glyph at, from its pen: its font
+   * advance with character scaling, without tracking, justification,
+   * distribution, kashida or grid-cell padding (which belong to `advancePt`
+   * and the pens). Absent where the glyph fills its advance. */
+  readonly glyphAdvancePt?: number;
 }
 
 export interface TextPaintOp {
@@ -413,6 +418,11 @@ export interface RetainedRunTypographyFacts {
 }
 
 export interface TextPlacement {
+  /** The kashida plan's tatweel insertions (code point index into `text`,
+   * count) this piece paints: its one paint operation holds them while the
+   * retained clusters keep their natural advances. Geometry derived from the
+   * piece reads them (visual-cluster-geometry). */
+  readonly kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
   readonly kind: 'text';
   /** Authored discretionary '-' ink has an empty logical source owner.
    * Paint still consumes text/paintOps; copy and find consume the typed owner. */
@@ -504,6 +514,9 @@ export interface TextPlacement {
 export interface TabPlacement {
   readonly kind: 'tab';
   readonly range: TextRange;
+  /** Parsed run occurrence of the tab character, for readers that address
+   * content by source run (comment ranges). */
+  readonly sourceRunIndex?: number;
   readonly bounds?: LayoutRect;
   readonly advancePt: number;
   readonly leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
@@ -522,6 +535,13 @@ export interface AnchorHostPlacement {
   readonly baselinePt: number;
   readonly sourceMetrics?: Readonly<{ ascentPt: number; descentPt: number }>;
   readonly anchorOccurrenceId?: string;
+  /** Where the character that precedes this host in source order on its
+   * line starts, as an inline offset from the host (so it moves with the
+   * host); null when no character precedes it. Recorded by the line planner
+   * for the line-relative position of a vertical section's drawing: with
+   * right-to-left text the preceding character is not the one before the
+   * host's position. */
+  readonly precedingCharacterOffsetPt?: number | null;
 }
 
 export type InlineResourceKind = 'image' | 'chart' | 'math' | 'picture-bullet';
@@ -671,6 +691,10 @@ export interface LineLayout {
    * (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a producer's proportional extra
    * space below the natural line). Placement and paint keep the full advance. */
   readonly pageEdgeOverhangPt?: number;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the empty paragraph mark's line of an
+   * anchor-only paragraph. It carries the mark's own facts (geometry and page
+   * edge allowance); pagination treats it as that empty mark. */
+  readonly markLine?: true;
   /** Width that justification (ECMA-376 §17.18.44 both/distribute, the
    * kashida types, thaiDistribute) added to the line beyond its natural
    * advances and seams; the natural automatic East Asian gaps stay natural.

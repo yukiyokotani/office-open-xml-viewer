@@ -2,7 +2,8 @@ import { compatOf } from '../layout/compat-profile.js';
 import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
-import { revisionIsOmitted } from '../layout/revision-visibility.js';
+import { runIsOmitted } from '../layout/revision-visibility.js';
+import { anchorFreeRuns, isAnchoringRun } from '../layout/metric-visible-runs.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
 import { acquireTextSequences } from './text-sequence.js';
@@ -1005,9 +1006,186 @@ function chartSegment(
   };
 }
 
+/**
+ * WORD_ANCHOR_HOST_NO_LINE_METRIC by construction (metric-visible-runs): the
+ * segments of a paragraph that anchors floating drawings are the segments of
+ * the same paragraph without them, built from exactly those runs, with the
+ * anchors added afterwards as position-only items. No sequence, join,
+ * automatic-spacing or eligibility decision of the content build can see an
+ * anchor, so the text of both paragraphs is segmented, shaped and joined
+ * identically.
+ */
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  const content = anchorFreeRuns(runs);
+  if (content === runs) return buildContentSegments(runs, environment);
+  // The native source-unit capability owns a complete single-run paragraph
+  // (eligibleNativeSourceText) and is withdrawn for every body band that
+  // holds a floating source; its cursor never spans an anchor.
+  const sourceIndex: number[] = [];
+  // §17.3.2.14 groups only source-adjacent runs into one fitText region: a
+  // content run that follows a removed anchoring run starts a new region.
+  const fitTextSeams = new Set<number>();
+  let anchorSkipped = false;
+  runs.forEach((run, runIndex) => {
+    if (isAnchoringRun(run)) { anchorSkipped = true; return; }
+    if (anchorSkipped && sourceIndex.length > 0) fitTextSeams.add(sourceIndex.length);
+    anchorSkipped = false;
+    sourceIndex.push(runIndex);
+  });
+  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined }, fitTextSeams);
+  restoreSourceRunIndices(segs, sourceIndex);
+  return withAnchorPlacementSegments(segs, runs, environment);
+}
+
+/** Rewrite the content build's run indices (into the anchor-free runs) to
+ * indices into the source runs, wherever a segment retains one. */
+function restoreSourceRunIndices(segs: LayoutSeg[], sourceIndex: readonly number[]): void {
+  const sequences = new Map<NonNullable<LayoutSeg['sourceTextSequence']>, NonNullable<LayoutSeg['sourceTextSequence']>>();
+  const glyph = <G extends LayoutTextSeg>(owned: G): G => owned.sourceRunIndex === undefined ? owned
+    : Object.freeze({ ...owned, sourceRunIndex: sourceIndex[owned.sourceRunIndex]! });
+  for (const segment of segs) {
+    if (segment.sourceRunIndex !== undefined) segment.sourceRunIndex = sourceIndex[segment.sourceRunIndex]!;
+    const sequence = segment.sourceTextSequence;
+    if (sequence) {
+      let restored = sequences.get(sequence);
+      if (!restored) {
+        restored = Object.freeze(sequence.map((source) =>
+          Object.freeze({ ...source, runIndex: sourceIndex[source.runIndex]! })));
+        sequences.set(sequence, restored);
+      }
+      segment.sourceTextSequence = restored;
+    }
+    if (!('text' in segment)) continue;
+    if (segment.optionalHyphen) segment.optionalHyphen = glyph(segment.optionalHyphen);
+    if (segment.optionalHyphenBreaks) {
+      segment.optionalHyphenBreaks = Object.freeze(segment.optionalHyphenBreaks.map((opportunity) =>
+        Object.freeze({ ...opportunity, glyph: glyph(opportunity.glyph) })));
+    }
+  }
+}
+
+/** The position-only items an anchoring run puts in the segment stream: its
+ * host's position, or a floating picture/chart payload. A floating shape is
+ * placed from its run and puts nothing here. */
+function anchorPlacementSegments(
+  run: ParagraphLayoutRun,
+  runIndex: number,
+  environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  switch (run.type) {
+    case 'anchorHost':
+      return [{
+        text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
+        fontSize: 0, color: null, fontFamily: run.fontFamily ?? null, vertAlign: null, measuredWidth: 0,
+        anchorHostWithoutMetric: true, sourceRunIndex: runIndex,
+      }];
+    case 'image':
+      return [{ ...imageSegment({ ...run, anchor: true }, environment), sourceRunIndex: runIndex }];
+    case 'chart':
+      return [{ ...chartSegment({ ...run, anchor: true }, environment), sourceRunIndex: runIndex }];
+    case 'unavailableDrawing':
+      return [{ ...unavailableDrawingSegment(run, true, environment), sourceRunIndex: runIndex }];
+    default:
+      return [];
+  }
+}
+
+/** A placeholder is built as the picture or chart it stands for (same
+ * segment kind, box, position and leading metadata); availability only
+ * changes what is painted. */
+function unavailableDrawingSegment(
+  run: Extract<ParagraphLayoutRun, { type: 'unavailableDrawing' }>,
+  anchored: boolean,
+  environment: LineLayoutEnvironment,
+): LayoutImageSeg {
+  return {
+    ...(run.resourceKind === 'chart'
+      ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+      : imageSegment({
+          imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+          ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
+          ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+          ...(run.rotation ? { rotation: run.rotation } : {}),
+          ...(run.flipH ? { flipH: true } : {}),
+          ...(run.flipV ? { flipV: true } : {}),
+          inlineObjectOrigin: 'drawingml',
+        }, environment)),
+    unavailableResourceKind: run.resourceKind,
+  };
+}
+
+/**
+ * Add each displayed anchor to the content segments at its source position:
+ * before the segment that holds or follows that position. An anchor between
+ * two runs of one uninterrupted text sequence lies inside a text piece and
+ * records its offset in that piece (`anchorTextOffset`); the piece itself is
+ * never split. The line breaker never sees these items (prepareBreakQueue),
+ * so they change no break opportunity, glue or shaping. One forward sweep.
+ * @internal Exported for its work-scaling test.
+ */
+export function withAnchorPlacementSegments(
+  content: LayoutSeg[],
+  runs: readonly ParagraphLayoutRun[],
+  environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  const result: LayoutSeg[] = [];
+  let cursor = 0;
+  // UTF-16 offset of the segment at `cursor` in its text sequence.
+  let sequence: LayoutSeg['sourceTextSequence'];
+  let sequenceOffset = 0;
+  // First member of that sequence not yet known to precede the next anchor:
+  // anchors arrive in source order, so it only moves forward.
+  let sequenceMember = 0;
+  const lengthOf = (segment: LayoutSeg): number =>
+    'text' in segment ? segment.text.length : 'isTab' in segment ? 1 : 0;
+  const enter = (): void => {
+    const members = cursor < content.length ? content[cursor]!.sourceTextSequence : undefined;
+    if (members !== sequence) {
+      sequence = members;
+      sequenceOffset = 0;
+      sequenceMember = 0;
+    }
+  };
+  const emit = (): void => {
+    const segment = content[cursor]!;
+    if (sequence) sequenceOffset += lengthOf(segment);
+    result.push(segment);
+    cursor += 1;
+    enter();
+  };
+  enter();
+  /** Where run `runIndex` starts relative to the segment at `cursor`: after
+   * it (`undefined`), or at this UTF-16 offset of it (0: before it). */
+  const offsetInCursor = (runIndex: number): number | undefined => {
+    const segment = content[cursor]!;
+    const owner = segment.sourceRunIndex;
+    if (owner === undefined || owner > runIndex) return 0;
+    if (!sequence || sequence.at(-1)!.runIndex < runIndex) return undefined;
+    // Inside this sequence, where its next member starts.
+    while (sequence[sequenceMember]!.runIndex < runIndex) sequenceMember += 1;
+    const offset = sequence[sequenceMember]!.start;
+    return sequenceOffset + lengthOf(segment) <= offset ? undefined : Math.max(0, offset - sequenceOffset);
+  };
+  for (const [runIndex, run] of runs.entries()) {
+    if (!isAnchoringRun(run) || runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) continue;
+    let offset: number | undefined = 0;
+    while (cursor < content.length && (offset = offsetInCursor(runIndex)) === undefined) emit();
+    for (const anchor of anchorPlacementSegments(run, runIndex, environment)) {
+      if (offset && cursor < content.length && 'text' in anchor) anchor.anchorTextOffset = offset;
+      result.push(anchor);
+    }
+  }
+  while (cursor < content.length) emit();
+  return result;
+}
+
+function buildContentSegments(
+  runs: readonly ParagraphLayoutRun[],
+  environment: LineLayoutEnvironment,
+  fitTextSeams: ReadonlySet<number> = new Set(),
 ): LayoutSeg[] {
   if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
     && keepsWordLineBoxes(runs)) {
@@ -1064,6 +1242,9 @@ export function buildSegments(
   const fitTextFragmentEntryByKey = new Map<string, number>();
   const fitTextRuns: FitTextRun[] = [];
   for (const [runIndex, run] of runs.entries()) {
+    // A removed anchoring run separates its neighbours as any non-text run does
+    // (WORD_FIT_TEXT_REGION_DRAWING: every drawing run ends the region).
+    if (fitTextSeams.has(runIndex)) fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
     if (run.type !== 'text') {
       fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
       continue;
@@ -1956,8 +2137,7 @@ function appendRunsToSegments(
     // (`showTrackedChanges`) keeps every revision run visible so it can be
     // decorated. Insertions/moveTo render in both views, and revision metadata
     // remains available through the parsed model for consumer-owned review UI.
-    const runRevisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
-    if (revisionIsOmitted(runRevisionKind, environment.showTrackedChanges)) {
+    if (runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) {
       continue;
     }
     const joinFromPreviousNoBreakHyphen = joinNextVisibleText;
@@ -2140,7 +2320,7 @@ function appendRunsToSegments(
       segs.push({ ...imageSegment(run, environment), ...listLabelOf(run) });
     } else if (run.type === 'chart') {
       segs.push(chartSegment(run, environment));
-    } else if (run.type === 'shape' && run.inline === true) {
+    } else if (run.type === 'shape') {
       // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
       // Reserve its extent in the same line-breaking path as an inline picture;
       // paragraph acquisition replaces the sentinel with a retained drawing
@@ -2173,21 +2353,7 @@ function appendRunsToSegments(
       // A placeholder is built as the picture or chart it stands for (same
       // segment kind, box, position and leading metadata); availability only
       // changes what is painted.
-      const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
-      segs.push({
-        ...(run.resourceKind === 'chart'
-          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
-          : imageSegment({
-              imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
-              ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
-              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
-              ...(run.rotation ? { rotation: run.rotation } : {}),
-              ...(run.flipH ? { flipH: true } : {}),
-              ...(run.flipV ? { flipV: true } : {}),
-              inlineObjectOrigin: 'drawingml',
-            }, environment)),
-        unavailableResourceKind: run.resourceKind,
-      });
+      segs.push(unavailableDrawingSegment(run, false, environment));
     } else if (run.type === 'break') {
       if (run.breakType === 'line') {
         // Determine font size for the line break height from surrounding text runs
@@ -2246,91 +2412,98 @@ function appendRunsToSegments(
         ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
       });
     } else if (run.type === 'anchorHost') {
-      const eastAsian = run.fontFamilyEastAsia != null;
-      const bold = run.bold ?? false;
-      const italic = run.italic ?? false;
-      const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
-      const weight = bold ? 700 : 400;
-      const style = italic ? ('italic' as const) : ('normal' as const);
-      // An anchor host has no glyph of its own. Resolve a script-matched probe
-      // as for an empty paragraph mark, then require selected-face identity and
-      // cmap coverage. Empty text would vacuously admit any subset resource.
-      const probeText = eastAsian ? 'あ' : 'x';
-      const selected = environment.layoutServices?.text.resolve({
-        text: probeText,
-        fonts: {
-          ascii: run.fontFamily,
-          highAnsi: run.fontFamily,
-          eastAsia: run.fontFamilyEastAsia,
-          complexScript: run.fontFamily,
-        },
-        slot: eastAsian ? 'eastAsia' : 'ascii',
-        weight,
-        style,
-      });
-      const localFont = selectedMetric(selected, probeText);
-      // The mark hosting a floating anchor participates in the same natural
-      // atLeast line box as a visible text line.
-      const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
-      const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
-        ? projectedResourceMetric(localFont,
-          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
-        : undefined;
-      const referenceMetric =
-        naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
-          && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
-            ?? environment.layoutServices?.text.localMetrics ?? {}), selected)
-          // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
-          // spans and paragraph marks only; an anchor host is outside its
-          // evidence, so only an exact catalogued tuple lends its geometry.
-          ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+      // Only a list label's metric run (a picture bullet's label font) has
+      // this type here: it is not an anchoring run and keeps its metrics. A
+      // floating drawing's anchor host never reaches the content build
+      // (withAnchorPlacementSegments).
+      {
+        const hostRun = run;
+        const eastAsian = hostRun.fontFamilyEastAsia != null;
+        const bold = hostRun.bold ?? false;
+        const italic = hostRun.italic ?? false;
+        const authoredFamily = hostRun.fontFamilyEastAsia ?? hostRun.fontFamily ?? null;
+        const weight = bold ? 700 : 400;
+        const style = italic ? ('italic' as const) : ('normal' as const);
+        // The metric run has no glyph of its own. Resolve a script-matched probe
+        // as for an empty paragraph mark, then require selected-face identity and
+        // cmap coverage. Empty text would vacuously admit any subset resource.
+        const probeText = eastAsian ? 'あ' : 'x';
+        const selected = environment.layoutServices?.text.resolve({
+          text: probeText,
+          fonts: {
+            ascii: hostRun.fontFamily,
+            highAnsi: hostRun.fontFamily,
+            eastAsia: hostRun.fontFamilyEastAsia,
+            complexScript: hostRun.fontFamily,
+          },
+          slot: eastAsian ? 'eastAsia' : 'ascii',
+          weight,
+          style,
+        });
+        const localFont = selectedMetric(selected, probeText);
+        // A picture list label's metric run participates in the same natural
+        // atLeast line box as a visible text line.
+        const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
+        const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
+          ? projectedResourceMetric(localFont,
             fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
+          environment.verticalCJK === true || environment.wordLineBoxes === true))
           : undefined;
-      const familyLineMetric = resourceMetric ?? referenceMetric;
-      segs.push({
-        text: '',
-        metricOnly: true,
-        ...(eastAsian ? { metricEastAsian: true as const } : {}),
-        bold,
-        italic,
-        underline: false,
-        strikethrough: false,
-        fontSize: run.fontSize,
-        color: null,
-        fontFamily: selected?.resolvedFamily ?? authoredFamily,
-        authoredFontFamily: selected?.requestedFamily ?? authoredFamily,
-        fontSource: selected?.source,
-        authoredReferenceMetricAllowed: mayUseAuthoredReferenceVerticalMetric(selected),
-        fontRoute: selected?.route,
-        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
-        ...(resourceMetric?.lineHeightRatio != null
-          ? {
-              resolvedResourceVerticalMetric: true as const,
-              resolvedDesignAscentRatio: resourceMetric.designAscentRatio,
-              resolvedDesignDescentRatio: resourceMetric.designDescentRatio,
-            }
-          : {}),
-        ...(referenceMetric
-          ? {
-              referenceFontVerticalMetric: true as const,
-              resolvedDesignAscentRatio: referenceMetric.designAscentRatio,
-              resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
-            }
-          : {}),
-        ...admittedFaceDecoration(selected, referenceMetric != null),
-        resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
-        vertAlign: null,
-        measuredWidth: 0,
-        eaFloorFamily: eastAsian ? (selected?.resolvedFamily ?? authoredFamily) : null,
-        resolvedEaFloorLineHeightRatio: eastAsian ? familyLineMetric?.lineHeightRatio : undefined,
-        resolvedEaFloorEastAsianLineHeightRatio: eastAsian
-          ? familyLineMetric?.eastAsianLineHeightRatio
-          : undefined,
-        snapToCharacterGrid: false,
-        ...listLabelOf(run),
-      });
+        const referenceMetric =
+          naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
+            && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
+              ?? environment.layoutServices?.text.localMetrics ?? {}), selected)
+            // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
+            // spans and paragraph marks only; a label metric run is outside its
+            // evidence, so only an exact catalogued tuple lends its geometry.
+            ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+              fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+          environment.verticalCJK === true || environment.wordLineBoxes === true))
+            : undefined;
+        const familyLineMetric = resourceMetric ?? referenceMetric;
+        segs.push({
+          text: '',
+          metricOnly: true,
+          ...(eastAsian ? { metricEastAsian: true as const } : {}),
+          bold,
+          italic,
+          underline: false,
+          strikethrough: false,
+          fontSize: hostRun.fontSize,
+          color: null,
+          fontFamily: selected?.resolvedFamily ?? authoredFamily,
+          authoredFontFamily: selected?.requestedFamily ?? authoredFamily,
+          fontSource: selected?.source,
+          authoredReferenceMetricAllowed: mayUseAuthoredReferenceVerticalMetric(selected),
+          fontRoute: selected?.route,
+          resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+          ...(resourceMetric?.lineHeightRatio != null
+            ? {
+                resolvedResourceVerticalMetric: true as const,
+                resolvedDesignAscentRatio: resourceMetric.designAscentRatio,
+                resolvedDesignDescentRatio: resourceMetric.designDescentRatio,
+              }
+            : {}),
+          ...(referenceMetric
+            ? {
+                referenceFontVerticalMetric: true as const,
+                resolvedDesignAscentRatio: referenceMetric.designAscentRatio,
+                resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
+              }
+            : {}),
+          ...admittedFaceDecoration(selected, referenceMetric != null),
+          resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
+          vertAlign: null,
+          measuredWidth: 0,
+          eaFloorFamily: eastAsian ? (selected?.resolvedFamily ?? authoredFamily) : null,
+          resolvedEaFloorLineHeightRatio: eastAsian ? familyLineMetric?.lineHeightRatio : undefined,
+          resolvedEaFloorEastAsianLineHeightRatio: eastAsian
+            ? familyLineMetric?.eastAsianLineHeightRatio
+            : undefined,
+          snapToCharacterGrid: false,
+          ...listLabelOf(hostRun),
+        });
+      }
     }
     let sequenceOffset = 0;
     let markerIndex = 0;

@@ -1,4 +1,5 @@
 import type { DocxCompatProfile } from './compat-profile.js';
+import { metricSegments } from '../line-breaker/model.js';
 import type { LayoutLine, LayoutTextSeg } from '../line-layout.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 import type { ParagraphLayoutSource, ParagraphTextBearingRun } from './text.js';
@@ -101,7 +102,9 @@ export function specifiedTextLineMetrics(
   // a 13-line control totals exactly 480pt, and anchors remain on nominal
   // point advances. This is device projection, not accumulated layout leading.
   let first: LayoutTextSeg | undefined;
-  for (const segment of line.segments) {
+  // Anchor placement items are no line content (metricSegments).
+  const segments = metricSegments(line.segments);
+  for (const segment of segments) {
     if (!('text' in segment)) return null;
     if (segment.metricOnly) continue;
     if (!segment.text) continue;
@@ -140,7 +143,7 @@ export function specifiedTextLineMetrics(
     }
   }
   // Host-face/style changes were not part of the homogeneous controls.
-  for (const segment of line.segments) {
+  for (const segment of segments) {
     if ('text' in segment && segment.metricOnly
       && ((segment.authoredFontFamily ?? segment.fontFamily) !== authoredFamily
         || segment.bold || segment.italic || !referenceSourceAdmitted(segment))) return null;

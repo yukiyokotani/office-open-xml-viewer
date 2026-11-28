@@ -459,7 +459,9 @@ describe('table-cell parser-owned anchor reflow', () => {
     const exclusion = paragraph.exclusions.find((candidate) =>
       candidate.anchorOccurrenceId?.endsWith('cell-later'));
 
-    expect(lineTexts).toEqual(['AAAAAAAA', 'A', 'BBBBBBBB']);
+    // The anchor between the two runs opens no break opportunity: the lines
+    // break as the unbroken word does (WORD_ANCHOR_HOST_NO_LINE_METRIC).
+    expect(lineTexts).toEqual(['AAAAAAAA', 'ABBBBBBB', 'B']);
     expect(exclusion).toBeDefined();
     expect(exclusion!.bounds).toMatchObject({
       xPt: 80,

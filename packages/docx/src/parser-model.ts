@@ -104,7 +104,8 @@ import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/c
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { displaysOnlyParagraphMark, hasVisibleNumbering, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { anchorFreeRuns } from './layout/metric-visible-runs.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -1126,6 +1127,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
       return [anchorOccurrenceKey(source, acquisition.occurrenceId)];
     }),
   )]);
+  const inkless = !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph);
   return Object.freeze({
     kind: 'paragraph' as const,
     source,
@@ -1140,10 +1142,14 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
     styleId: paragraph.styleId ?? null,
-    inkless: !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph),
-    onlyTextualContent: !paragraphHasUnavailableDrawing(paragraph)
-      && paragraph.runs.every((run) => run.type === 'text'
-        || (run.type === 'break' && run.breakType === 'line')),
+    inkless,
+    // Floating drawings are no inline content (metric-visible-runs): the
+    // paragraph is classified as the same paragraph without them.
+    onlyTextualContent: anchorFreeRuns(paragraphRunsWithUnavailableDrawings(paragraph) as readonly Readonly<{ type: string }>[])
+      .every((run) => run.type === 'text'
+        || (run.type === 'break' && (run as { breakType?: string }).breakType === 'line')),
+    ...(inkless ? {} : markOnlyViewFact(paragraphRunsWithUnavailableDrawings(paragraph))),
+    ...(hasVisibleNumbering(paragraph) ? { visibleNumbering: true as const } : {}),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
@@ -1189,12 +1195,37 @@ function paragraphFrameFact(
   return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
 }
 
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph with source content
+ * displays only its mark (besides floating drawings), per revision view
+ * (displaysOnlyParagraphMark). */
+function markOnlyViewFact(
+  runs: readonly Readonly<DocRun | UnavailableDrawingRunWire>[],
+): Readonly<{ markOnlyView?: Readonly<{ final: boolean; markup: boolean }> }> {
+  const facts = runs as unknown as Parameters<typeof displaysOnlyParagraphMark>[0];
+  const final = displaysOnlyParagraphMark(facts, false);
+  const markup = displaysOnlyParagraphMark(facts, true);
+  return final || markup ? { markOnlyView: Object.freeze({ final, markup }) } : {};
+}
+
 /** A vanished, inkless body paragraph acquires no block: body flow consumes
  * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break).
- * Model paragraphs keep unavailable drawings in a sidecar, so they are checked
- * here beside layout's isSwallowedHiddenParagraph. */
+ * Model paragraphs keep unavailable drawings in a sidecar, so the paragraph
+ * is classified over its runs with them: an inline unavailable drawing is
+ * ink, a floating one is no flow content, like any floating drawing
+ * (isSwallowedHiddenParagraph). */
 function isSwallowedHiddenBodyParagraph(paragraph: Readonly<DocParagraph>): boolean {
-  return !paragraphHasUnavailableDrawing(paragraph) && isSwallowedHiddenParagraph(paragraph);
+  if (!paragraphHasUnavailableDrawing(paragraph)) return isSwallowedHiddenParagraph(paragraph);
+  return isSwallowedHiddenParagraph({
+    markVanish: paragraph.markVanish,
+    runs: paragraphRunsWithUnavailableDrawings(paragraph) as Parameters<typeof isSwallowedHiddenParagraph>[0]['runs'],
+  });
+}
+
+/** Whether a paragraph anchors a floating drawing, an unavailable one
+ * included. */
+function anchorsFloatingDrawing(paragraph: Readonly<DocParagraph>): boolean {
+  const runs = paragraphRunsWithUnavailableDrawings(paragraph) as Parameters<typeof anchorFreeRuns>[0];
+  return anchorFreeRuns(runs) !== runs;
 }
 
 function bodyLayoutSequenceInput(
@@ -1233,6 +1264,10 @@ function bodyLayoutSequenceInput(
         reason: 'hidden-paragraph' as const,
         ...(element.pageBreakBefore === true ? { pageBreakBefore: true as const } : {}),
         ...paragraphFrameFact(element),
+        // WORD_ANCHOR_HOST_NO_LINE_METRIC: the floating drawings it anchors
+        // are still acquired, without flow (body-paginator).
+        ...(element.runs && anchorsFloatingDrawing(element)
+          ? { anchors: acquiredBodyParagraph(element, source) } : {}),
       });
     }
     if (element.type === 'table') {

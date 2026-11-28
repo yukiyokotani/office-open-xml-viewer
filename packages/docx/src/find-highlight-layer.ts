@@ -1,4 +1,6 @@
 import { countSpacingCharacters } from './character-spacing.js';
+import { OverlayClipFrames } from './run-clip.js';
+import { clipRunRect, joinRunRects, runFontBox, runOverlayRects, type RunRect } from './overlay-geometry.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -11,11 +13,12 @@ import { countSpacingCharacters } from './character-spacing.js';
  * approach the selection / hyperlink overlay uses, so highlights compose with
  * them and survive re-render the same way.
  *
- * The horizontal extent of a slice (its x offset + width within the run) is the
- * shared core `sliceHorizontalExtent`, measured against the run's font via a
- * caller-supplied `measure` primed with `ctx.font = run.font` — the same
- * measureText↔fillText correspondence the selection overlay relies on. The
- * vertical extent is the run's line box (`y` … `y + h`), owned here.
+ * A slice's boxes come from the overlay geometry pipeline
+ * (overlay-geometry.ts): the glyph rects of the slice's characters, cut to
+ * the run's clips and joined where they touch. Only a run without cluster
+ * boxes (one not projected from a layout) is measured, with the shared core
+ * `sliceHorizontalExtent` against the run's font via a caller-supplied
+ * `measure` primed with `ctx.font = run.font`.
  *
  * The active match (the one `findNext`/`findPrev` last landed on) is drawn in a
  * distinct emphasis colour so the user can tell it apart from the other hits,
@@ -23,7 +26,6 @@ import { countSpacingCharacters } from './character-spacing.js';
  */
 import {
   sliceHorizontalExtent,
-  overlayPercent,
   type FindHighlightColors,
   type MatchRunSlice,
 } from '@silurus/ooxml-core';
@@ -79,52 +81,88 @@ export function buildDocxHighlightLayer(
 
   const matchColor = colors.match ?? DEFAULT_FIND_HIGHLIGHT;
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
+  const clipFrames = new OverlayClipFrames(layer, cssWidth, cssHeight);
 
   for (const match of matches) {
     const fill = match.active ? activeColor : matchColor;
-    for (const slice of match.slices) {
+    // The glyphs of every slice of the match where they are painted inside
+    // their runs' clips (overlay-geometry.ts), joined across the slices: one
+    // match is one marking, so where its runs touch it is one box, and where
+    // their glyphs overlap the shared area is tinted once. A run without
+    // cluster boxes (not projected from a layout) is measured along the run
+    // and cut the same way.
+    const parts = match.slices.flatMap((slice) => {
       const run = runs[slice.runIndex];
-      if (!run) continue;
-      // Measure the way the run was laid out and drawn (its reference-em font
-      // scaled onto the run when projected with one).
-      const measure = runOverlayMeasure(run, measureForFont);
-      const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
-      // Match offsets are UTF-16; count tracking with the same rendered-
-      // character rule as layout. Marks and unselected SHY add no run pitch.
-      // Exclude the pitch following the slice's final rendered character.
-      const pitch = run.letterSpacingPx ?? 0;
+      if (!run) return [];
       const start = Math.max(0, Math.min(slice.start, run.text.length));
       const end = Math.max(start, Math.min(slice.end, run.text.length));
-      const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
-      const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
-      const pitchedX = extent.x + prefixCount * pitch;
-      // Keep main's multiply-before-add order for ordinary slices as well.
-      const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
-      // §17.3.2.10 縦中横 alone compresses natural extents into the retained
-      // one-em cell. Ordinary runs preserve the established natural measurement.
-      const k = tateChuYokoOverlayScale(run, measure);
-      const x = pitchedX * k;
-      const width = pitchedWidth * k;
-      if (width <= 0) continue;
+      return [{
+        run,
+        rects: run.clusterBoxes ? runOverlayRects(run, start, end) : measuredSliceRects(run, start, end, measureForFont),
+      }];
+    });
+    for (const placed of joinRunRects(parts)) {
+      // A clipped box also lies in containers sized to its clips, which cut
+      // it like the glyphs at any angle.
+      const frame = clipFrames.place(placed);
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
       // carries a rotate transform; apply the same transform (about the box's
       // top-left) so the highlight lies along the rotated glyph run, exactly as
       // the selection span does.
-      const transform = run.transform
-        ? `transform:${run.transform};transform-origin:top left;`
+      const transform = frame.orientation
+        ? `transform:${frame.orientation};transform-origin:top left;`
         : '';
       // Positioned as a % of the page's intended CSS box so the box scales with
-      // the container under external CSS scaling. A vertical (tbRl) run's
-      // transform is about `top left`, so the %-placed origin rotates into the
-      // column exactly as before at 1× scale.
+      // the container under external CSS scaling.
       box.style.cssText =
         `position:absolute;` +
-        `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
+        frame.position(0, 0) +
+        `width:${frame.width(placed.width)};height:${frame.height(placed.height)};` +
         transform +
         `background:${fill};pointer-events:none;`;
-      layer.appendChild(box);
+      frame.parent.appendChild(box);
     }
   }
+}
+
+/** The rects of a slice of a run that carries no cluster boxes: its measured
+ * extent along the run over the run's font box, cut to the run's clips. */
+function measuredSliceRects(
+  run: DocxTextRunInfo,
+  start: number,
+  end: number,
+  measureForFont: (font: string) => (s: string) => number,
+): RunRect[] {
+  const { x, width } = measuredSliceInterval(run, start, end, run.letterSpacingPx ?? 0, measureForFont);
+  const across = runFontBox(run);
+  return clipRunRect(run, { x, y: across.y, width, height: across.height });
+}
+
+/** The extent of a slice of a run that carries no cluster boxes (a run not
+ * projected from a layout): measured as a prefix of the run's text, from
+ * its left edge. */
+function measuredSliceInterval(
+  run: DocxTextRunInfo,
+  start: number,
+  end: number,
+  pitch: number,
+  measureForFont: (font: string) => (s: string) => number,
+): { x: number; width: number } {
+  // Measure the way the run was laid out and drawn (its reference-em font
+  // scaled onto the run when projected with one).
+  const measure = runOverlayMeasure(run, measureForFont);
+  const extent = sliceHorizontalExtent(run.text, start, end, measure);
+  // Match offsets are UTF-16; count tracking with the same rendered-
+  // character rule as layout. Marks and unselected SHY add no run pitch.
+  // Exclude the pitch following the slice's final rendered character.
+  const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
+  const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
+  const pitchedX = extent.x + prefixCount * pitch;
+  // Keep main's multiply-before-add order for ordinary slices as well.
+  const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
+  // §17.3.2.10 縦中横 alone compresses natural extents into the retained
+  // one-em cell. Ordinary runs preserve the established natural measurement.
+  const k = tateChuYokoOverlayScale(run, measure);
+  return { x: pitchedX * k, width: pitchedWidth * k };
 }

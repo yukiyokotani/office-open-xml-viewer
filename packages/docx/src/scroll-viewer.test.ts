@@ -796,8 +796,8 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
       reference: { source, runIndex: 4, affinity: 'preceding' },
     }] as CommentAnchorRange[];
     engine.feedTextRuns = [
-      { text: 'among', source, sourceRunIndex: 0, direction: 'rtl', x: 20, y: 30, w: 35, h: 14, fontSize: 12, font: '12px sans-serif' },
-      { text: 'older', source, sourceRunIndex: 1, direction: 'rtl', x: 60, y: 30, w: 30, h: 14, fontSize: 12, font: '12px sans-serif' },
+      { text: 'among', source, sourceRunIndex: 0, direction: 'rtl', x: 20, y: 30, w: 40, h: 14, fontSize: 12, font: '12px sans-serif' },
+      { text: 'older', source, sourceRunIndex: 1, direction: 'rtl', x: 60, y: 30, w: 36, h: 14, fontSize: 12, font: '12px sans-serif' },
       { text: 'things', source, sourceRunIndex: 2, direction: 'rtl', x: 96, y: 30, w: 36, h: 14, fontSize: 12, font: '12px sans-serif' },
       { text: 'below', source, sourceRunIndex: 3, direction: 'rtl', x: 20, y: 50, w: 34, h: 14, fontSize: 12, font: '12px sans-serif' },
     ];

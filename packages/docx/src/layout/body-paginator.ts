@@ -1,3 +1,4 @@
+import { withoutParagraphDecoration } from './paragraph-visibility.js';
 import {
   NoteOverflowPolicy, NoteOverflowRecoveryRequired, attachNoteOverflowPolicy,
   noteOverflowPolicyOf, noteOverflowAllowed,
@@ -132,6 +133,9 @@ import {
   wordPreBreakInlineDrawingResource,
   wordPerColumnFootnoteBandsApply,
   wordContinuousSectionMayShareFootnotePage,
+  wordMarkOnlyViewBlock,
+  wordInklessMarkBlock,
+  wordFollowingInkContent,
 } from './body-pagination-compatibility.js';
 import {
   wordContinuousSectionRestartDisplayNumber,
@@ -804,37 +808,28 @@ function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
     ? 'root'
     : cursor.boundary.sourceTextStart !== undefined
       ? `source:${cursor.boundary.sourceTextStart + cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`
-    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`;
+    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}${cursor.boundary.afterAnchorLine ? ':after-anchor-line' : ''}`;
 }
 
-function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number): boolean {
-  for (let index = startIndex; index < input.sequence.length; index += 1) {
-    const entry = input.sequence[index]!;
-    if (entry.kind === 'consume-source') continue;
-    if (entry.kind === 'authored-break') {
-      if (entry.break !== 'lastRenderedPageBreak') return false;
-      continue;
-    }
-    if (entry.kind === 'begin-section') {
-      if (entry.section.startType !== 'continuous') return false;
-      continue;
-    }
-    const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
-    if (block.kind !== 'paragraph') return true;
-    if (block.pageBreakBefore) return false;
-    if (block.inkless !== true) return true;
-  }
-  return false;
-}
-
-function isUndecoratedInklessMark(layout: ParagraphLayout): boolean {
+/** An undecorated inkless mark: no line, paint, resource or drawing of its
+ * own. A paragraph that displays only its mark besides floating drawings
+ * (`markOnlyView`) is judged as its empty equivalent: its floating drawings
+ * and anchor hosts are not the mark's, while anything else on its mark line
+ * (a numbering marker) still is. */
+function isUndecoratedInklessMark(layout: ParagraphLayout, markOnlyView = false): boolean {
+  const lines = markOnlyView
+    // Its anchor hosts and its floating drawings' placements (it has no
+    // inline object by classification) are not the mark's.
+    ? layout.lines.filter((line) => line.placements.some((placement) =>
+      placement.kind !== 'anchor-host' && placement.kind !== 'drawing'))
+    : layout.lines;
   return layout.paragraphMark !== undefined
-    && layout.lines.length === 0
+    && lines.length === 0
     && layout.shading === undefined
     && layout.borders.length === 0
-    && layout.resources.length === 0
-    && layout.drawings.length === 0
-    && layout.textBoxes.length === 0;
+    && (markOnlyView || (layout.resources.length === 0
+      && layout.drawings.length === 0
+      && layout.textBoxes.length === 0));
 }
 
 function locationAfter(
@@ -2453,6 +2448,37 @@ function* paginateBodyPassSteps(
     noteProgress.retain(args[1]);
     return accepted;
   };
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: acquire the floating drawings of a
+   * paragraph that takes no flow (a collapsed or hidden mark holding only
+   * them): no flow extent, spacing or page content, and nothing painted of
+   * its own (no list marker, border, shading or line number), as its empty
+   * counterpart. */
+  const acquireAnchorsWithoutFlow = (block: BodyParagraphSourceInput): void => {
+    const location = acquisitionLocation(state);
+    const acquired = session.measureParagraph({
+      input: block,
+      location,
+      availableInlineExtentPt: location.availableBounds.widthPt,
+      suppressSpaceBefore: true,
+      continuation: Object.freeze({ boundary: null }),
+    });
+    const pageHadContent = state.flow.pageHasContent;
+    // Its mark takes no flow and paints nothing of its own (no list marker,
+    // border, shading or line number, as its empty counterpart): the node
+    // holds only the drawings, and its lines only where they are anchored.
+    const accepted = acceptPageNode(
+      state,
+      Object.freeze({ ...withoutParagraphDecoration(acquired.layout), ordinaryFlow: false }),
+      block.source,
+      0,
+      paragraphFragmentStartKey(Object.freeze({ boundary: null })),
+      acceptedOccurrenceIds,
+      allocations,
+    );
+    state = Object.freeze({ ...accepted, flow: Object.freeze({ ...accepted.flow, pageHasContent: pageHadContent }) });
+    if (acquired.flowRegistryDelta) session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
+    session.moveAcquisitionCursor(acquisitionLocation(state));
+  };
   capturePageCheckpoint = (nextEntryIndex) => {
     if (!canRecoverOnPage) return;
     const current = currentEntryResume();
@@ -2701,6 +2727,9 @@ function* paginateBodyPassSteps(
     }
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
+      // WORD_ANCHOR_HOST_NO_LINE_METRIC: a hidden paragraph that anchors
+      // floating drawings joins the next as its empty counterpart does.
+      if (entry.anchors) acquireAnchorsWithoutFlow(entry.anchors);
       continue;
     }
     if (entry.kind === 'authored-break') {
@@ -2802,6 +2831,9 @@ function* paginateBodyPassSteps(
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
     if (block.kind === 'paragraph') {
       if (block.continuousSectionRole === 'collapse-mark') {
+        // WORD_ANCHOR_HOST_NO_LINE_METRIC: a collapsed mark that anchors
+        // floating drawings collapses as its empty counterpart does.
+        if (block.inkless !== true && resumed?.kind !== 'paragraph') acquireAnchorsWithoutFlow(block);
         continue;
       }
       if (block.pageBreakBefore && resumed?.kind !== 'paragraph') {
@@ -2857,7 +2889,7 @@ function* paginateBodyPassSteps(
               cursor.boundary === null
               // Windows trr3 C: automatic overflow suppresses before for
               // empty marks as well as text. Objects remain outside the controls.
-              && (block.inkless === true || block.onlyTextualContent === true)
+              && (wordInklessMarkBlock(block, options.showTrackedChanges) || block.onlyTextualContent === true)
               && !state.flow.pageHasContent
               && automaticPageStartEntryIndex === entryIndex
             )
@@ -2866,7 +2898,7 @@ function* paginateBodyPassSteps(
               // leading-spacing rule for the complete group.
               cursor.boundary === null
               && block.keepNext
-              && block.inkless !== true
+              && !wordInklessMarkBlock(block, options.showTrackedChanges)
               && !state.flow.pageHasContent
               && automaticPageStartEntryIndex === entryIndex
             )
@@ -2980,8 +3012,8 @@ function* paginateBodyPassSteps(
           let keepSetBlockedByDeferral = false;
           let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
             keepNext: block.keepNext,
-            inkless: block.inkless === true,
-            undecoratedMark: isUndecoratedInklessMark(acquired.layout),
+            inkless: wordInklessMarkBlock(block, options.showTrackedChanges),
+            undecoratedMark: isUndecoratedInklessMark(acquired.layout, wordMarkOnlyViewBlock(block, options.showTrackedChanges)),
           });
           for (let nextIndex = entryIndex + 1; nextIndex < input.sequence.length; nextIndex += 1) {
             const nextEntry = input.sequence[nextIndex]!;
@@ -3133,8 +3165,9 @@ function* paginateBodyPassSteps(
         // mark that starts here without keepNext; any other fragment ignores
         // the reserve, so its whole-note acquisition is not performed (it
         // would otherwise touch every note of a long paragraph per attempt).
-        const markReserveMatters = cursor.boundary === null && block.inkless === true
-          && !block.keepNext && isUndecoratedInklessMark(acquired.layout);
+        const markOnlyView = wordMarkOnlyViewBlock(block, options.showTrackedChanges);
+        const markReserveMatters = cursor.boundary === null && wordInklessMarkBlock(block, options.showTrackedChanges)
+          && !block.keepNext && isUndecoratedInklessMark(acquired.layout, markOnlyView);
         const markReservePt = markReserveMatters
           ? footnoteAdmission(acquired.layout, location.availableBounds.widthPt).reservePt
           : 0;
@@ -3147,13 +3180,13 @@ function* paginateBodyPassSteps(
         const trailingMarkAdmissionAllowancePt =
           wordTrailingEmptyMarkAdmissionAllowancePt({
             hasContinuationBoundary: cursor.boundary !== null,
-            inkless: block.inkless === true,
-            undecorated: isUndecoratedInklessMark(acquired.layout),
+            inkless: wordInklessMarkBlock(block, options.showTrackedChanges),
+            undecorated: isUndecoratedInklessMark(acquired.layout, markOnlyView),
             keepNext: block.keepNext,
             markReservePt,
             pageBottomIsUnreserved,
             physicalRegionBottomIsActive,
-            hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
+            hasFollowingInk: wordFollowingInkContent(input.sequence, entryIndex + 1, options.showTrackedChanges),
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
             markOnLineGrid: acquired.markOnLineGrid === true,

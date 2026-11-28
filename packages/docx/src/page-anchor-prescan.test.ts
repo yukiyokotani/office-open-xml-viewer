@@ -3,6 +3,7 @@ import { __test_preRegisterPageFloats } from './test-support/renderer-internals.
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { isPageLevelAnchorY } from './layout/anchor-classification.js';
+import { wordBlockHasInk, wordInklessMarkBlock } from './layout/body-pagination-compatibility.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
 import type { ParagraphLayout } from './layout/types.js';
@@ -1054,4 +1055,180 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
     expect(state.floats.length).toBe(1);
     expect(state.pageAnchorPrescanned?.size).toBe(1);
   });
+});
+
+describe('anchor-only paragraph beside a float (WORD_ANCHOR_HOST_NO_LINE_METRIC)', () => {
+  it('places the host and a character-relative picture at the empty mark wrap window', () => {
+    // A 200pt column (x 20-220) and a square float over x 20-120, y 52-92.
+    // The next paragraph (top 40) holds only a character-relative picture and
+    // a 40pt mark: the float overlaps the mark's line (40-80), not the first
+    // 10pt of it, and moves the mark to x 120.
+    const float = parserAnchor('float', { xPt: 0, yPt: 32, widthPt: 100, heightPt: 40,
+      horizontalRelativeFrom: 'margin', verticalRelativeFrom: 'margin', wrap: 'square' });
+    const glyph = { ...parserAnchor('glyph', { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+      horizontal: { relativeFrom: 'character', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 5 } },
+      vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 0 } } } as AnchorAcquisitionInput;
+    const layout = canonicalLayout([
+      paraWith([...parserAnchoredImage(float), textRun('A', 20)]),
+      paraWith(parserAnchoredImage(glyph), { fontSize: 40 }),
+      paraWith([], { fontSize: 40 }),
+    ], { pageWidth: 240 });
+    const [anchorOnly] = sourceParagraphs(layout, 1);
+    const [empty] = sourceParagraphs(layout, 2);
+    const host = anchorOnly!.lines[0]!.placements.find((placement) => placement.kind === 'anchor-host')!;
+    // The empty mark's own wrap window (the same window the following empty
+    // paragraph takes) places the line, its host and the picture.
+    expect(anchorOnly!.paragraphMark?.wrapBounds?.xPt).toBe(120);
+    expect(empty!.paragraphMark?.wrapBounds?.xPt).toBe(120);
+    expect(anchorOnly!.lines[0]!.bounds.xPt).toBe(120);
+    expect(host.bounds.xPt).toBe(120);
+    expect(anchorOnly!.drawings.map((drawing) => drawing.inkBounds.xPt)).toEqual([125]);
+  });
+});
+
+describe('anchor-only paragraphs keep their content before a continuous section (WORD_ANCHOR_HOST_NO_LINE_METRIC)', () => {
+  const continuous = (): BodyElement => ({ type: 'sectionBreak', kind: 'continuous', columns: null,
+    geom: section({ sectionStart: 'continuous', columns: null }) } as unknown as BodyElement);
+  const glyph = (): AnchorAcquisitionInput => ({
+    ...parserAnchor('glyph', { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+    vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+  } as AnchorAcquisitionInput);
+  const numbered = (runs: DocRun[]): BodyElement => ({
+    ...paraWith(runs),
+    numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 36, tab: 36, suff: 'tab',
+      fontFamily: 'NotInMetrics', fontFacts: { fontSize: 20, fontFamily: 'NotInMetrics' } },
+    indentLeft: 36, indentFirst: -36,
+  } as unknown as BodyElement);
+  const layout = (body: BodyElement[], showTrackedChanges = false) => {
+    // The section after the break starts continuously (the final sectPr).
+    const model = { ...canonicalModel(body), section: section({ sectionStart: 'continuous', columns: null }) };
+    return layoutDocument(model, createLayoutServices(model, { measureContext: makeCtx() }),
+      { currentDateMs: 0, showTrackedChanges });
+  };
+  const paragraphAt = (result: ReturnType<typeof layout>, index: number) => result.pages
+    .flatMap((page) => page.layers.body)
+    .filter((node): node is ParagraphLayout => node.kind === 'paragraph' && node.source.path[0] === index);
+  const texts = (paragraphs: readonly ParagraphLayout[]) => paragraphs.flatMap((paragraph) => paragraph.lines)
+    .flatMap((line) => line.placements).filter((placement) => placement.kind === 'text')
+    .map((placement) => placement.text).join('');
+
+  it('acquires the drawings of an anchor-only paragraph a continuous section follows', () => {
+    const result = layout([paraWith(parserAnchoredImage(glyph())), continuous(), para({ text: 'After' })]);
+    expect(paragraphAt(result, 0).flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+  });
+
+  it('keeps revision-visible text in the markup view', () => {
+    const deleted = { ...textRun('Gone', 20), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+    const body = [paraWith([...parserAnchoredImage(glyph()), deleted]), continuous(), para({ text: 'After' })];
+    expect(texts(paragraphAt(layout(body, true), 0))).toContain('Gone');
+    // The final view hides the deletion; the drawing is still acquired.
+    expect(paragraphAt(layout(body, false), 0).flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+  });
+
+  it('measures an anchor beside deleted larger text as the empty paragraph (public model, final view)', () => {
+    const deleted = { ...textRun('Big', 40), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+    const height = (runs: DocRun[]) => {
+      const paragraph = paragraphAt(layout([paraWith(runs, { fontSize: 11 }), para({ text: 'After' })]), 0)[0]!;
+      return paragraph.flowBounds.heightPt;
+    };
+    expect(height([...parserAnchoredImage(glyph()), deleted])).toBe(height([]));
+  });
+
+  it('classifies the mark per active revision view, and painted numbering as ink', () => {
+    // Anchor beside deleted text: anchor-only in the final view only.
+    const tracked = { inkless: false, markOnlyView: { final: true, markup: false } };
+    expect(wordInklessMarkBlock(tracked, false)).toBe(true);
+    expect(wordInklessMarkBlock(tracked, true)).toBe(false);
+    expect(wordBlockHasInk(tracked, false)).toBe(false);
+    expect(wordBlockHasInk(tracked, true)).toBe(true);
+    // A numbered empty or anchor-only paragraph places as its mark but its
+    // painted marker is ink for the look-ahead.
+    for (const numbered of [{ inkless: true, visibleNumbering: true as const },
+      { inkless: false, markOnlyView: { final: true, markup: true }, visibleNumbering: true as const }]) {
+      expect(wordInklessMarkBlock(numbered, false)).toBe(true);
+      expect(wordBlockHasInk(numbered, false)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['anchor-only', () => parserAnchoredImage(glyph())],
+    ['empty', () => []],
+  ] as const)('keeps the painted list marker of a numbered %s paragraph', (_, runs) => {
+    const result = layout([numbered(runs()), continuous(), para({ text: 'After' })]);
+    expect(texts(paragraphAt(result, 0))).toContain('1.');
+  });
+});
+
+// WORD_ANCHOR_HOST_NO_LINE_METRIC: every way a floating drawing reaches
+// classification (isFloatingPayloadRun), with and without deleted text, in
+// the final and the markup view, measures and paginates as its empty
+// equivalent exactly when the view shows nothing else.
+describe('anchor-only classification over every floating payload shape', () => {
+  const acquisition = (id: string) => ({
+    ...parserAnchor(id, { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+    vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+  } as AnchorAcquisitionInput);
+  const publicPicture = (extra: object = {}): DocRun => ({
+    type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png', widthPt: 10, heightPt: 10,
+    anchor: true, anchorXPt: 300, anchorYPt: 0, anchorXFromMargin: true, anchorYFromPara: true,
+    anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'paragraph', wrapMode: 'none', ...extra,
+  } as unknown as DocRun);
+  const publicShape = (offsetPt = 300): DocRun => ({
+    type: 'shape', widthPt: 10, heightPt: 10, anchorXPt: offsetPt, anchorYPt: 0, anchorXFromMargin: true,
+    anchorYFromPara: true, presetGeometry: 'rect', subpaths: [], fill: null, stroke: null, rotation: 0,
+    flipH: false, flipV: false, wrapMode: 'none',
+  } as unknown as DocRun);
+  const shapes: readonly [string, () => DocRun[]][] = [
+    ['parser anchor host + picture payload', () => parserAnchoredImage(acquisition('a'))],
+    ['parser anchored unavailable placeholder', () => [
+      { type: 'anchorHost', fontSize: 12, __anchorOccurrenceId: 'u' } as unknown as DocRun,
+      { type: 'unavailableDrawing', resourceKind: 'image', widthPt: 10, heightPt: 10,
+        __anchorAcquisition: acquisition('u') } as unknown as DocRun,
+    ]],
+    // Public models, and the legacy DOC and ODT readers that produce them,
+    // carry no anchor-host run.
+    ['public picture, anchor true (also VML, legacy DOC and ODT floating pictures)', () => [publicPicture()]],
+    ['public chart, anchor true', () => [{ ...publicPicture(), type: 'chart', chart: { plotArea: {} } } as unknown as DocRun]],
+    ['public floating shape (also VML shapes)', () => [publicShape()]],
+    ['public floating group (flattened shapes)', () => [publicShape(300), publicShape(320)]],
+  ];
+  const numberedNo = (runs: DocRun[], markSize = 12): BodyElement => paraWith(runs, { fontSize: markSize });
+  const filler = (heightPt: number): BodyElement => ({
+    ...paraWith([textRun('x', 12)], { fontSize: 12 }),
+    lineSpacing: { rule: 'exact', value: heightPt, explicit: true },
+  } as unknown as BodyElement);
+  const layoutWith = (body: BodyElement[], showTrackedChanges: boolean) => {
+    const model = canonicalModel(body);
+    return layoutDocument(model, createLayoutServices(model, { measureContext: makeCtx() }),
+      { currentDateMs: 0, showTrackedChanges });
+  };
+  const probe = (result: ReturnType<typeof layoutWith>, index: number) => result.pages
+    .map((page, pageIndex) => [pageIndex, page.layers.body.find((node): node is ParagraphLayout =>
+      node.kind === 'paragraph' && node.source.path[0] === index)] as const)
+    .find(([, node]) => node !== undefined)!;
+  const deletedText = { ...textRun('Big', 40), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+  for (const [name, make] of shapes) {
+    for (const deleted of [false, true]) {
+      for (const markup of [false, true]) {
+        it(`${name}, deleted text ${deleted}, ${markup ? 'markup' : 'final'} view`, () => {
+          const runs = [...make(), ...(deleted ? [deletedText] : [])];
+          const anchorOnly = !deleted || !markup;
+          // Measurement: the paragraph's height against its empty equivalent.
+          const measure = (paragraphRuns: DocRun[]) =>
+            probe(layoutWith([numberedNo(paragraphRuns), para({ text: 'After' })], markup), 0)[1]!.flowBounds.heightPt;
+          if (anchorOnly) expect(measure(runs)).toBe(measure([]));
+          else expect(measure(runs)).toBeGreaterThan(measure([]));
+          // Pagination at the page bottom (12pt mark; 12.5 and 11.5pt left).
+          if (!anchorOnly) return;
+          for (const room of [12.5, 11.5]) {
+            const pageOf = (paragraphRuns: DocRun[]) =>
+              probe(layoutWith([filler(160 - room), numberedNo(paragraphRuns), para({ text: 'After' })], markup), 1)[0];
+            expect(pageOf(runs), `room ${room}`).toBe(pageOf([]));
+          }
+        });
+      }
+    }
+  }
 });

@@ -4,3 +4,15 @@
 export function revisionIsOmitted(kind: string | undefined, showTrackedChanges: boolean | undefined): boolean {
   return showTrackedChanges !== true && (kind === 'deletion' || kind === 'moveFrom');
 }
+
+/** Whether a run is omitted (emits nothing) in the given revision view: the
+ * single predicate for every run type (text, picture, chart, shape, field,
+ * math, break, tab, symbol, note reference, anchor host ...). The segment
+ * builder and the anchor-only classification both call it, so what layout
+ * emits and what classification counts cannot disagree. */
+export function runIsOmitted(
+  run: Readonly<{ revision?: Readonly<{ kind?: string }> | null }>,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  return revisionIsOmitted(run.revision?.kind, showTrackedChanges);
+}

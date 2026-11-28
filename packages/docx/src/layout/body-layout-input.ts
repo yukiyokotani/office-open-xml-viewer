@@ -155,6 +155,15 @@ export interface BodyParagraphSourceInput {
   readonly inkless?: boolean;
   /** Parser-established text/line-break-only content, including an empty mark; excludes objects. */
   readonly onlyTextualContent?: boolean;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC (displaysOnlyParagraphMark): a paragraph
+   * with source content whose metric-visible runs display nothing but its
+   * mark (only floating drawings, or only content the view omits), in the
+   * final view and in the markup view; pagination treats it as its empty mark
+   * (wordInklessMarkBlock). */
+  readonly markOnlyView?: Readonly<{ final: boolean; markup: boolean }>;
+  /** A list marker (text or picture bullet) is painted: visible ink that no
+   * spacing or collapsing role may remove. */
+  readonly visibleNumbering?: true;
   /** Mutually exclusive Word/LibreOffice section-mark spacing interop role. */
   readonly continuousSectionRole?:
     | 'suppress-before'
@@ -218,6 +227,9 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       /** Parse facts of the hidden paragraph (§17.3.1.23, §17.3.1.11). */
       pageBreakBefore?: true;
       framed?: 'frame' | 'drop-cap';
+      /** The hidden paragraph, when it anchors floating drawings: they are
+       * acquired without flow (WORD_ANCHOR_HOST_NO_LINE_METRIC). */
+      anchors?: BodyParagraphSourceInput;
     }>;
 
 export type BodyLayoutSequenceEntry = BodyLayoutSequenceEntryFor<BodySectionLayoutInput>;
@@ -451,16 +463,20 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   // The spacing role depends only on the authored section start type, already
   // present in the acquisition sequence. Resolve section owners and roles in
   // one pass so no second body-sized sequence is retained transiently.
-  const sequence: BodyLayoutSequenceEntry[] = acquired.sequence.map((entry, index) => {
+  const sequence: BodyLayoutSequenceEntry[] = acquired.sequence.flatMap((entry, index): BodyLayoutSequenceEntry | BodyLayoutSequenceEntry[] => {
     if (entry.kind === 'begin-section') {
       const section = sections.get(entry.section.sectionOccurrenceId);
       if (!section) throw new Error(`Missing body section owner: ${entry.section.sectionOccurrenceId}`);
       return Object.freeze({ ...entry, section });
     }
     if (entry.kind === 'consume-source') {
-      return hiddenPageBreaks.has(index)
-        ? Object.freeze({ kind: 'authored-break' as const, source: entry.source, break: 'pageBreakBefore' as const })
-        : entry;
+      if (!hiddenPageBreaks.has(index)) return entry;
+      const pageBreak = Object.freeze({ kind: 'authored-break' as const, source: entry.source, break: 'pageBreakBefore' as const });
+      // Its floating drawings stay acquired, after the break it applies.
+      return entry.anchors
+        ? [pageBreak, Object.freeze({ kind: 'consume-source' as const, source: entry.source, reason: entry.reason,
+          anchors: entry.anchors })]
+        : pageBreak;
     }
     if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') return entry;
     const continuousSectionRole = wordContinuousSectionRole(acquired.sequence, index);

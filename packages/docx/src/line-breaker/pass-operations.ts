@@ -30,6 +30,7 @@ import {
   type LayoutTextSeg,
   type LineBoundary,
   type WrapLayoutCtx,
+  isAnchorPlacementSegment,
 } from './model.js';
 import { createLineBreakerState, isInklessLineItem, type GapTransaction, type GapWindow } from './break-queue.js';
 import {
@@ -248,18 +249,24 @@ export function performLineHeadRequirement(
   const start = boundary?.segIndex ?? 0;
   // Source boundaries must start directly at their index: walking the already
   // consumed prefix at every fragment would make long paragraphs quadratic.
+  // Anchor placement items are no queue items (prepareBreakQueue): the
+  // source walk skips them as the queue does.
   function* sourceCandidates(): IterableIterator<LayoutSeg> {
-    for (let index = start; index < segs.length; index += 1) yield segs[index];
+    for (let index = start; index < segs.length; index += 1) {
+      if (!isAnchorPlacementSegment(segs[index])) yield segs[index];
+    }
   }
   const candidates = boundary ? sourceCandidates() : breakerState.queue;
   let mark: LayoutTextSeg | undefined;
+  let remaining = false;
   for (const candidate of candidates) {
+    remaining = true;
     if (('text' in candidate && !candidate.metricOnly && candidate.text.length > 0)
-      || ('imagePath' in candidate && !candidate.anchor) || 'math' in candidate
+      || 'imagePath' in candidate || 'math' in candidate
       || 'isTab' in candidate || 'lineBreak' in candidate) return 0;
     if ('text' in candidate && candidate.metricOnly) mark ??= candidate;
   }
-  if (boundary ? start >= segs.length : breakerState.queue.length === 0) return 0;
+  if (!remaining) return 0;
   return wrapCtx.paragraphMarkLineStartWidth ?? (mark ? mark.fontSize * scale : 0);
 }
 
@@ -318,7 +325,7 @@ function hangingHeadWidth(operationState: PassOperationState, head: number): num
   const items = breakerState.queue[Symbol.iterator]();
   let item = items.next();
   // As at break time, a lone mark may hang after any item already on the
-  // line, a float anchor included.
+  // line.
   let precededByItem = breakerState.currentLine.length > 0;
   while (!item.done && isInklessLineItem(item.value)) { precededByItem = true; item = items.next(); }
   if (item.done || !('text' in item.value)) return head;
@@ -1051,8 +1058,13 @@ export function performFlush(
   // items cannot end before that unit: the unit is its head (forced here).
   // Tabs and breaks are pen/line controls, not such units.
   const followingUnit = headUnitLowerBound(operationState, breakerState.inHand);
+  // An anchor's own line (WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy) is
+  // such a fragment: it holds nothing but the anchor.
+  const anchorLine = breakerState.anchorLineFlush;
+  breakerState.anchorLineFlush = false;
   if (!brTerminated && nextStart !== undefined && followingUnit > 0
-    && breakerState.currentLine.length > 0 && breakerState.currentLine.every(isInklessLineItem)) {
+    && (breakerState.currentLine.length > 0 || anchorLine)
+    && breakerState.currentLine.every(isInklessLineItem)) {
     operationState.forcedPlacement(followingUnit);
   }
   materializeLatinSpaceCompression();
@@ -1199,6 +1211,7 @@ export function performFlush(
     ...(breakerState.lineLabelShiftPx !== 0
       ? { listLabelShiftPx: breakerState.lineLabelShiftPx } : {}),
     physicalLineIndex: breakerState.physicalLineIndex,
+    ...(anchorLine ? { anchorLine: true as const } : {}),
     ...(justifiedGapPlan
       ? {
           // A unit forced onto a compressed line afterwards (a kinsoku
@@ -1242,7 +1255,8 @@ export function performFlush(
     hasRuby: breakerState.lineHasRuby,
     eastAsian: breakerState.lineEastAsian,
     endsWithBreak: brTerminated,
-    consumedEnd: nextStart ?? breakerState.queue.peek()?.src
+    consumedEnd: anchorLine && nextStart ? { ...nextStart, afterAnchorLine: true }
+      : nextStart ?? breakerState.queue.peek()?.src
       ?? (brTerminated ? { ...endBoundary, trailingEmptyLine: true } : endBoundary),
   });
   if (wrapCtx) {
