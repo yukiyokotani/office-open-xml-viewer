@@ -54,6 +54,7 @@ import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.
 import { mainThreadFallbackWarning } from './main-thread-fallback.js';
 import { admitDocxNativeRouteLines, measureDocxNativeRouteLines } from './native-route-line-metrics.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
+import { buildDocxOutline, type DocxOutlineEntry } from './outline';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
 import type { DocxOfficeFontPresence } from './font-demand-plan.js';
 import { chartFontSubstitutions, FontResolverBridge, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
@@ -61,6 +62,7 @@ import { loadEmbeddedFonts } from './embedded-fonts';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
+  layoutSourceStoreOf,
   layoutVariantStoreOf,
   textAdvanceLookupOf,
 } from './layout/runtime-state.js';
@@ -2011,6 +2013,35 @@ export class DocxDocument {
    */
   getBookmarkPage(bookmarkName: string): number | undefined {
     return this._getBookmarkPages()?.get(bookmarkName);
+  }
+
+  /**
+   * The document's heading outline: every body-story paragraph with an
+   * ECMA-376 §17.3.1.20 outline level (direct `w:outlineLvl` or inherited from
+   * its paragraph style chain, as Word's built-in Heading 1–9 styles assign
+   * it), in document order, with its 1-based level, plain text, `w14:paraId`,
+   * structural source and the page it begins on. Use it to build a navigation
+   * pane or to move to a heading named by an outside reference, joining
+   * `paragraphId` / `source` to {@link collectPageRuns} for its geometry.
+   *
+   * Works in BOTH `main` and `worker` mode; worker mode projects the outline in
+   * the worker and ships only the entries. Pages follow the active layout view
+   * ({@link setLayoutView}). During progressive loading a heading past the
+   * laid-out prefix has no `pageIndex` yet; await
+   * {@link waitUntilLayoutComplete} for every page.
+   */
+  async getOutline(): Promise<readonly Readonly<DocxOutlineEntry>[]> {
+    if (this._mode === 'worker') {
+      const opts = this._withActiveView({});
+      const res = await this._bridge.request(
+        (id) => ({ type: 'outline', id, opts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'outlineBuilt' }>).entries;
+    }
+    const services = documentLayoutRuntimeOf(this).services;
+    const source = services ? layoutSourceStoreOf(services) : undefined;
+    if (!source) throw new Error('Document layout services are not initialized');
+    return buildDocxOutline(source, this._getLayout());
   }
 
   /**

@@ -1402,6 +1402,7 @@ export class DocxDocument {
         currentDate?: Date | number;
     }>): Promise<void>;
     getBookmarkPage(bookmarkName: string): number | undefined;
+    getOutline(): Promise<readonly Readonly<DocxOutlineEntry>[]>;
     pageSize(pageIndex: number): {
         widthPt: number;
         heightPt: number;
@@ -1463,6 +1464,13 @@ export interface DocxHighlightMatch {
 }
 export interface DocxMatchLocation {
     page: number;
+}
+export interface DocxOutlineEntry {
+    readonly level: number;
+    readonly text: string;
+    readonly paragraphId?: string;
+    readonly source: Readonly<DocxStorySource>;
+    readonly pageIndex?: number;
 }
 export interface DocxPageCommentThreadsOptions extends CollectPageRunsOptions, ResolveDocxCommentThreadsOptions {
 }

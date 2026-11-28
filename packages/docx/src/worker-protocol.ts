@@ -3,6 +3,7 @@ import type { DocComment, DocNote, DocRevision, RenderPageOptions, WorkerRespons
 import type { CommentAnchorRange } from './comments';
 import type { RevisionAnchorRange } from './revisions';
 import type { DocxTextRunInfo } from './renderer';
+import type { DocxOutlineEntry } from './outline';
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionCommand,
@@ -167,7 +168,10 @@ export type RenderWorkerRequest =
     }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
-  | { type: 'toMarkdown'; id: number };
+  | { type: 'toMarkdown'; id: number }
+  // Project the heading outline from the worker-retained layout source and the
+  // layout variant selected by `opts` (the host's active view).
+  | { type: 'outline'; id: number; opts: Pick<WireRenderPageOptions, 'currentDate' | 'showTrackedChanges'> };
 
 export type RenderWorkerWireRequest =
   | RenderWorkerRequest
@@ -210,6 +214,7 @@ export type RenderWorkerResponse =
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[]; diagnostics?: readonly LayoutDiagnostic[] }
   | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  | { type: 'outlineBuilt'; id: number; entries: DocxOutlineEntry[] }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
   // authoritative `parsedMeta`. Keyed by `forId` rather than `id` ON PURPOSE —
