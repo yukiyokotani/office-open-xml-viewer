@@ -5061,6 +5061,54 @@ function renderStackedTextBody(
   }
 }
 
+/** The ink of one segment in the font Canvas resolved: an equation's box,
+ * or the glyphs' actual bounding box (0 where the canvas reports none). */
+function segmentInk(seg: LayoutSegment, metrics: TextMetrics | null): { ascent: number; descent: number } {
+  if (seg.math) return { ascent: seg.math.ascent, descent: seg.math.descent };
+  return {
+    ascent: metrics && metrics.actualBoundingBoxAscent > 0 ? metrics.actualBoundingBoxAscent : 0,
+    descent: metrics && metrics.actualBoundingBoxDescent > 0 ? metrics.actualBoundingBoxDescent : 0,
+  };
+}
+
+/** The ordinary line model's baseline in a line box: 0.8 of the box, moved
+ * down far enough that the tallest ink clears the box top. Paint seats
+ * every ordinary-model line by it. */
+function ordinaryBaselineOffset(lineHeight: number, inkAscent: number): number {
+  return Math.max(lineHeight * 0.8, inkAscent);
+}
+
+/** The height an ordinary-model line occupies with its ink contained: the
+ * line box, or the baseline paint chooses (ordinaryBaselineOffset) plus the
+ * deepest ink below it when that reaches further. */
+const lineInkCache = new WeakMap<LayoutLine, { ascent: number; descent: number }>();
+
+function ordinaryLineInkExtent(ctx: CanvasRenderingContext2D, line: LayoutLine, lineHeight: number): number {
+  // A line's ink depends only on its segments' fonts and text, so a line
+  // laid out once (a reused table layout, a body laid out again with the
+  // ordinary model) is measured once.
+  let ink = lineInkCache.get(line);
+  if (!ink) lineInkCache.set(line, ink = measureLineInk(ctx, line));
+  return Math.max(lineHeight, ordinaryBaselineOffset(lineHeight, ink.ascent) + ink.descent);
+}
+
+function measureLineInk(ctx: CanvasRenderingContext2D, line: LayoutLine): { ascent: number; descent: number } {
+  let ascent = 0;
+  let descent = 0;
+  for (const seg of line.segments) {
+    if (seg.isTab) continue;
+    let metrics: TextMetrics | null = null;
+    if (!seg.math) {
+      ctx.font = seg.font;
+      metrics = ctx.measureText(seg.text || FONT_BASELINE_SENTINEL);
+    }
+    const ink = segmentInk(seg, metrics);
+    ascent = Math.max(ascent, ink.ascent);
+    descent = Math.max(descent, ink.descent);
+  }
+  return { ascent, descent };
+}
+
 // Exported (like `layoutParagraph` / `paintHighlight`) so the picture-bullet
 // draw path can be unit-tested against a mock 2D context without standing up a
 // full canvas. Not re-exported from index.ts — module-internal otherwise.
@@ -5100,13 +5148,18 @@ export function renderTextBody(
   tableCell?: TableCellText,
 ): number | void {
   const tableLayouts = tableCell?.layouts;
+  // Layouts of this call: a body laid out again (the ordinary model after
+  // the metric one, a stored normAutofit scale) breaks each paragraph once
+  // per distinct input. Lines are never modified after layout (see
+  // tableParagraphLayout), so reuse paints what a fresh layout would.
+  const callLayouts = new Map<Paragraph, Map<string, LayoutLine[]>>();
   // A growth-rule table cell is sized and painted by the painted line box.
   // spAutoFit's allowance for the resolved font's design box (#1473) is
   // shape autofit: it resizes a shape, and the host font's bounding box is
   // not the line advance, so it stays out of table cells on the growth rule,
   // in measurement and in paint alike (baseline and vertical anchor), so the
   // row sizing and the glyph placement use one geometry.
-  const paintedLineBoxMeasure = tableCell?.paintedLineBox === true;
+  const paintedLineBox = tableCell?.paintedLineBox === true;
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
   // above another in columns; see stacked-text.ts and core layoutStackedText.
   if (body.vert === 'wordArtVert' || body.vert === 'wordArtVertRtl') {
@@ -5346,7 +5399,7 @@ export function renderTextBody(
     // in lockstep with the draw-side `textXOffset` (§below) and the
     // naturalWidthExceedsBbox measurement; a bullet's gutter contributes 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
-    const lines = tableParagraphLayout(tableLayouts, ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
+    const lines = tableParagraphLayout(tableLayouts, callLayouts, ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
@@ -5451,7 +5504,7 @@ export function renderTextBody(
       // 3.6pt marT/marB on top (31.2pt). Neither path uses a substituted
       // font's design box.
       const naturalSingle = maxSizePx * 1.2;
-      const useResolvedFontMetrics = isSpAutoFit && !paintedLineBoxMeasure
+      const useResolvedFontMetrics = isSpAutoFit && !paintedLineBox
         && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
@@ -5622,9 +5675,15 @@ export function renderTextBody(
       });
       const lineTop = totalHeight + topGap;
       totalHeight += linePx + topGap;
+      // A growth-rule table cell on the ordinary model contains its ink the
+      // way paint seats it (ordinaryBaselineOffset): a fallback face whose
+      // glyph ink rises above 0.8 of the box pushes the baseline down, and
+      // the row holds the ink below it too.
       const requiredLineHeight = useResolvedFontMetrics && metricAscent === undefined
         ? Math.max(lineHeight, resolvedFontLine)
-        : lineHeight;
+        : paintedLineBox && metricAscent === undefined
+          ? ordinaryLineInkExtent(ctx, line, lineHeight)
+          : lineHeight;
       requiredHeight = Math.max(
         requiredHeight,
         totalHeight,
@@ -5915,7 +5974,7 @@ export function renderTextBody(
       }
       if (seg.math) {
         lineWidth += seg.math.width;
-        maxAscent = Math.max(maxAscent, seg.math.ascent);
+        maxAscent = Math.max(maxAscent, segmentInk(seg, null).ascent);
         continue;
       }
       ctx.font = seg.font;
@@ -5923,9 +5982,7 @@ export function renderTextBody(
       const ls = seg.letterSpacingPx ?? 0;
       lineWidth += seg.leadingLetterSpacingPx ?? 0;
       lineWidth += seg.text ? measureTextAdvance(ctx, seg.text, ls) : 0;
-      if (m.actualBoundingBoxAscent > 0) {
-        maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
-      }
+      maxAscent = Math.max(maxAscent, segmentInk(seg, m).ascent);
       if (useResolvedFontMetrics) {
         const fontAscent = m.fontBoundingBoxAscent ?? 0;
         const fontHeight = fontAscent + (m.fontBoundingBoxDescent ?? 0);
@@ -5954,7 +6011,7 @@ export function renderTextBody(
             maxAscent,
             resolvedFontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,
           )
-      : Math.max(lineHeight * 0.8, maxAscent);
+      : ordinaryBaselineOffset(lineHeight, maxAscent);
     // Under pPr@fontAlgn t / ctr / b, metricAscent is the line's alignment
     // reference and each run sits at its own offset from it. A list marker
     // follows the line's first run.
@@ -7869,15 +7926,26 @@ function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
 
 function tableParagraphLayout(
   access: TableLayoutAccess | undefined,
+  callLayouts: Map<Paragraph, Map<string, LayoutLine[]>>,
   ...args: Parameters<typeof layoutParagraph>
 ): LayoutLine[] {
-  if (!access) return layoutParagraph(...args);
-  const { memo, record } = access;
   const [ctx, para, ...rest] = args;
+  // Object inputs (render context) are the same throughout one call and one
+  // table, so the key holds the scalar inputs.
   const key = rest.map((value) => typeof value === 'object' ? '' : String(value)).join('|');
-  const cached = memo.layouts.get(para)?.get(key);
-  if (cached) return cached as LayoutLine[];
+  let inCall = callLayouts.get(para);
+  if (!inCall) callLayouts.set(para, inCall = new Map());
+  const fromCall = inCall.get(key);
+  if (fromCall) return fromCall;
+  const cached = access?.memo.layouts.get(para)?.get(key) as LayoutLine[] | undefined;
+  if (cached) {
+    inCall.set(key, cached);
+    return cached;
+  }
   const lines = layoutParagraph(ctx, para, ...rest);
+  inCall.set(key, lines);
+  if (!access) return lines;
+  const { memo, record } = access;
   if (!record) return lines;
   // A CSS font string carries the authored family names, so it is not
   // bounded by the text: each distinct one is charged once, when the memo
@@ -7975,24 +8043,9 @@ export function renderTable(
   return renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
 }
 
-/**
- * The height (EMU) renderTable paints for `el`: the sum of its rows after
- * content growth, computed by the same row sizing without painting. Hit
- * testing uses it when no paint reported the extent.
- */
-export function measureTableExtent(
-  ctx: CanvasRenderingContext2D,
-  el: TableElement,
-  scale: number,
-  slideNumber: number | undefined,
-  rc: RenderContext,
-): number {
-  return renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, undefined, true);
-}
-
 /** renderTable with a caller-owned layout memo; exported for tests, which
  * observe its retention. Not re-exported from index.ts. Returns the painted
- * height in EMU (the grown row sum); `sizeOnly` stops after row sizing. */
+ * height in EMU (the grown row sum). */
 export function renderTableWithLayoutMemo(
   memo: TableLayoutMemo,
   ctx: CanvasRenderingContext2D,
@@ -8001,7 +8054,6 @@ export function renderTableWithLayoutMemo(
   slideNumber: number | undefined,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
-  sizeOnly = false,
 ): number {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
@@ -8041,10 +8093,13 @@ export function renderTableWithLayoutMemo(
   const rowHeights = [...authoredRowHeights];
   // PowerPoint PDF controls (Windows and Mac) grow positive and zero rows in
   // tables whose graphic-frame extent equals the row sum, the case decks
-  // from generators such as python-pptx write and rely on (#2345). No
-  // control has a frame extent below or above the row sum; growing rows
-  // whatever the frame extent says is renderer policy, so that one rule
-  // covers every frame. Each line of text, the last included,
+  // from generators such as python-pptx write and rely on (#2345). The
+  // frame extent takes no part: a PowerPoint for Mac control (2 columns x 3
+  // rows, a:tr@h 24pt, zero margins, exact 24pt leading, 20pt text) exports
+  // rows 24/72/24 for a middle row needing 72pt with frames of 72, 120 and
+  // 48pt, and 24/24/24 without growth with frames of 120 and 48pt: each row
+  // is max(a:tr@h, its content), slack is not spread over the rows and a
+  // short frame shrinks none (2026-11-29). Each line of text, the last included,
   // takes its painted line box (measureNaturalLineSpacing). Browser fonts
   // that wrap differently from Office can change the grown height;
   // overflowing into the next row is the worse failure, because it breaks
@@ -8172,12 +8227,8 @@ export function renderTableWithLayoutMemo(
   }
 
   // The extent paint covers, in EMU: hit testing extends the authored frame
-  // to it (element-selection).
+  // to it (TableHitExtents).
   const paintedHeightEmu = rowHeights.reduce((sum, h) => sum + h, 0) / scale;
-  if (sizeOnly) {
-    ctx.restore();
-    return paintedHeightEmu;
-  }
 
   // ── Column x-positions ────────────────────────────────────────────────────
   // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
@@ -8668,12 +8719,10 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
    *  (LoadOptions.odp): every table keeps the ODF row-height rule
    *  (RenderContext.odfTables), whether or not the source marks it. */
   odfTables?: boolean;
-  /** Receives the painted height (EMU) of each source table element, by
-   *  its index in the slide model, for hit testing (element-selection). */
+  /** Receives the painted height (EMU) of each source table element painted
+   *  taller than its authored frame, by its index in the slide model, for
+   *  hit testing (TableHitExtents). */
   onTableExtent?: (elementIndex: number, heightEmu: number) => void;
-  /** Size the slide's tables (reporting them to onTableExtent) without
-   *  painting, loading images or touching the canvas backing store. */
-  measureTablesOnly?: boolean;
 };
 
 /**
@@ -8870,68 +8919,6 @@ async function renderSlideLeased(
     slide = { ...slide, elements };
   }
 
-  const defaultTextColor = slide.theme ? slide.theme.defaultTextColor : opts.defaultTextColor;
-  const themeDefaultColor = defaultTextColor
-    ? `#${defaultTextColor}`
-    : '#000000';
-  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
-  // default, literal black, not the theme dk1 (issue #1989;
-  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
-  // resolves every inherited colour, including the default-template tx1 of a
-  // master without txStyles. Only this package's own paths (presentation,
-  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
-  // to the public `renderSlide` has no proven parsed chain, with or without a
-  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
-  // 0.89.7. The theme colour above also colours the synthetic SmartArt
-  // fallback shape, which has no PowerPoint counterpart.
-  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
-
-  const pictureBulletImages = new Map<string, SvgImageSource | null>();
-  const shapeFillImages = new Map<string, PreparedShapeFill | null>();
-  const rc: RenderContext = {
-    cjkFallback: opts.cjkFallback ? pptxSlideCjkFallback(slide, slide.theme ? slide.theme.majorFont : opts.majorFont ?? null, slide.theme ? slide.theme.minorFont : opts.minorFont ?? null, opts.cjkFallback) : undefined,
-    themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
-    themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
-    themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
-    ...(opts.odfTables ? { odfTables: true } : {}),
-    embeddedFontAliases: opts.embeddedFontAliases,
-    embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
-    embeddedFontTuples: opts.embeddedFontTuples,
-    officeFontRoutes: opts.officeFontRoutes,
-    officeInstalledFamilies: opts.officeInstalledFamilies,
-    fontSources: opts.fontSources,
-    // Symbol-font codes are judged in the realm of this render's painting
-    // context: by the presentation's oracle, kept while the realm's faces are
-    // unchanged, or by one of this render alone (core symbol-face.ts).
-    symbolFaces: opts.symbolFaces
-      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
-      : createSymbolFaceOracle(
-        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
-        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
-      ),
-    // The backing store may have been clamped below `canvasSize × dpr`; downstream
-    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
-    dpr: effectiveDpr,
-    // Issue #805 — legible default for the synthetic SmartArt fallback shape's
-    // null-colour runs, derived once per slide from the background luminance.
-    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor)
-      ?? themeDefaultColor,
-    pictureBulletImages,
-    shapeFillImages,
-  };
-
-  if (opts.measureTablesOnly) {
-    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
-    if (!ctx) throw new Error('Could not get 2D context');
-    for (const [elementIndex, el] of slide.elements.entries()) {
-      if (el.type !== 'table') continue;
-      const sourceIndex = sourceIndices ? sourceIndices[elementIndex] : elementIndex;
-      if (sourceIndex === undefined) continue;
-      opts.onTableExtent?.(sourceIndex, measureTableExtent(ctx, el, scale, slide.slideNumber, rc));
-    }
-    return canvas;
-  }
-
   const plannedImages = planSlideImages(
     slide,
     canvasW,
@@ -8991,6 +8978,56 @@ async function renderSlideLeased(
     );
     return canvas;
   }
+
+  const defaultTextColor = slide.theme ? slide.theme.defaultTextColor : opts.defaultTextColor;
+  const themeDefaultColor = defaultTextColor
+    ? `#${defaultTextColor}`
+    : '#000000';
+  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
+  // default, literal black, not the theme dk1 (issue #1989;
+  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
+  // resolves every inherited colour, including the default-template tx1 of a
+  // master without txStyles. Only this package's own paths (presentation,
+  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
+  // to the public `renderSlide` has no proven parsed chain, with or without a
+  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
+  // 0.89.7. The theme colour above also colours the synthetic SmartArt
+  // fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
+
+  const pictureBulletImages = new Map<string, SvgImageSource | null>();
+  const shapeFillImages = new Map<string, PreparedShapeFill | null>();
+  const rc: RenderContext = {
+    cjkFallback: opts.cjkFallback ? pptxSlideCjkFallback(slide, slide.theme ? slide.theme.majorFont : opts.majorFont ?? null, slide.theme ? slide.theme.minorFont : opts.minorFont ?? null, opts.cjkFallback) : undefined,
+    themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
+    themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
+    themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
+    ...(opts.odfTables ? { odfTables: true } : {}),
+    embeddedFontAliases: opts.embeddedFontAliases,
+    embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
+    embeddedFontTuples: opts.embeddedFontTuples,
+    officeFontRoutes: opts.officeFontRoutes,
+    officeInstalledFamilies: opts.officeInstalledFamilies,
+    fontSources: opts.fontSources,
+    // Symbol-font codes are judged in the realm of this render's painting
+    // context: by the presentation's oracle, kept while the realm's faces are
+    // unchanged, or by one of this render alone (core symbol-face.ts).
+    symbolFaces: opts.symbolFaces
+      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
+      : createSymbolFaceOracle(
+        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
+      ),
+    // The backing store may have been clamped below `canvasSize × dpr`; downstream
+    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
+    dpr: effectiveDpr,
+    // Issue #805 — legible default for the synthetic SmartArt fallback shape's
+    // null-colour runs, derived once per slide from the background luminance.
+    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor)
+      ?? themeDefaultColor,
+    pictureBulletImages,
+    shapeFillImages,
+  };
 
   // Steps painted before the slide's elements, in paint order. A step with a
   // failure stops further preparation, exactly as the former interleaved paint
@@ -9523,7 +9560,7 @@ async function renderSlideLeased(
       withPatternCoordinateSpace(ctx, slidePatternFrame, () => {
         const heightEmu = renderTable(ctx, el, scale, slideNumber, rc, elementTextRun);
         const sourceIndex = sourceIndices ? sourceIndices[elementIndex] : elementIndex;
-        if (sourceIndex !== undefined) opts.onTableExtent?.(sourceIndex, heightEmu);
+        if (sourceIndex !== undefined && heightEmu > el.height) opts.onTableExtent?.(sourceIndex, heightEmu);
       });
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,

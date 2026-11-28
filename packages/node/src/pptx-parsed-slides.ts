@@ -16,13 +16,17 @@ export function isParsedPptxSlide(slide: object): boolean {
 /** Record on a slide decoded by the `odp` source option that its tables
  * keep the ODF row-height rule, as data (TableElement.odfRowHeights), so a
  * copy of the model (structuredClone, JSON) keeps it and a provider that
- * omits the field gets it. Covers tables in equation-branch fallbacks too. */
+ * omits the field gets it. The renderer paints a slide's elements and, in
+ * place of a failed equation branch, that element's own fallback elements;
+ * it never descends into a fallback's fallback, so those two levels are the
+ * ones marked, without recursion. */
 export function markOdfPptxTables(slide: { elements: readonly object[] }): void {
-  const visit = (elements: readonly object[]): void => {
-    for (const element of elements as readonly { type?: string; odfRowHeights?: boolean; mathFallback?: { elements: readonly object[] } }[]) {
-      if (element.type === 'table') element.odfRowHeights = true;
-      if (element.mathFallback) visit(element.mathFallback.elements);
-    }
+  type Element = { type?: string; odfRowHeights?: boolean; mathFallback?: { elements: readonly object[] } };
+  const mark = (element: Element): void => {
+    if (element.type === 'table') element.odfRowHeights = true;
   };
-  visit(slide.elements);
+  for (const element of slide.elements as readonly Element[]) {
+    mark(element);
+    for (const fallback of (element.mathFallback?.elements ?? []) as readonly Element[]) mark(fallback);
+  }
 }

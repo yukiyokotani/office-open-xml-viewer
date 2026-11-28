@@ -17,7 +17,7 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(onMeasure?: () => void, fontBox = { ascent: 8, descent: 2 }): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
+function makeRecordingCtx(onMeasure?: () => void, fontBox: { ascent: number; descent: number; inkAscent?: number; inkDescent?: number } = { ascent: 8, descent: 2 }): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
   const texts: Array<{ text: string; y: number; font: string }> = [];
@@ -60,7 +60,7 @@ function makeRecordingCtx(onMeasure?: () => void, fontBox = { ascent: 8, descent
       const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
       // A kerned "AV" pair is a quarter of the size narrower.
       const kerned = text.split('AV').length - 1;
-      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: fontBox.ascent, fontBoundingBoxDescent: fontBox.descent, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: fontBox.ascent, fontBoundingBoxDescent: fontBox.descent, actualBoundingBoxAscent: fontBox.inkAscent ?? 8, actualBoundingBoxDescent: fontBox.inkDescent ?? 2 } as TextMetrics;
     },
     fillText(text: string, _x: number, y: number) { texts.push({ text, y, font: String(this.font) }); }, strokeText() {},
     font: '10px sans-serif',
@@ -891,6 +891,85 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
         expect(recording.texts.map(({ text }) => text), label).toEqual(['fit']);
         expect(recording.texts[0]!.y, label).toBeCloseTo(19.2, 5);
       }
+    }
+  });
+
+  it('sizes a growth-rule cell to the ink its paint places, for tall fallback glyphs', () => {
+    // A fallback face whose glyphs carry stacked marks (Chrome: 29.22 ink
+    // ascent, 4.21 descent for one 20pt line) pushes the ordinary-model
+    // baseline down to the ink top. Sizing contains that ink the same way:
+    // the row grows to 29.22 + 4.21 = 33.43pt, and every anchor seats the
+    // baseline at 29.22pt, its ink inside the row. Ordinary ink (8/2) keeps
+    // the 24pt line box. spAutoFit and plain bodies alike.
+    for (const autoFit of ['sp', 'none']) {
+      for (const anchor of ['t', 'ctr', 'b']) {
+        for (const [ink, row, baseline] of [[{ inkAscent: 8, inkDescent: 2 }, 24, 19.2], [{ inkAscent: 29.22, inkDescent: 4.21 }, 33, 29.22]] as const) {
+          const textBody = {
+            verticalAnchor: anchor,
+            paragraphs: [{
+              alignment: 'l', marL: 0, marR: 0, indent: 0,
+              spaceBefore: null, spaceAfter: null, spaceLine: null,
+              runs: [{ type: 'text', text: 'Âg', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+              bullet: { type: 'none' }, eaLnBrk: true,
+            }],
+            defaultFontSize: null, defaultBold: null, defaultItalic: null,
+            lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+            wrap: 'square', vert: 'horz', autoFit,
+          } as unknown as TextBody;
+          const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+          t.rows[0].height = 10 * EMU;
+          t.height = 10 * EMU;
+          const recording = makeRecordingCtx(undefined, { ascent: 8, descent: 2, ...ink });
+          renderTable(recording.ctx, t, SCALE);
+          const label = `${autoFit} ${anchor} ${ink.inkAscent}`;
+          expect(recording.strokes.filter((st) => Math.abs(st.y1 - st.y2) < 0.5).map((st) => Math.floor(st.y1)), label)
+            .toEqual([row]);
+          expect(recording.texts[0]!.y, label).toBeCloseTo(baseline, 5);
+          expect(recording.texts[0]!.y + ink.inkDescent, label).toBeLessThanOrEqual(row + 1);
+        }
+      }
+    }
+  });
+
+  it('sizes rows from a:tr@h and content alone, whatever the frame extent (control5 M-Q)', () => {
+    // PowerPoint for Mac control (2 columns x 3 rows, a:tr@h 24pt, zero
+    // margins, exact 24pt leading, 20pt text): a middle row holding three
+    // lines exports 24/72/24 with frames of 72 (M), 120 (N) and 48pt (O);
+    // single lines export 24/24/24 with frames of 120 (P) and 48pt (Q).
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: { type: 'pts', val: 24 },
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const cases: [string, number, number, number[]][] = [
+      ['M', 72, 3, [24, 96, 120]],
+      ['N', 120, 3, [24, 96, 120]],
+      ['O', 48, 3, [24, 96, 120]],
+      ['P', 120, 1, [24, 48, 72]],
+      ['Q', 48, 1, [24, 48, 72]],
+    ];
+    for (const [label, frame, middleLines, edges] of cases) {
+      const t = tableOf([
+        [cell({ textBody: body(1) }), cell({ borderB: ln() })],
+        [cell({ textBody: body(middleLines) }), cell({ borderB: ln() })],
+        [cell({ textBody: body(1) }), cell({ borderB: ln() })],
+      ], [COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = frame * EMU;
+      const found = render(t)
+        .filter((st) => Math.abs(st.y1 - st.y2) < 0.5 && st.x1 >= 60)
+        .map((st) => Math.floor(st.y1));
+      expect(found, label).toEqual(edges);
     }
   });
 

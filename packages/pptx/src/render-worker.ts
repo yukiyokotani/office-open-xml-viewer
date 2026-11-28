@@ -51,6 +51,7 @@ import type {
   RenderWorkerResponse,
 } from './worker-protocol';
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
+import { TableHitExtents } from './table-hit-extents';
 import { loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
 import type { WorkerPresentationSourceOwner, WorkerCursorArchive } from './internal/worker-presentation-source';
@@ -62,18 +63,9 @@ const host = new WasmParserHost<PptxArchive>(init, {
 let source: WorkerPresentationSourceOwner<PptxArchive> | undefined;
 /** The open source is LoadOptions.odp (RenderContext.odfTables). */
 let sourceOdfTables = false;
-/** Painted table heights (EMU) by slide and element index, from the last
- * render of each slide; hit testing extends table frames to them. Keyed by
- * index, so they outlive the slide repository's eviction. */
-const tableExtents = new Map<number, Map<number, number>>();
-/** Width of the last render, for measuring a slide never rendered. */
-let lastRenderWidth = 960;
-
-function recordTableExtent(slideIndex: number): (elementIndex: number, heightEmu: number) => void {
-  const extents = new Map<number, number>();
-  tableExtents.set(slideIndex, extents);
-  return (elementIndex, heightEmu) => { extents.set(elementIndex, heightEmu); };
-}
+/** Painted table extensions of recently displayed slides (hit testing);
+ * cleared when a presentation is opened. */
+const tableHitExtents = new TableHitExtents(HARD_MAX_PPTX_CACHED_SLIDES);
 
 function executeArchive<T>(operation: (archive: WorkerCursorArchive) => T): T {
   if (source) return source.execute(operation);
@@ -176,62 +168,6 @@ function requirePreflight(): PresentationPreflight {
   throw new Error('No pptx loaded');
 }
 
-/** Collect a slide's text runs by painting it on a 1x1 (or the caller's)
- * surface; with `measureTablesOnly`, only size its tables (recording their
- * extents) without painting. Shares every render option with renderSlide. */
-async function paintForRuns(
-  slideIndex: number,
-  width: number,
-  surface: OffscreenCanvas | undefined,
-  measureTablesOnly: boolean,
-): Promise<PptxTextRunInfo[]> {
-  const compact = requirePreflight();
-  const officeRequests = await requireSlides().withSlide(slideIndex, (slide) =>
-    pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
-  await fontsLoaded;
-  const { routes: officeFontRoutes, installed: officeInstalledFamilies } = await officeRoutesForRequests(officeRequests);
-  const runs = await requireSlides().withSlide(slideIndex, async (slide) => {
-    await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
-    const { renderSlideWithEmbeddedFonts } = await rendererModule;
-    const canvas = surface ?? new OffscreenCanvas(1, 1);
-    const runs: PptxTextRunInfo[] = [];
-    // Metafile pictures paint their text with the served faces too, and
-    // load the scalars it paints before they play.
-    bindMetafileFontFamilies(getImage, fontSources?.loaded);
-    bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
-    await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
-      width,
-      onTableExtent: recordTableExtent(slideIndex),
-      ...(measureTablesOnly ? { measureTablesOnly: true } : {}),
-      defaultTextColor: compact.defaultTextColor,
-      // A model source's slides have no proven parsed colour chain.
-      parsedTextChain: source === undefined,
-      odfTables: source !== undefined && sourceOdfTables,
-      cjkFallback,
-      majorFont: compact.majorFont,
-      minorFont: compact.minorFont,
-      hlinkColor: compact.hlinkColor,
-      embeddedFontAliases,
-      embeddedFontAuthoredFamilies,
-      embeddedFontTuples,
-      officeFontRoutes,
-      officeInstalledFamilies,
-      fontSources: fontSources?.loaded,
-      symbolFaces,
-      fetchMedia: getMedia,
-      fetchImage: getImage,
-      svgDecoder: svgDecodeClient.decode,
-      math: renderers.math,
-      threeD: renderers.threeD,
-      regionMap: renderers.regionMap,
-      chartEx: renderers.chartEx,
-      tiff: renderers.tiff,
-    }, (run) => runs.push(run));
-    return runs;
-  });
-  return runs;
-}
-
 function requireSlides(): PptxSlideRepository {
   if (!slides) throw new Error('No pptx loaded');
   return slides;
@@ -276,7 +212,7 @@ function getFontBytes(path: string): Promise<Uint8Array> {
 }
 
 async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'parse' }>) {
-  tableExtents.clear();
+  tableHitExtents.clear();
   releaseOfficeFonts();
   unregisterEmbeddedFonts(embeddedFontFaces);
   embeddedFontFaces = [];
@@ -487,6 +423,9 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
       await fontsLoaded;
       const { routes: officeFontRoutes, installed: officeInstalledFamilies } = await officeRoutesForRequests(officeRequests);
+      // A display render publishes its painted table extensions for hit
+      // testing once it completes (TableHitExtents); runs collection does not.
+      const extents = tableHitExtents.begin(request.slideIndex);
       const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
@@ -498,11 +437,10 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         // load the scalars it paints before they play.
         bindMetafileFontFamilies(getImage, fontSources?.loaded);
         bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
-        lastRenderWidth = request.width;
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
-          onTableExtent: recordTableExtent(request.slideIndex),
+          onTableExtent: extents.record,
           imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
           // A model source's slides have no proven parsed colour chain.
@@ -533,28 +471,63 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         }, (run) => runs.push(run));
         return { bitmap: canvas.transferToImageBitmap(), runs };
       });
+      extents.publish();
       postOwnedImageBitmap(post, { kind: 'slideRendered', id: request.id, bitmap, runs });
       return;
     }
 
     if (request.kind === 'collectRuns') {
-      const runs = await paintForRuns(request.slideIndex, request.width, request.canvas, false);
+      const officeRequests = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
+      await fontsLoaded;
+      const { routes: officeFontRoutes, installed: officeInstalledFamilies } = await officeRoutesForRequests(officeRequests);
+      const runs = await requireSlides().withSlide(request.slideIndex, async (slide) => {
+        await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
+        const { renderSlideWithEmbeddedFonts } = await rendererModule;
+        const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
+        const runs: PptxTextRunInfo[] = [];
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
+        bindMetafileFontFamilies(getImage, fontSources?.loaded);
+        bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
+        await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
+          width: request.width,
+          defaultTextColor: compact.defaultTextColor,
+          // A model source's slides have no proven parsed colour chain.
+          parsedTextChain: source === undefined,
+          odfTables: source !== undefined && sourceOdfTables,
+          cjkFallback,
+          majorFont: compact.majorFont,
+          minorFont: compact.minorFont,
+          hlinkColor: compact.hlinkColor,
+          embeddedFontAliases,
+          embeddedFontAuthoredFamilies,
+          embeddedFontTuples,
+          officeFontRoutes,
+          officeInstalledFamilies,
+          fontSources: fontSources?.loaded,
+          symbolFaces,
+          fetchMedia: getMedia,
+          fetchImage: getImage,
+          svgDecoder: svgDecodeClient.decode,
+          math: renderers.math,
+          threeD: renderers.threeD,
+          regionMap: renderers.regionMap,
+          chartEx: renderers.chartEx,
+          tiff: renderers.tiff,
+        }, (run) => runs.push(run));
+        return runs;
+      });
       post({ kind: 'runsCollected', id: request.id, runs });
       return;
     }
 
     if (request.kind === 'hitTestElement') {
-      // Tables paint beyond their authored frame when rows grow: hit test
-      // against the extents the last render reported, sizing the tables
-      // (without painting) when this slide has not been rendered.
-      const hasTable = await requireSlides().withSlide(request.slideIndex,
-        (slide) => slide.elements.some((element) => element.type === 'table'));
-      if (hasTable && !tableExtents.has(request.slideIndex)) {
-        await paintForRuns(request.slideIndex, lastRenderWidth, undefined, true);
-      }
+      // Grown tables are hit by what the latest display render painted; a
+      // slide not rendered (not on screen) is hit by its authored frames.
       const context = await requireSlides().withSlide(request.slideIndex, (slide) =>
         hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options,
-          tableExtents.get(request.slideIndex)));
+          tableHitExtents.get(request.slideIndex)));
       post({ kind: 'elementHit', id: request.id, context });
       return;
     }

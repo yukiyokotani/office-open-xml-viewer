@@ -222,42 +222,47 @@ describe('PPTX render worker parsed text-colour chain', () => {
 
 describe('PPTX render worker table hit testing', () => {
   // A table whose rows grow paints beyond its authored frame; the worker hit
-  // tests against the extent its last render reported, and sizes the tables
-  // without painting when the slide was never rendered.
+  // tests against the extent its latest successful display render published
+  // (TableHitExtents). Runs collection and failed renders publish nothing,
+  // and an unrendered slide is hit by its authored frame. The worker handles
+  // one request at a time, so a hit never sees a render in flight; the main
+  // mode test covers that case.
   const EMU = 12700;
   const table = {
     type: 'table', x: 0, y: 0, width: 100 * EMU, height: 20 * EMU, rotation: 0, flipH: false, flipV: false,
     cols: [100 * EMU], rows: [{ height: 20 * EMU, cells: [] }],
   };
-  const reportGrownRow = async (...args: unknown[]): Promise<undefined> => {
-    (args[4] as { onTableExtent?: (index: number, height: number) => void }).onTableExtent?.(0, 24 * EMU);
-    return undefined;
-  };
-  const hitAt = async (dispatch: (data: unknown) => Promise<void>, worker: LoopbackWorker, id: number, y: number) => {
-    await dispatch({ kind: 'hitTestElement', id, slideIndex: 0, point: { x: 10 * EMU, y }, options: {} });
+  const reporting = (heightPt: number, after?: () => Promise<void>) =>
+    async (...args: unknown[]): Promise<undefined> => {
+      (args[4] as { onTableExtent?: (index: number, height: number) => void }).onTableExtent?.(0, heightPt * EMU);
+      await after?.();
+      return undefined;
+    };
+  let nextId = 100;
+  const hits = async (dispatch: (data: unknown) => Promise<void>, worker: LoopbackWorker, yPt: number) => {
+    const id = nextId++;
+    await dispatch({ kind: 'hitTestElement', id, slideIndex: 0, point: { x: 10 * EMU, y: yPt * EMU }, options: {} });
     const reply = worker.received.find((message) => (message as { id?: number }).id === id) as
-      { context: { elementType: string; bounds: { height: number } } | null };
-    return reply.context;
+      { context: { elementType: string } | null };
+    return reply.context?.elementType === 'table';
   };
 
-  it('hits the painted extent of a grown table after a render', async () => {
+  it('publishes a display render, not runs collection or a failed render', async () => {
     mocks.elements = [table];
-    mocks.render.mockImplementation(reportGrownRow);
     const { worker, dispatch } = await loadWorker();
+    expect(await hits(dispatch, worker, 22)).toBe(false);
+    mocks.render.mockImplementation(reporting(24));
     await dispatch({ kind: 'renderSlide', id: 7, slideIndex: 0, width: 320, dpr: 1 });
-    const hit = await hitAt(dispatch, worker, 8, 22 * EMU);
-    expect(hit?.elementType).toBe('table');
-    expect(hit?.bounds.height).toBe(20 * EMU);
-    expect(await hitAt(dispatch, worker, 9, 25 * EMU)).toBeNull();
-    expect(mocks.render).toHaveBeenCalledOnce();
-  });
+    expect(await hits(dispatch, worker, 22)).toBe(true);
+    expect(await hits(dispatch, worker, 25)).toBe(false);
 
-  it('sizes the tables without painting when the slide was never rendered', async () => {
-    mocks.elements = [table];
-    mocks.render.mockImplementation(reportGrownRow);
-    const { worker, dispatch } = await loadWorker();
-    expect((await hitAt(dispatch, worker, 8, 22 * EMU))?.elementType).toBe('table');
-    expect(mocks.render).toHaveBeenCalledOnce();
-    expect((mocks.render.mock.calls[0]![4] as { measureTablesOnly?: boolean }).measureTablesOnly).toBe(true);
+    mocks.render.mockImplementation(reporting(50));
+    await dispatch({ kind: 'collectRuns', id: 8, slideIndex: 0, width: 320 });
+    expect(await hits(dispatch, worker, 45)).toBe(false);
+
+    mocks.render.mockImplementation(reporting(40, async () => { throw new Error('paint failed'); }));
+    await dispatch({ kind: 'renderSlide', id: 9, slideIndex: 0, width: 320, dpr: 1 });
+    expect(await hits(dispatch, worker, 35)).toBe(false);
+    expect(await hits(dispatch, worker, 22)).toBe(true);
   });
 });
