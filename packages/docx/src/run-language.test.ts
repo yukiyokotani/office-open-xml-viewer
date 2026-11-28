@@ -4,20 +4,36 @@ import { describe, expect, it, vi } from 'vitest';
 // named-family ownership there (core createNamedFamilyOracle). Rendering tests
 // below use faces their recording canvas draws itself.
 // 'ж' stands for text only a generic fallback draws.
-vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
-  createNamedFamilyOracle: () => ({
-    sentinelsApply: true,
-    available: true,
-    // U+0640 (a generated justification kashida) is drawn by named families
-    // of "Kashida Face" only.
-    // '〓' likewise stands for East Asian text only a fallback draws.
-    // "Fallback Face" stands for a route no named family of which draws.
-    draws: (list: string, _w: number, _s: string, text: string) => !/[ж〓]/u.test(text)
-      && !list.includes('Fallback Face')
-      && (!text.includes('\u0640') || list.includes('Kashida Face')),
-  }),
-}));
+// Text units the face-resolution predicates scan (see the faceText cost test).
+const scanned = vi.hoisted(() => ({ units: 0 }));
+vi.mock('@silurus/ooxml-core/internal/script-preload-accumulator', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@silurus/ooxml-core/internal/script-preload-accumulator')>();
+  return {
+    ...original,
+    containsHanScript: (text: string) => { scanned.units += text.length; return original.containsHanScript(text); },
+  };
+});
+vi.mock('@silurus/ooxml-core', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@silurus/ooxml-core')>();
+  return {
+    ...original,
+    fontSubstituteScriptCoversText: (...args: Parameters<typeof original.fontSubstituteScriptCoversText>) => {
+      scanned.units += args[1].length;
+      return original.fontSubstituteScriptCoversText(...args);
+    },
+    createNamedFamilyOracle: () => ({
+      sentinelsApply: true,
+      available: true,
+      // U+0640 (a generated justification kashida) is drawn by named families
+      // of "Kashida Face" only.
+      // '〓' likewise stands for East Asian text only a fallback draws.
+      // "Fallback Face" stands for a route no named family of which draws.
+      draws: (list: string, _w: number, _s: string, text: string) => !/[ж〓]/u.test(text)
+        && !list.includes('Fallback Face')
+        && (!text.includes('\u0640') || list.includes('Kashida Face')),
+    }),
+  };
+});
 import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { createFontResolver } from './layout/font-service.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
@@ -228,6 +244,39 @@ describe('text service: §17.3.2.20 language per font slot', () => {
         eastAsiaLanguage: 'zh-cn', clusterGeometry: false as const, faceText: text }, 0, 1));
     }
     expect(shapes).toEqual(['\u4e00']);
+  });
+
+  it('scans a piece once for its face facts, however many fragments resolve for it', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver([
+        { requestedFamily: 'Scoped Face', resolvedFamily: 'Arabic Substitute', source: 'substitute', script: 'arabic' },
+      ], {
+        scriptScopedFamilies: { 'scoped face': { script: 'arabic', substituteFamilies: ['Arabic Substitute'] } },
+        regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
+        nativeFamilyLists: { Absent: '"Plain Face", serif' },
+      }),
+      measurer: { fingerprint: 'face-scan', namedFamiliesDraw: () => true,
+        measure: request => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }) },
+    });
+    const unitsFor = (count: number) => {
+      // Han with an Arabic letter in the middle: every slot names the scoped
+      // face, so each slot's coverage is a fact of the piece.
+      const text = Array.from({ length: count }, (_, index) =>
+        index === count >> 1 ? '\u0628' : String.fromCharCode(0x4e00 + count + index)).join('');
+      const piece = { text, fontSizePt: 10, eastAsiaLanguage: 'zh-cn', clusterGeometry: false as const,
+        measure: false as const, faceText: text,
+        fonts: { ascii: 'Scoped Face', highAnsi: 'Scoped Face', eastAsia: 'Scoped Face', complexScript: 'Scoped Face' } };
+      scanned.units = 0;
+      const whole = service.shape(piece);
+      for (let index = 0; index < count; index += 1) service.shape(sliceTextShapeRequest(piece, index, index + 1));
+      expect(whole.spans.length).toBeGreaterThan(0);
+      return scanned.units;
+    };
+    // One Han scan and at most one coverage scan per slot of the piece, plus
+    // the fragments' own (one-unit) texts: linear, not count × count (a
+    // rescan per fragment took 17,024 units for 128 fragments, 264,704 for
+    // 512).
+    for (const count of [128, 512]) expect(unitsFor(count)).toBeLessThanOrEqual(8 * count);
   });
 
   it('selects the Canvas language of a script-class run independently of the slot table', () => {

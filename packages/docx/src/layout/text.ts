@@ -1172,6 +1172,10 @@ const SCOPE_NEUTRAL_SCALAR = /^[\s\p{Cf}\p{M}]$/u;
 const SCOPE_CACHE_LIMIT = 64;
 const SCOPE_CONFIGURATIONS_PER_RUN = 8;
 const SCOPE_SLOTS = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+/** Bounds of a text service's face-resolution facts table: texts held, and
+ * font-fact variants per text (see faceTextFacts). */
+const FACE_TEXT_FACTS_LIMIT = 64;
+const FACE_TEXT_FACT_VARIANTS = 4;
 
 /** Two resolutions select the same registered face: the same resource,
  * weight, style and source. Native and generic routes name no resource, so
@@ -1413,40 +1417,78 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
    * - A scoped visual substitute (core substitute-script.ts) answers only
    *   text of its script: a complex-script span is covered once it proves the
    *   script, any other span only when all of it belongs to the proven script.
-   * `resolve` uses only this for its text, so these facts for every slot are
+   * `resolve` uses only these for its text, so these facts for every slot are
    * the identity of a text as a face-resolution input ({@link faceTextKey}).
+   *
+   * Each fact is computed lazily, at most once per (text, font facts): a
+   * piece's fragments all resolve their faces for the piece's whole text
+   * (TextShapeRequest.faceText), so the piece is scanned once for its Han
+   * and once per slot for coverage, never once per fragment or group, which
+   * would be quadratic in the piece's length. The table is bounded
+   * ({@link FACE_TEXT_FACTS_LIMIT} texts, oldest evicted) and keyed by the
+   * text itself: a lookup hashes a string object once and compares by
+   * identity thereafter, so it does not rescan the piece either.
    */
-  const faceTextFacts = (
-    request: Readonly<Pick<TextFontResolveRequest, 'fonts' | 'themeFonts' | 'themeFontPresence' | 'weight' | 'style'>>,
-    slot: FontScriptSlot,
-    text: string,
-  ) => {
-    const scoped = input.fonts.scopedSubstituteScript?.(requestedFamily(request, slot), request.weight, request.style);
-    return {
-      hasHan: containsHanScript(text),
-      scoped,
-      covers: scoped !== undefined
-        && fontSubstituteScriptCoversText(scoped, text, slot === 'complexScript' ? 'any' : 'exclusive'),
+  type FaceFontFacts = Readonly<Pick<TextFontResolveRequest, 'fonts' | 'themeFonts' | 'themeFontPresence' | 'weight' | 'style'>>;
+  interface FaceTextFacts {
+    readonly font: FaceFontFacts;
+    hasHan?: boolean;
+    readonly scoped: Map<FontScriptSlot, FontSubstituteScript | undefined>;
+    readonly covers: Map<FontScriptSlot, boolean>;
+    key?: string;
+  }
+  const faceTextFactTable = new Map<string, FaceTextFacts[]>();
+  const faceTextFacts = (request: FaceFontFacts, text: string): FaceTextFacts => {
+    let variants = faceTextFactTable.get(text);
+    if (variants) {
+      faceTextFactTable.delete(text);
+      faceTextFactTable.set(text, variants);
+      const found = variants.find(({ font }) => font.fonts === request.fonts && font.themeFonts === request.themeFonts
+        && font.themeFontPresence === request.themeFontPresence && font.weight === request.weight
+        && font.style === request.style);
+      if (found) return found;
+    } else {
+      variants = [];
+      faceTextFactTable.set(text, variants);
+      if (faceTextFactTable.size > FACE_TEXT_FACTS_LIMIT) faceTextFactTable.delete(faceTextFactTable.keys().next().value!);
+    }
+    const facts: FaceTextFacts = {
+      font: { fonts: request.fonts, themeFonts: request.themeFonts, themeFontPresence: request.themeFontPresence,
+        weight: request.weight, style: request.style },
+      scoped: new Map(),
+      covers: new Map(),
     };
+    if (variants.length >= FACE_TEXT_FACT_VARIANTS) variants.shift();
+    variants.push(facts);
+    return facts;
   };
-  // The key of the last piece text fragments resolved their faces for
-  // (TextShapeRequest.faceText): a piece's fragments are shaped one after
-  // another with the same font facts, so its text is scanned once.
-  let lastFaceTextKey: Readonly<{ request: Readonly<TextShapeRequest>; key: string }> | undefined;
+  const factHasHan = (facts: FaceTextFacts, text: string): boolean => facts.hasHan ??= containsHanScript(text);
+  const factScoped = (facts: FaceTextFacts, slot: FontScriptSlot): FontSubstituteScript | undefined => {
+    if (facts.scoped.has(slot)) return facts.scoped.get(slot);
+    const scoped = input.fonts.scopedSubstituteScript?.(
+      requestedFamily(facts.font, slot), facts.font.weight, facts.font.style);
+    facts.scoped.set(slot, scoped);
+    return scoped;
+  };
+  const factCovers = (facts: FaceTextFacts, slot: FontScriptSlot, text: string): boolean => {
+    let covers = facts.covers.get(slot);
+    if (covers === undefined) {
+      const scoped = factScoped(facts, slot);
+      covers = scoped !== undefined
+        && fontSubstituteScriptCoversText(scoped, text, slot === 'complexScript' ? 'any' : 'exclusive');
+      facts.covers.set(slot, covers);
+    }
+    return covers;
+  };
   /** A piece text as a face-resolution input: one character for its Han
    * presence, one per §17.3.2.26 slot for scoped-substitute coverage.
    * Constant size, exact (two texts with one key resolve every slot alike),
    * and shared by all pieces that resolve alike. */
   const faceTextKey = (request: Readonly<TextShapeRequest>): string => {
-    const last = lastFaceTextKey?.request;
-    if (last && last.faceText === request.faceText && last.fonts === request.fonts
-      && last.themeFonts === request.themeFonts && last.themeFontPresence === request.themeFontPresence
-      && last.weight === request.weight && last.style === request.style) return lastFaceTextKey!.key;
     const text = request.faceText!;
-    const key = (containsHanScript(text) ? 'H' : 'h')
-      + SCOPE_SLOTS.map((slot) => faceTextFacts(request, slot, text).covers ? '1' : '0').join('');
-    lastFaceTextKey = { request, key };
-    return key;
+    const facts = faceTextFacts(request, text);
+    return facts.key ??= (factHasHan(facts, text) ? 'H' : 'h')
+      + SCOPE_SLOTS.map((slot) => factCovers(facts, slot, text) ? '1' : '0').join('');
   };
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
@@ -1459,11 +1501,14 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // consumer policy changes only the script classes covered by Word output
       // evidence; every authored direct/theme face remains authoritative above.
       : request.genericFamily ?? defaultGenericForSlot(request.slot);
-    const { hasHan, scoped, covers } = faceTextFacts(request, request.slot, request.text ?? '');
+    const text = request.text ?? '';
+    const facts = faceTextFacts(request, text);
+    const hasHan = factHasHan(facts, text);
+    const scoped = factScoped(facts, request.slot);
     // The shaper carries the shared per-cluster scope (`substituteScope`);
-    // otherwise the text as a whole is judged (faceTextFacts).
-    const covered = request.substituteScope ?? covers;
-    const substituteScript = scoped && covered ? scoped : undefined;
+    // only without it is the text as a whole judged (faceTextFacts).
+    const covered = scoped !== undefined && (request.substituteScope ?? factCovers(facts, request.slot, text));
+    const substituteScript = covered ? scoped : undefined;
     return input.fonts.resolve({
       requestedFamily: authoredFamily,
       ...(substituteScript ? { script: substituteScript } : {}),
