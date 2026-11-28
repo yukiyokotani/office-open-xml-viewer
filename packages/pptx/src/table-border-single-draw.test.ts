@@ -508,6 +508,39 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     }
   });
 
+  it('keeps a multi-column cell on the earlier rule, painting into its columns', () => {
+    // numCol=2 flows four 21.6pt lines into two columns of a 54pt row
+    // (two lines and the 7.2pt insets fit one column); a stacked measure
+    // would ask for 93.6pt.
+    const textBody = { ...lines(4), numCol: 2 } as TextBody;
+    const t = tableOf([[cell({ textBody, borderB: ln() })], [cell()]], [2 * COL]);
+    t.rows[0].height = 54 * EMU;
+    t.height = 74 * EMU;
+    const { ctx, strokes, texts } = makeRecordingCtx();
+    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    expect(horizontalAt(strokes, 54)).toHaveLength(1);
+    const y = (text: string) => texts.find((entry) => entry.text === text)?.y;
+    expect(y('l2')).toBe(y('l0'));
+    expect(y('l3')).toBe(y('l1'));
+  });
+
+  it('keeps row-major order for interacting merges on the earlier rule', () => {
+    // An ODF table with frame slack: a six-line merge over rows 1-3, then a
+    // five-line merge over rows 1-2 beside it. The earlier rule resolves
+    // them in reading order, as before.
+    const t = tableOf([
+      [cell({ textBody: lines(6), rowSpan: 3 }), cell({ textBody: lines(5), rowSpan: 2 }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell({ vMerge: true }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell(), cell({ borderB: ln() })],
+    ], [COL, COL, COL]);
+    t.height = 70 * EMU;
+    t.odfRowHeights = true;
+    const strokes = render(t);
+    // Row edges in the right-hand column (main and this renderer agree).
+    expect(strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120).map((s) => s.y1))
+      .toEqual([57.5, 115.5, 160.5]);
+  });
+
   it('spreads a rotated merged cell evenly, as before, over a zero-height row', () => {
     // The box-width measure (60pt, the cell width) keeps the earlier even
     // split when a spanned row has h=0: rows of 20pt and 0pt each take half

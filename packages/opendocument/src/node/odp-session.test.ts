@@ -18,6 +18,7 @@ type Element = {
   textRect?: { x: number; y: number; width: number; height: number };
   rows?: { height: number; cells: { textBody?: { paragraphs: Paragraph[] }; fill?: { color: string }; gridSpan: number; hMerge: boolean }[] }[];
   cols?: number[];
+  odfRowHeights?: boolean;
 };
 type Model = { slideWidth: number; slideHeight: number; slides: { background?: { fillType: string; color?: string }; elements: Element[]; notes?: string; hidden?: boolean }[] };
 

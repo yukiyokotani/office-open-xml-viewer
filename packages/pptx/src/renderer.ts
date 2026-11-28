@@ -5331,7 +5331,7 @@ export function renderTextBody(
     // in lockstep with the draw-side `textXOffset` (§below) and the
     // naturalWidthExceedsBbox measurement; a bullet's gutter contributes 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
+    const lines = tableParagraphLayout(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
@@ -7729,6 +7729,31 @@ const MEASURED_BY_BOX_WIDTH_VERT: ReadonlySet<string> = new Set([
   'wordArtVert', 'wordArtVertRtl', 'vert', 'eaVert', 'vert270',
 ]);
 
+/**
+ * Paragraph layouts of the table being rendered. renderTable measures every
+ * cell to size its rows and then paints the same cells at the same widths;
+ * this lets the paint reuse the measured lines instead of breaking every
+ * paragraph twice. It lives only for one renderTable call, so a font that
+ * loads later is picked up by the next render. A line's segments carry only
+ * values derived from the same inputs (fontAlgnOffsetPx is recomputed to the
+ * same value), so reuse paints what a fresh layout would.
+ */
+let tableParagraphLayouts: WeakMap<Paragraph, Map<string, LayoutLine[]>> | null = null;
+
+function tableParagraphLayout(
+  ...args: Parameters<typeof layoutParagraph>
+): LayoutLine[] {
+  const memo = tableParagraphLayouts;
+  if (!memo) return layoutParagraph(...args);
+  const [ctx, para, ...rest] = args;
+  const key = rest.map((value) => typeof value === 'object' ? '' : String(value)).join('|');
+  let byKey = memo.get(para);
+  if (!byKey) memo.set(para, byKey = new Map());
+  let lines = byKey.get(key);
+  if (!lines) byKey.set(key, lines = layoutParagraph(ctx, para, ...rest));
+  return lines;
+}
+
 export function renderTable(
   ctx: CanvasRenderingContext2D,
   el: TableElement,
@@ -7736,6 +7761,23 @@ export function renderTable(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
+) {
+  const outer = tableParagraphLayouts;
+  tableParagraphLayouts = new WeakMap();
+  try {
+    renderTableLayout(ctx, el, scale, slideNumber, rc, onTextRun);
+  } finally {
+    tableParagraphLayouts = outer;
+  }
+}
+
+function renderTableLayout(
+  ctx: CanvasRenderingContext2D,
+  el: TableElement,
+  scale: number,
+  slideNumber: number | undefined,
+  rc: RenderContext,
+  onTextRun: TextRunCallback | undefined,
 ) {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
@@ -7792,11 +7834,15 @@ export function renderTable(
   // - every cell of an ODF table (`odfRowHeights`): ODF row heights are
   //   style:row-height (fixed, OpenDocument 1.3 Part 3 §20.348) or
   //   style:min-row-height, and LibreOffice's growth of either is not
-  //   measured here.
+  //   measured here;
+  // - a multi-column body (numCol > 1, ECMA-376 §21.1.2.1.1): measureOnly
+  //   stacks every line in one column, while paint flows the lines into the
+  //   columns, so the stacked sum is not the height the cell needs.
   const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
   const frameHasSlack = el.height > authoredRowsTotalEmu;
   const keepsEarlierRule = (body: TextBody): boolean =>
-    el.odfRowHeights === true || MEASURED_BY_BOX_WIDTH_VERT.has(body.vert);
+    el.odfRowHeights === true || MEASURED_BY_BOX_WIDTH_VERT.has(body.vert)
+    || (body.numCol ?? 1) > 1;
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
@@ -7812,8 +7858,11 @@ export function renderTable(
       const earlierRule = keepsEarlierRule(cell.textBody);
       if (earlierRule && row.height > 0 && !frameHasSlack) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      // The cell's own text colour, as in paint, so the paint reuses these
+      // lines (tableParagraphLayout).
       const needed = (renderTextBody(
-        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
+        cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false,
         !earlierRule || row.height === 0,
       ) as number) || 0;
@@ -7828,7 +7877,10 @@ export function renderTable(
   // row at its own height and grow only the last. Merged cells are resolved
   // in the order of the row they end on, so a cell ending lower sees the
   // growth of every merge nested inside it whatever the column order.
-  const spanCells: { ri: number; ci: number; last: number }[] = [];
+  // Cells that keep the earlier rule keep its row-major order: they hold
+  // their own positions in the sequence and only the other cells are
+  // reordered among the remaining positions.
+  const spanCells: { ri: number; ci: number; last: number; earlierRule: boolean }[] = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     for (let ci = 0; ci < row.cells.length; ci++) {
@@ -7837,22 +7889,27 @@ export function renderTable(
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
       if (cell.textBody.shrinkOnOverflow) continue;
-      spanCells.push({ ri, ci, last: Math.min(el.rows.length, ri + span) - 1 });
+      spanCells.push({
+        ri, ci, last: Math.min(el.rows.length, ri + span) - 1,
+        earlierRule: keepsEarlierRule(cell.textBody),
+      });
     }
   }
   // Array.prototype.sort is stable: cells ending on the same row keep their
   // reading order.
-  spanCells.sort((a, b) => a.last - b.last);
-  for (const { ri, ci, last } of spanCells) {
+  const byEndRow = spanCells.filter((c) => !c.earlierRule).sort((a, b) => a.last - b.last);
+  let nextByEndRow = 0;
+  const spanOrder = spanCells.map((c) => c.earlierRule ? c : byEndRow[nextByEndRow++]);
+  for (const { ri, ci, last, earlierRule } of spanOrder) {
     const cell = el.rows[ri].cells[ci];
     const textBody = cell.textBody!;
     const spannedRows = el.rows.slice(ri, last + 1);
     const hasAutoHeightRow = spannedRows.some((spannedRow) => spannedRow.height === 0);
-    const earlierRule = keepsEarlierRule(textBody);
     if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
     const cellW = spannedWidth(ci, cell.gridSpan || 1);
     const needed = (renderTextBody(
-      ctx, tableTextBody(textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
+      ctx, tableTextBody(textBody), 0, 0, cellW, 0, scale,
+      cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
       '#000000', slideNumber, rc, undefined, true, undefined, false,
       !earlierRule || hasAutoHeightRow,
     ) as number) || 0;
