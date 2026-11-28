@@ -1005,6 +1005,10 @@ interface AffineBoundary {
     intercept: ExactRational;
   }>;
   readonly square: boolean;
+  /** FloatRect.leastBoundedGapPt of the object this boundary belongs to;
+   * an envelope takes the largest of its candidates' (it only adds sweep
+   * candidates, which lineWindowAtY then decides). */
+  readonly leastGapPt?: number;
 }
 
 interface AffineBlockedInterval {
@@ -1117,7 +1121,8 @@ function selectEnvelope(
       );
     }
   }
-  return { exact: winner.exact, square };
+  const leastGapPt = Math.max(0, ...candidates.map((candidate) => candidate.leastGapPt ?? 0));
+  return { exact: winner.exact, square, ...(leastGapPt > 0 ? { leastGapPt } : {}) };
 }
 
 function constantBoundary(value: number, square = false): AffineBoundary {
@@ -1142,6 +1147,8 @@ function objectAffineIntervals(
   diagnostics: MutableLineFloatSweepDiagnostics | null,
 ): AffineBlockedInterval[] {
   const { rect, polygon } = prepared;
+  const least = rect.leastBoundedGapPt !== undefined && rect.leastBoundedGapPt > 0
+    ? { leastGapPt: rect.leastBoundedGapPt } : {};
   const midpoint = exactBinary64Midpoint(lower, upper);
   const exactMidpoint = unreducedExactFromNumber(midpoint);
   const exactMidpointBottom = addUnreducedExact(
@@ -1158,12 +1165,12 @@ function objectAffineIntervals(
   let intervals: AffineBlockedInterval[] = polygon
     ? polygonBandExactIntervalFunctions(polygon, probeH, lower, upper)
       .map((interval) => ({
-        left: { exact: interval.left, square: false },
-        right: { exact: interval.right, square: false },
+        left: { exact: interval.left, square: false, ...least },
+        right: { exact: interval.right, square: false, ...least },
       }))
     : [{
-        left: constantBoundary(rect.xLeft, true),
-        right: constantBoundary(rect.xRight, true),
+        left: { ...constantBoundary(rect.xLeft, true), ...least },
+        right: { ...constantBoundary(rect.xRight, true), ...least },
       }];
   if (intervals.length === 0) return [];
   const objectLeft = selectEnvelope(
@@ -1238,6 +1245,8 @@ function mergeAffineIntervalsAtRight(
       ? {
           exact: previous.left.exact,
           square: previous.left.square && interval.left.square,
+          ...(Math.max(previous.left.leastGapPt ?? 0, interval.left.leastGapPt ?? 0) > 0
+            ? { leastGapPt: Math.max(previous.left.leastGapPt ?? 0, interval.left.leastGapPt ?? 0) } : {}),
         }
       : previous.left;
     merged[merged.length - 1] = { left, right };
@@ -1303,7 +1312,7 @@ function nextLocalSweepEvent(
       intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
     };
     gaps.push({ exactWidth });
-    const requirement = Math.max(
+    const baseRequirement = Math.max(
       MIN_LINE_GAP,
       squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
     );
@@ -1311,17 +1320,22 @@ function nextLocalSweepEvent(
       multiplyUnreducedExact(exactWidth.slope, unreducedExactFromNumber(lower)),
       exactWidth.intercept,
     );
-    if (compareExactRational(
-      widthAtLower,
-      unreducedExactFromNumber(requirement),
-    ) < 0 && exactWidth.slope.numerator > 0n) {
-      appendLocalRoot(
-        roots,
-        exactAffineRoot(right.exact, left.exact, requirement),
-        lower,
-        upper,
-        diagnostics,
-      );
+    // The width at which the gap opens for the text, and the larger width
+    // an object bounding it may ask for (firstUsableFreeGap).
+    const leastGapPt = Math.max(left.leastGapPt ?? 0, right.leastGapPt ?? 0);
+    for (const requirement of leastGapPt > baseRequirement ? [baseRequirement, leastGapPt] : [baseRequirement]) {
+      if (compareExactRational(
+        widthAtLower,
+        unreducedExactFromNumber(requirement),
+      ) < 0 && exactWidth.slope.numerator > 0n) {
+        appendLocalRoot(
+          roots,
+          exactAffineRoot(right.exact, left.exact, requirement),
+          lower,
+          upper,
+          diagnostics,
+        );
+      }
     }
   };
   let gapLeft = pageLeft;

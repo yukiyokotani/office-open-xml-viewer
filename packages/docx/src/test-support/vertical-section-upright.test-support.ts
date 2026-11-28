@@ -91,6 +91,8 @@ export type Stories = Readonly<{
   /** The content of endnote 1, which `ENDNOTE_REFERENCE` refers to; endnotes
    * sit at the end of the document (the default w:endnotePr). */
   endnote?: string;
+  /** The document's compatibility mode (w:compatSetting compatibilityMode). */
+  compatibilityMode?: number;
 }>;
 /** A run referring to footnote `id` (1 to `Stories.footnoteCount`). */
 export const footnoteReference = (id: number) =>
@@ -116,7 +118,8 @@ function docx(
     + '<w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
     + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
-    + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="${linePitch}"/>`
+    + `<w:textDirection w:val="${direction}"/>`
+    + (linePitch === 0 ? '' : `<w:docGrid w:type="lines" w:linePitch="${linePitch}"/>`)
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -132,12 +135,15 @@ function docx(
         : '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>')
       + (stories.endnote === undefined ? ''
         : '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>')
+      + (stories.compatibilityMode === undefined ? ''
+        : '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
     ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0
-      && stories.footnote === undefined && stories.endnote === undefined ? [] : [
+      && stories.footnote === undefined && stories.endnote === undefined
+      && stories.compatibilityMode === undefined ? [] : [
       ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
         + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
@@ -146,7 +152,13 @@ function docx(
           : `<Relationship Id="rIdFootnotes" Type="${REL}/footnotes" Target="footnotes.xml"/>`)
         + (stories.endnote === undefined ? ''
           : `<Relationship Id="rIdEndnotes" Type="${REL}/endnotes" Target="endnotes.xml"/>`)
+        + (stories.compatibilityMode === undefined ? ''
+          : `<Relationship Id="rIdSettings" Type="${REL}/settings" Target="settings.xml"/>`)
         + '</Relationships>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.compatibilityMode === undefined ? [] : [
+      ['word/settings.xml', xml(`<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode"`
+        + ` w:uri="http://schemas.microsoft.com/office/word" w:val="${stories.compatibilityMode}"/></w:compat></w:settings>`)],
     ] as Array<[string, Uint8Array]>),
     ...(stories.footnote === undefined ? [] : [
       ['word/footnotes.xml', xml(`<w:footnotes xmlns:w="${W}">`
@@ -222,7 +234,8 @@ export interface Page {
   readonly order: Array<'table' | 'paragraph'>;
 }
 
-/** `linePitch`: the section's line grid pitch in twentieths of a point.
+/** `linePitch`: the section's line grid pitch in twentieths of a point (0:
+ * no line grid).
  * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1.
  * `styles`: the `w:style` elements of the styles part.
  * `stories`: the section's default header and footer. */

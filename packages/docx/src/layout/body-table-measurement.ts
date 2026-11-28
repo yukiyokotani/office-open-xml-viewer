@@ -1137,8 +1137,11 @@ function planUprightRun(
       xPt: inlineStartPt, yPt: blockStartPt, widthPt: inlineEndPt - inlineStartPt, heightPt: boxBlockExtentPt,
     });
     if (at + wholeCount < members.length) slots.push(slotOf(members[at + wholeCount]!, true));
+    // The notes of the tables placed whole: a table cut by rows here keeps
+    // only the rows the band holds, which its own row pagination admits the
+    // notes of.
     const footnoteReferenceIds: string[] = [];
-    for (let offset = 0; offset < slots.length; offset += 1) {
+    for (let offset = 0; offset < wholeCount; offset += 1) {
       const ids = uprightTableFootnoteIds(members[at + offset]!.retained);
       for (let id = 0; id < ids.length; id += 1) footnoteReferenceIds.push(ids[id]!);
     }

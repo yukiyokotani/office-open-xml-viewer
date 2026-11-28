@@ -3859,13 +3859,14 @@ function* paginateBodyPassSteps(
         // so do the tables placed with it: a run moves as one. The notes of
         // the whole run take the room its box leaves and continue on the
         // next page; they are admitted with the run's first table, before
-        // it gives the page content.
+        // it gives the page content. Notes that cannot continue
+        // (continuation off) are admitted whole there, over the box.
         if (candidateUprightEnd && !state.flow.pageHasContent
-          && services.allowFootnoteContinuation === true
           && footnoteReserveInvadesCommittedPageContent(uprightReservePt())) {
           notes = footnoteAdmissionForIds(
             [...new Set([...notes.ids, ...(placedWithReferenceIds ?? [])])],
-            location.availableBounds.widthPt, additionalFootnoteReserveCapacityPt(),
+            location.availableBounds.widthPt,
+            services.allowFootnoteContinuation === true ? additionalFootnoteReserveCapacityPt() : undefined,
           );
         }
         // A zero-advance cell-owner host still occupies the host flow below the
@@ -4140,9 +4141,13 @@ function* paginateBodyPassSteps(
   // tables, so the document-end notes start past its box, as the page's
   // footnote band ends before it (committedFootnoteContentEndPt), clear of
   // the table (library policy).
-  if (endnoteIds.length > 0 && uprightOccupiedEndPt() > state.flow.cursorBlockPt) {
+  // The boxes count in every column count here: a multi-column section lets
+  // a footnote share the page with a table (uprightOccupiedEndPt), but the
+  // document-end notes are flow that must not be laid over one.
+  const registeredUprightEndPt = session.uprightOccupiedBlockEndPt?.() ?? Number.NEGATIVE_INFINITY;
+  if (endnoteIds.length > 0 && registeredUprightEndPt > state.flow.cursorBlockPt) {
     state = Object.freeze({ ...state, flow: Object.freeze({ ...state.flow,
-      cursorBlockPt: Math.min(uprightOccupiedEndPt(), activeBlockEndPt(state)),
+      cursorBlockPt: Math.min(registeredUprightEndPt, activeBlockEndPt(state)),
     }) });
   }
   const modernEndnotes = compat.pageWideEndnoteArea && activeRegion(state).columns.length > 1;

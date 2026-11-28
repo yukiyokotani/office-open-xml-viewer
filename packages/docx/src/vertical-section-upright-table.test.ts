@@ -368,6 +368,38 @@ describe('upright block table of a vertical section', () => {
     },
   );
 
+  it('starts text below a table where the room before a sloping through-wrapped contour reaches the least room', () => {
+    // tbLrV without a line grid (20 pt least room): below a table of one
+    // 600 pt row lies a through-wrapped drawing whose near contour slopes
+    // from 12 pt below the table at block 0 to 51.5 pt below it 170 pt
+    // further, reaching the column end. The first strip whose room reaches
+    // 20 pt (block 170 * 8 / 39.5) holds text below the table.
+    const top = MARGIN.top + 600 + 2 * RULE + 12;
+    const height = COLUMN_END - top;
+    const emu = (pt: number) => Math.round(pt * 12700);
+    const drop = Math.round(39.5 / height * 21600);
+    const drawing = '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+      + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+      + '<wp:simplePos x="0" y="0"/>'
+      + `<wp:positionH relativeFrom="page"><wp:posOffset>${emu(MARGIN.left)}</wp:posOffset></wp:positionH>`
+      + `<wp:positionV relativeFrom="page"><wp:posOffset>${emu(top)}</wp:posOffset></wp:positionV>`
+      + `<wp:extent cx="${emu(170)}" cy="${emu(height)}"/>`
+      + `<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="1"><wp:start x="0" y="0"/><wp:lineTo x="21600" y="${drop}"/>`
+      + '<wp:lineTo x="21600" y="21600"/><wp:lineTo x="0" y="21600"/><wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapThrough>'
+      + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+      + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+      + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
+      + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${emu(170)}" cy="${emu(height)}"/></a:xfrm>`
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
+      + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const pages = layOutPages('tbLrV', [table(1, 600), anchoring(5, drawing), P, P], 1, 0);
+    const page = pages[0]!;
+    const firstLine = page.strips[0]![0]!;
+    expect(firstLine.inlineStart).toBeCloseTo(page.tables[0]!.bottom, 6);
+    expect(firstLine.block).toBeGreaterThan(170 * 8 / 39.5 - 1);
+    expect(firstLine.block).toBeLessThan(40);
+  });
+
   it.each(['tbRl', 'tbLrV'] as const)(
     'starts the next page with a table whose box would reach the footnote it refers to (%s)',
     (direction) => {
@@ -460,6 +492,29 @@ describe('upright block table of a vertical section', () => {
       expect(pages[1]!.noteStart).not.toBeNull();
     });
 
+    it.each(['tbRl', 'tbLrV'] as const)('admits the note of a run row only on the page that holds it (%s)', (direction) => {
+      // A 420 pt-wide table of one 640 pt row first on its page, then a
+      // 180 pt-wide table of four 40 pt rows run on below it, whose fourth
+      // row alone refers to the note: the page holds only the second
+      // table's first row, so the note starts on the next page with row 4.
+      const first = wide(420, 640);
+      const second = table(4, 40).replace('A4</w:t></w:r></w:p>', `A4</w:t></w:r>${FOOTNOTE_REFERENCE}</w:p>`);
+      const pages = layOutNoted(direction, [first, second, P], 1, { continueFootnotes: true });
+      expect(pages.length).toBeGreaterThan(1);
+      expect(pages[0]!.noteStart).toBeNull();
+      expect(pages[1]!.noteStart).not.toBeNull();
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('keeps a page-start run with the whole note that cannot continue (%s)', (direction) => {
+      // As above with continuation off: the run stays on its page and the
+      // note its second table refers to is admitted whole there.
+      const first = table(2, 40).replace(/w:w="1440"/g, 'w:w="4200"').replace(/w:w="2160"/g, 'w:w="4200"');
+      const second = noted(table(2, 41)).replace(/w:sz="4"/g, 'w:sz="8"');
+      const pages = layOutNoted(direction, [first, second, P]);
+      expect(pages[0]!.tables).toHaveLength(2);
+      expect(pages[0]!.noteStart).not.toBeNull();
+    });
+
     it.each(['tbRl', 'tbLrV'] as const)('starts document-end notes past a final table (%s)', (direction) => {
       // The table adds no flow advance: the endnotes after the final empty
       // paragraph start past its box, not at the flow position.
@@ -469,6 +524,19 @@ describe('upright block table of a vertical section', () => {
       expect(pages).toHaveLength(1);
       expect(pages[0]!.noteStart).not.toBeNull();
       expect(tablesEnd(direction, pages[0]!)).toBeLessThanOrEqual(pages[0]!.noteStart! + 1e-6);
+    });
+
+    it.each([
+      ['tbRl', undefined], ['tbLrV', undefined], ['tbRl', 15], ['tbLrV', 15],
+    ] as const)('starts document-end notes past a final table in two columns (%s, mode %s)', (direction, mode) => {
+      // A multi-column section lets a footnote share the page with a table,
+      // but the document-end notes are not laid over it.
+      const endnoted = table(2, 40).replace('</w:p>', `${ENDNOTE_REFERENCE}</w:p>`);
+      const pages = layOutPages(direction, [P, endnoted, '<w:p/>'], 2, 360, undefined, undefined,
+        { endnote: paragraph('note').repeat(2), ...(mode === undefined ? {} : { compatibilityMode: mode }) });
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.noteStart).not.toBeNull();
+      expect(pages[0]!.noteStart!).toBeGreaterThanOrEqual(tablesEnd(direction, pages[0]!) - 1e-6);
     });
 
     it.each(['tbRl', 'tbLrV'] as const)('leaves a table of two columns where the flow reaches it, also over its note (%s)', (direction) => {
