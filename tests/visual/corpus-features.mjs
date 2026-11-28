@@ -27,11 +27,11 @@
 // under the gitignored `packages/<fmt>/public/private/` tree.
 
 import { createHash } from 'node:crypto';
-import { readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
-import { readRegularFile } from './checked-read.mjs';
+import { isCorpusInput, readRegularFile, writeRegularFile } from './checked-read.mjs';
 
 export const FAST_TIER_SCHEMA_VERSION = 1;
 /** Package-relative path of the selection manifest (gitignored location). */
@@ -713,7 +713,7 @@ export function loadFastTierSelection({
 /** Corpus files exactly as the private VRT specs enumerate them. */
 export function listCorpus(directory, format) {
   return readdirSync(directory)
-    .filter((file) => file.endsWith(`.${format}`) && !file.startsWith('~$'))
+    .filter((file) => isCorpusInput(file, format))
     .filter((file) => statSync(join(directory, file)).isFile())
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
@@ -737,7 +737,7 @@ function main(argv) {
     bytes: readRegularFile(join(directory, file)),
   }));
   const manifest = buildFastTierManifest(format, corpus);
-  writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeRegularFile(out, `${JSON.stringify(manifest, null, 2)}\n`);
   const { summary } = manifest;
   console.log(
     `${format}: ${summary.unitsSelected}/${summary.unitsTotal} ${manifest.unitKind}s selected `

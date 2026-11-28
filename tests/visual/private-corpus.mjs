@@ -6,13 +6,13 @@ import {
   realpathSync,
   statSync,
   unlinkSync,
-  writeFileSync,
+  rmdirSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
-import { readRegularFile } from './checked-read.mjs';
+import { isCorpusInput, readRegularFile, writeRegularFile } from './checked-read.mjs';
 
 const SCHEMA_VERSION = 2;
 
@@ -192,7 +192,7 @@ function ignoredSpecimens(root, head, reported) {
     }
     for (const name of names) {
       const path = `${directory}/${name}`;
-      if (CORPUS_INPUT_PATH.test(path) && !tracked.has(path) && !known.has(path)) found.push(path);
+      if (isCorpusInputPath(path) && !tracked.has(path) && !known.has(path)) found.push(path);
     }
   }
   return found;
@@ -207,7 +207,14 @@ function ignoredSpecimens(root, head, reported) {
 // baseline is read from another checkout each copy must still equal the
 // candidate's file at that moment. The snapshot manifest binds the inputs by
 // SHA-256 as well.
-const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/[^/]+\.\1$/;
+const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/([^/]+)$/;
+
+/** A path the allowance may admit: a specimen of its own folder's format, by
+ * the same rule selfVrtCorpusFiles uses (so an Office lock file is not one). */
+function isCorpusInputPath(path) {
+  const match = CORPUS_INPUT_PATH.exec(path);
+  return match !== null && isCorpusInput(match[2], match[1]);
+}
 
 // The baseline is re-verified before every item it reads. A copy is hashed
 // again only when its identity, size or modification time changed, so the
@@ -266,7 +273,7 @@ function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
 /** Changed public specimens that VRT_ALLOW_CORPUS_INPUT_CHANGES=1 admits. */
 function allowedCorpusInputs({ tracked, untracked }) {
   return process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
-    ? [...new Set([...tracked, ...untracked])].filter((path) => CORPUS_INPUT_PATH.test(path)).sort()
+    ? [...new Set([...tracked, ...untracked])].filter(isCorpusInputPath).sort()
     : [];
 }
 
@@ -465,7 +472,7 @@ export function selfVrtCorpusFiles({ corpus, format }) {
   const { publicPrefix, directory: configured } = corpusConfig(corpus);
   const directory = configured ?? format;
   return readdirSync(`public/${publicPrefix}${directory}`)
-    .filter((file) => file.endsWith(`.${format}`) && !file.startsWith('~$'))
+    .filter((file) => isCorpusInput(file, format))
     .map((file) => `${directory}/${file}`)
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
@@ -564,6 +571,13 @@ function assertNoSymlinkBelowCheckout(path) {
       throw new Error(`refusing to write below a symlinked self-VRT path: ${current}`);
     }
   }
+}
+
+/** Write an output file: no symlink in any directory component or at the leaf
+ * (checked below the checkout root), and the leaf must be a regular file. */
+function writeChecked(path, data) {
+  assertNoSymlinkBelowCheckout(path);
+  writeRegularFile(path, data);
 }
 
 function isSymlink(path) {
@@ -684,8 +698,13 @@ export function prepareSelfVrtCorpus({
   if (snapshot) {
     const copies = snapshotCorpusInputs(location.checkout);
     assertNoSymlinkBelowCheckout(path);
+    // Documents an earlier snapshot rendered that this corpus no longer lists.
+    const { outputPrefix, directory: configured } = corpusConfig(corpus);
+    const documents = join(location.directory, `${outputPrefix}${configured ?? format}`);
+    assertNoSymlinkBelowCheckout(documents);
+    removeOrphanedDocuments(documents, orphanedDocuments(documents, files, configured ?? format));
     mkdirSync(root, { recursive: true });
-    writeFileSync(
+    writeChecked(
       path,
       `${JSON.stringify(copies.length > 0 ? { ...manifest, corpusInputCopies: copies } : manifest, null, 2)}\n`,
     );
@@ -705,6 +724,57 @@ export function prepareSelfVrtCorpus({
     recordedCopies.set(location.checkout, corpusInputCopies);
     // Verify the baseline against the record just loaded.
     baselineLocation();
+    const { outputPrefix, directory: configured } = corpusConfig(corpus);
+    const directory = configured ?? format;
+    const documents = join(location.directory, `${outputPrefix}${directory}`);
+    const verified = verifiedBaselinePath(location, documents);
+    const stray = verified ? orphanedDocuments(verified, files, directory) : [];
+    if (stray.length > 0) {
+      throw new Error(
+        `previous-renderer baseline holds documents the corpus manifest does not list: `
+        + `${stray.map((name) => join(documents, name)).join(', ')}`,
+      );
+    }
+    // Candidate screenshots of documents this corpus no longer lists.
+    const screenshots = resolve(`tests/visual/screenshots/${outputPrefix}${directory}`);
+    removeOrphanedDocuments(screenshots, orphanedDocuments(screenshots, files, directory));
+  }
+}
+
+const GENERATED_ITEM = /^(page|sheet|slide)-\d+\.png$/;
+
+/** Per-document output directories below `base` that are not among the
+ * corpus's documents but hold generated files (item images, a manifest). A
+ * symlinked directory is never listed, so it is never followed. */
+function orphanedDocuments(base, files, directory) {
+  const expected = new Set(files.map((file) => file.slice(directory.length + 1).replace(/\.[^.]+$/, '')));
+  let entries;
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && !expected.has(entry.name))
+    .map((entry) => entry.name)
+    .filter((name) => readdirSync(join(base, name))
+      .some((file) => GENERATED_ITEM.test(file) || file === 'manifest.json'));
+}
+
+/** Remove the generated files (and then the empty folder) of documents that
+ * the corpus no longer lists, through the symlink-checked path. */
+function removeOrphanedDocuments(base, names) {
+  for (const name of names) {
+    const directory = join(base, name);
+    assertNoSymlinkBelowCheckout(directory);
+    for (const file of readdirSync(directory)) {
+      if (GENERATED_ITEM.test(file) || file === 'manifest.json') unlinkSync(join(directory, file));
+    }
+    try {
+      rmdirSync(directory);
+    } catch {
+      // Other files remain; only the generated ones were ours to remove.
+    }
   }
 }
 
@@ -888,7 +958,7 @@ export function verifySelfVrtItemManifest(options) {
       }
       return { name, sha256: digest };
     });
-    writeFileSync(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
+    writeChecked(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
     return;
   }
   for (const name of names) {
@@ -920,7 +990,7 @@ export function captureOrCompareSelfVrtItem({
   const outputDirectory = `tests/visual/${snapshot ? 'baseline' : 'screenshots'}/${outputPrefix}${stem}`;
   assertNoSymlinkBelowCheckout(`${outputDirectory}/${key}`);
   mkdirSync(outputDirectory, { recursive: true });
-  writeFileSync(`${outputDirectory}/${key}`, actual);
+  writeChecked(`${outputDirectory}/${key}`, actual);
   if (snapshot) {
     state.digests.set(key, sha256(actual));
     return null;
