@@ -64,8 +64,8 @@ copy the specimens the candidate adds or rewrites into the baseline worktree wit
 as described under "Visual regression" in
 [tests/corpus/README.md](../../tests/corpus/README.md#visual-regression). Set
 `VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison run
-when there are any such specimens; the snapshot records the copies, and the
-comparison fails if one is missing or differs. Set `VRT_ALLOW_HARNESS_CHANGES=1`
+when there are any such specimens; the manifests bind every input by SHA-256, so
+the comparison fails if a copy is missing or differs. Set `VRT_ALLOW_HARNESS_CHANGES=1`
 for both runs when the baseline revision predates the harness changes (see
 [Harness bootstrap](#harness-bootstrap)).
 
@@ -99,9 +99,11 @@ names the root of a Git checkout whose HEAD is exactly `VRT_BASELINE_REVISION`
 and whose renderer is unmodified: no tracked change, and no untracked file
 outside dependencies and the private corpus. The checkout is re-verified
 before every item is read, so a baseline that changes mid-run fails. Snapshot
-manifests record the checkout's real path and each image's SHA-256; the
-comparison requires both to match, and rejects a symlink on the path of any
+manifests record the checkout's real path, each input's SHA-256 and each image's SHA-256; the
+comparison requires all three to match, and rejects a symlink on the path of any
 baseline file it opens, so copied, replaced or redirected images are never accepted. The
+fixtures receive every input from the harness itself, which serves only bytes
+that have the recorded SHA-256 ([`tests/visual/README.md`](../../tests/visual/README.md), "Threat model"). The
 harness runs Git with every `GIT_*` variable removed. A missing or mismatched
 baseline fails the run; it is not a successful regression check.
 

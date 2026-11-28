@@ -54,3 +54,12 @@ export function writeRegularFile(path, data) {
 export function isCorpusInput(name, format) {
   return name.endsWith(`.${format}`) && !name.startsWith('~$');
 }
+
+const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/([^/]+)$/;
+
+/** True for the repository path of a public specimen: an input directly in
+ * its own package's corpus folder. */
+export function isCorpusInputPath(path) {
+  const match = CORPUS_INPUT_PATH.exec(path);
+  return match !== null && isCorpusInput(match[2], match[1]);
+}

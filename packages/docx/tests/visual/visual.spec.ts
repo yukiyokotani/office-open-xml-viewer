@@ -1,15 +1,13 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
-  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
+  routeSelfVrtInput,
   selfVrtCorpusFiles,
-  verifySelfVrtInput,
-  selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 
@@ -220,35 +218,6 @@ test.describe('docx visual fidelity', () => {
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
 type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 
-// Let the dev server serve an input only after its SHA-256 on disk is checked
-// against the one the corpus manifest records (verifySelfVrtInput).
-// The route matches the raw encoded path the fixture requests (each segment
-// through encodeURIComponent), so a name such as `A%20B` cannot be confused
-// with a sibling `A B`. The returned function reports how many times the route
-// served the input; a test asserts it after the document loads.
-async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<() => number> {
-  const inputPath = '/' + selfVrtInputPath({ corpus, file }).split('/').map(encodeURIComponent).join('/');
-  let served = 0;
-  let failure: Error | undefined;
-  await page.route(
-    (url) => url.pathname === inputPath,
-    (route) => {
-      served += 1;
-      try {
-        verifySelfVrtInput({ corpus, file });
-      } catch (error) {
-        failure = error as Error;
-        return route.abort('failed');
-      }
-      return route.continue();
-    },
-  );
-  return () => {
-    if (failure) throw failure;
-    return served;
-  };
-}
-
 // `query` holds the fixture parameters after the page index: the demo and
 // private corpora render at 612 px; the public specimens are A4 (595 pt) and
 // load their Roboto / Noto Sans JP faces offline (?fonts=corpus).
@@ -269,10 +238,12 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.docx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'page' });
-        const inputServed = await serveSelfVrtInput(page, corpus, file);
+        // The fixture is given a harness URL in place of the file name; the
+        // harness serves it the bytes its manifest records.
+        const input = await routeSelfVrtInput(page, { corpus, file });
         const openPage = async (pageIndex: number) => {
           await page.goto(
-            `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
+            `/tests/visual/fixture.html?file=${encodeURIComponent(input)}`
             + `&page=${pageIndex}${query}`,
           );
           await page.waitForFunction(
@@ -288,12 +259,8 @@ function describeSelfRegression(
         };
 
         await openPage(0);
-        expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
         const pageCount = Number(await page.evaluate(() => document.body.dataset.pageCount));
         expect(pageCount, `${stem} must report its complete page count`).toBeGreaterThan(0);
-        beginSelfVrtItems({
-          corpus, format: 'docx', stem, itemKind: 'page', itemCount: pageCount, snapshot: SNAPSHOT,
-        });
         const differences: string[] = [];
         for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
           if (pageIndex > 0) {

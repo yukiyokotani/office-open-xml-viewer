@@ -1,15 +1,13 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
-  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
+  routeSelfVrtInput,
   selfVrtCorpusFiles,
-  verifySelfVrtInput,
-  selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 import { loadFastTierSelection, privateCorpusTier } from '../../../../tests/visual/corpus-features.mjs';
@@ -215,37 +213,8 @@ type SelfVrtCorpus = 'demo' | 'corpus' | 'private' | 'private-fast';
 // sheets that add structural XML features, out of the file's sheet count.
 type FastTierSelection = {
   digest: string;
-  files: Map<string, { unitCount: number; units: number[]; sha256: string }>;
+  files: Map<string, { unitCount: number; units: number[] }>;
 };
-
-// Let the dev server serve an input only after its SHA-256 on disk is checked
-// against the one the corpus manifest records (verifySelfVrtInput).
-// The route matches the raw encoded path the fixture requests (each segment
-// through encodeURIComponent), so a name such as `A%20B` cannot be confused
-// with a sibling `A B`. The returned function reports how many times the route
-// served the input; a test asserts it after the document loads.
-async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<() => number> {
-  const inputPath = '/' + selfVrtInputPath({ corpus, file }).split('/').map(encodeURIComponent).join('/');
-  let served = 0;
-  let failure: Error | undefined;
-  await page.route(
-    (url) => url.pathname === inputPath,
-    (route) => {
-      served += 1;
-      try {
-        verifySelfVrtInput({ corpus, file });
-      } catch (error) {
-        failure = error as Error;
-        return route.abort('failed');
-      }
-      return route.continue();
-    },
-  );
-  return () => {
-    if (failure) throw failure;
-    return served;
-  };
-}
 
 // `query` holds extra fixture parameters (the public specimens load their
 // Roboto / Noto Sans JP faces offline with ?fonts=corpus). `selection` limits
@@ -270,10 +239,12 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.xlsx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'sheet' });
-        const inputServed = await serveSelfVrtInput(page, corpus, file);
+        // The fixture is given a harness URL in place of the file name; the
+        // harness serves it the bytes its manifest records.
+        const input = await routeSelfVrtInput(page, { corpus, file });
         const openSheet = async (sheetIndex: number) => {
           await page.goto(
-            `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
+            `/tests/visual/fixture.html?file=${encodeURIComponent(input)}`
             + `&sheet=${sheetIndex}${query}`,
           );
           await page.waitForFunction(
@@ -290,7 +261,6 @@ function describeSelfRegression(
 
         const firstSheet = selected?.units[0] ?? 0;
         await openSheet(firstSheet);
-        expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
         const sheetCount = Number(await page.evaluate(() => document.body.dataset.sheetCount));
         expect(sheetCount, `${stem} must report its complete sheet count`).toBeGreaterThan(0);
         if (selected && selected.unitCount !== sheetCount) {
@@ -300,10 +270,6 @@ function describeSelfRegression(
           );
         }
         const sheetIndices = selected?.units ?? Array.from({ length: sheetCount }, (_, index) => index);
-        beginSelfVrtItems({
-          corpus, format: 'xlsx', stem, itemKind: 'sheet', itemCount: sheetCount, snapshot: SNAPSHOT,
-          ...(selected ? { itemIndices: selected.units } : {}),
-        });
         const differences: string[] = [];
         for (const sheetIndex of sheetIndices) {
           if (sheetIndex !== firstSheet) {
@@ -355,7 +321,6 @@ if (process.env.VRT_PRIVATE_CORPUS === '1') {
   prepareSelfVrtCorpus({
     corpus: XLSX_PRIVATE_SELF_VRT, format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
     selectionDigest: XLSX_FAST_SELECTION?.digest,
-    selectionFiles: XLSX_FAST_SELECTION?.files,
   });
 }
 

@@ -143,8 +143,8 @@ VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base \
 (`tests/visual/README.md`, "Added or changed public specimens"; the same file's "Threat model" states what the bindings do and do not cover). When `$base`
 predates that allowance, bootstrap the harness first: copy
 `tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
-`tests/visual/corpus-features.mjs`, `tests/visual/copy-corpus-inputs.mjs`, `packages/*/tests/visual/visual.spec.ts`
-and `packages/*/tests/visual/fixture.html` into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
+`tests/visual/corpus-features.mjs` and `packages/*/tests/visual/visual.spec.ts`
+into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
 
 The comparison reads the baseline images from the baseline worktree itself,
 which must be a clean checkout at that revision (see `AGENTS.md`, "Visual

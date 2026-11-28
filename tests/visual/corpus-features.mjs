@@ -688,13 +688,11 @@ export function loadFastTierSelection({
   }
   const entries = new Map(manifest.files.map((entry) => [entry.name, entry]));
   const problems = [];
-  const digests = new Map();
   for (const name of files) {
     const entry = entries.get(name);
     if (!entry) { problems.push(`${name} is not in the manifest`); continue; }
     const sha256 = createHash('sha256').update(readRegularFile(join(directory, name))).digest('hex');
     if (entry.sha256 !== sha256) problems.push(`${name} changed since selection`);
-    digests.set(name, entry.sha256);
   }
   for (const name of entries.keys()) {
     if (!files.includes(name)) problems.push(`${name} is no longer in the corpus`);
@@ -704,9 +702,7 @@ export function loadFastTierSelection({
   }
   return {
     digest: createHash('sha256').update(text).digest('hex'),
-    // `sha256` is the digest validated above; corpus preparation must read
-    // the same bytes.
-    files: new Map(manifest.files.map(({ name, unitCount, units }) => [name, { unitCount, units, sha256: digests.get(name) }])),
+    files: new Map(manifest.files.map(({ name, unitCount, units }) => [name, { unitCount, units }])),
   };
 }
 

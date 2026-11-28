@@ -1,18 +1,56 @@
+// Self-VRT harness: exact-pixel comparison of a candidate renderer with the
+// images a previous renderer drew from the same inputs.
+//
+// What a passing comparison establishes for every page, sheet or slide:
+//
+// 1. Same input. A fixture never loads a corpus input by file name. The specs
+//    ask it for a harness URL (`/__selfvrt/<corpus>/<index>.<ext>`,
+//    routeSelfVrtInput), which no file name can collide with, and that request
+//    is answered by this module's loopback endpoint: it reads the file once
+//    with the checked reader, requires that read to have the SHA-256 the
+//    corpus manifest holds, and sends those bytes. The digest is written into
+//    the per-document manifest beside the image digests, and a document
+//    cannot be finished unless its input went through the endpoint. So a
+//    baseline image is compared only with a candidate image drawn from bytes
+//    of the same digest, whatever names or copies exist on either side.
+// 2. Previous renderer. The baseline images are read from the checkout named
+//    by VRT_BASELINE_CHECKOUT: a Git checkout root, distinct from the
+//    candidate, at VRT_BASELINE_REVISION, whose only differences from that
+//    revision are harness files (VRT_ALLOW_HARNESS_CHANGES=1) and public
+//    specimen inputs (VRT_ALLOW_CORPUS_INPUT_CHANGES=1). Manifests name the
+//    revision and the checkout that wrote them.
+// 3. Same images. A document's baseline directory holds exactly the items its
+//    manifest lists, each with the recorded SHA-256, reached without a
+//    symlink.
+//
+// Because (1) binds inputs by content, a specimen copied into the baseline
+// checkout needs no check of its own: a forgotten, renamed or stale copy
+// changes the input list or a digest and fails the manifest comparison,
+// whether or not Git reports the file.
+//
+// Operator mistakes this is meant to catch: the wrong or a modified checkout,
+// a forgotten, renamed or stale specimen copy, images left by an earlier run
+// or a removed document, symlinked output directories, and non-regular files
+// (every read and write goes through checked-read.mjs). Not covered: a local
+// process that replaces files while a run is in progress, and whatever the
+// renderer loads besides the input (dev server reuse, WASM provenance).
 import {
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   realpathSync,
-  statSync,
-  unlinkSync,
   rmdirSync,
+  unlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { createServer } from 'node:http';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
-import { isCorpusInput, readRegularFile, writeRegularFile } from './checked-read.mjs';
+import {
+  isCorpusInput, isCorpusInputPath, readRegularFile, writeRegularFile,
+} from './checked-read.mjs';
 
 const SCHEMA_VERSION = 2;
 
@@ -43,7 +81,6 @@ const VRT_HARNESS_PATHS = new Set([
   'packages/pptx/tests/visual/visual.spec.ts',
   'tests/visual/private-corpus.mjs',
   'tests/visual/checked-read.mjs',
-  'tests/visual/copy-corpus-inputs.mjs',
   'tests/visual/corpus-features.mjs',
   // Only for the fixture font packages; see lockfileBootstrapDiffViolations.
   'pnpm-lock.yaml',
@@ -158,156 +195,8 @@ function checkoutState(root) {
   return {
     head,
     tracked: tracked.filter(relevant),
-    untracked: [...new Set([...untracked, ...ignoredSpecimens(root, head, [...tracked, ...untracked])])]
-      .filter(relevant),
+    untracked: untracked.filter(relevant),
   };
-}
-
-// `git status` omits ignored files, and a baseline revision that predates the
-// public corpus may ignore the specimen folders. So the specimen inputs are
-// also listed from disk and compared with the files tracked at the baseline
-// revision; any other one counts as an untracked input and goes through the
-// same allowance and copy-record checks. The tracked list depends only on the
-// revision, so it is read once per checkout and revision.
-const trackedSpecimens = new Map();
-
-function ignoredSpecimens(root, head, reported) {
-  const key = `${root}\0${head}`;
-  if (!trackedSpecimens.has(key)) {
-    const output = git(root, [
-      'ls-tree', '-r', '-z', '--name-only', head, '--',
-      'packages/docx/public/corpus', 'packages/xlsx/public/corpus', 'packages/pptx/public/corpus',
-    ], { trim: false });
-    trackedSpecimens.set(key, new Set(output.split('\0').filter(Boolean)));
-  }
-  const tracked = trackedSpecimens.get(key);
-  const known = new Set(reported);
-  const found = [];
-  for (const format of ['docx', 'xlsx', 'pptx']) {
-    const directory = `packages/${format}/public/corpus`;
-    let names;
-    try {
-      names = readdirSync(join(root, directory));
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const path = `${directory}/${name}`;
-      if (isCorpusInputPath(path) && !tracked.has(path) && !known.has(path)) found.push(path);
-    }
-  }
-  return found;
-}
-
-// A public specimen that the PR under test adds or rewrites has no image from
-// the previous renderer. With VRT_ALLOW_CORPUS_INPUT_CHANGES=1 the
-// candidate's specimen files may be copied into the baseline checkout (added
-// or replacing a tracked one), so both renderers draw identical bytes. Only a
-// `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
-// qualifies; it must be a regular file reached without a symlink, and when the
-// baseline is read from another checkout each copy must still equal the
-// candidate's file at that moment. The snapshot manifest binds the inputs by
-// SHA-256 as well.
-const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/([^/]+)$/;
-
-/** A path the allowance may admit: a specimen of its own folder's format, by
- * the same rule selfVrtCorpusFiles uses (so an Office lock file is not one). */
-function isCorpusInputPath(path) {
-  const match = CORPUS_INPUT_PATH.exec(path);
-  return match !== null && isCorpusInput(match[2], match[1]);
-}
-
-// The baseline is re-verified before every item it reads. A copy is hashed
-// again only when its identity, size or modification time changed, so the
-// check costs a stat per input and item rather than a read of every copied
-// specimen.
-const copyDigests = new Map();
-
-function copyDigest(path) {
-  const { dev, ino, size, mtimeMs, ctimeMs } = statSync(path);
-  const key = `${dev}:${ino}:${size}:${mtimeMs}:${ctimeMs}`;
-  const cached = copyDigests.get(path);
-  if (cached?.key === key) return cached.digest;
-  const digest = sha256(readRegularFile(path));
-  copyDigests.set(path, { key, digest });
-  return digest;
-}
-
-/** True when `path` below `root` is a regular file and no component of it,
- * from `root` down, is a symlink. Only lstat is used, so a named pipe or other
- * special file is never opened. */
-function isPlainFile(root, path) {
-  let current = root;
-  for (const component of path.split('/').filter(Boolean)) {
-    current = join(current, component);
-    let stat;
-    try {
-      stat = lstatSync(current);
-    } catch {
-      return false;
-    }
-    if (stat.isSymbolicLink()) return false;
-  }
-  return lstatSync(current).isFile();
-}
-
-function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
-  for (const path of paths) {
-    const file = join(root, path);
-    if (!existsSync(file) && !isSymlink(file)) {
-      throw new Error(`${label} corpus input ${path} is missing at ${root}`);
-    }
-    if (!isPlainFile(root, path) || realpathSync(file) !== file) {
-      throw new Error(`${label} corpus input ${path} must be a regular file without symlinks at ${root}`);
-    }
-    if (candidate === root) continue;
-    const own = join(candidate, path);
-    if (!isPlainFile(candidate, path)) {
-      throw new Error(`${label} corpus input ${path} must be a regular file without symlinks at ${candidate}`);
-    }
-    if (copyDigest(own) !== copyDigest(file)) {
-      throw new Error(`${label} corpus input ${path} differs from the candidate's ${own}`);
-    }
-  }
-}
-
-/** Changed public specimens that VRT_ALLOW_CORPUS_INPUT_CHANGES=1 admits. */
-function allowedCorpusInputs({ tracked, untracked }) {
-  return process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
-    ? [...new Set([...tracked, ...untracked])].filter(isCorpusInputPath).sort()
-    : [];
-}
-
-/** Specimen copies a snapshot run admitted under the allowance, with their
- * SHA-256, for the corpus manifest. */
-function snapshotCorpusInputs(root) {
-  const paths = allowedCorpusInputs(checkoutState(root));
-  assertCandidateCorpusInputs({ root, candidate: root, paths, label: 'self-VRT snapshot' });
-  return paths.map((path) => ({ path, sha256: copyDigest(join(root, path)) }));
-}
-
-// Copies the comparison's corpus manifest recorded, per baseline checkout. The
-// baseline is re-checked against them before every item it reads, so a copy
-// deleted or edited after the snapshot cannot pass.
-const recordedCopies = new Map();
-
-/** `present` is the admitted-copy list from the status call that verified the
- * checkout, so no further git process runs here. */
-function assertRecordedCopies({ root, candidate, label, present }) {
-  const recorded = recordedCopies.get(root);
-  if (!recorded || (recorded.length === 0 && present.length === 0)) return;
-  if (JSON.stringify(present) !== JSON.stringify(recorded.map((copy) => copy.path))) {
-    throw new Error(
-      `${label} corpus input copies differ from the snapshot's record: `
-      + `expected ${JSON.stringify(recorded.map((copy) => copy.path))}, found ${JSON.stringify(present)}`,
-    );
-  }
-  assertCandidateCorpusInputs({ root, candidate, paths: present, label });
-  for (const { path, sha256: expected } of recorded) {
-    if (copyDigest(join(root, path)) !== expected) {
-      throw new Error(`${label} corpus input ${path} changed since its snapshot recorded it`);
-    }
-  }
 }
 
 /** Fail unless `root` is a checkout at exactly `revision` whose renderer is
@@ -315,15 +204,20 @@ function assertRecordedCopies({ root, candidate, label, present }) {
  * the local private corpus. With VRT_ALLOW_HARNESS_CHANGES=1, only the
  * allowlisted VRT harness files may differ (the one-time bootstrap), and a Vite
  * config only by test-renderer alias lines. */
-function assertRendererCheckout({ root, revision, label, candidate = root }) {
+function assertRendererCheckout({ root, revision, label }) {
   const { head, tracked, untracked } = checkoutState(root);
   if (head !== revision) {
     throw new Error(`${label} checkout mismatch: expected ${revision}, found ${head} at ${root}`);
   }
-  const corpusInputs = allowedCorpusInputs({ tracked, untracked });
-  assertCandidateCorpusInputs({ root, candidate, paths: corpusInputs, label });
-  const changed = [...new Set([...tracked, ...untracked])].filter((path) => !corpusInputs.includes(path));
-  if (changed.length === 0) return corpusInputs;
+  // A public specimen the candidate adds or rewrites is copied into the
+  // baseline checkout so that the previous renderer draws it too. Its content
+  // is not checked here: the manifests bind every input by SHA-256. A deleted
+  // specimen is not admitted.
+  const specimenCopy = process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
+    ? (path) => isCorpusInputPath(path) && existsSync(join(root, path))
+    : () => false;
+  const changed = [...new Set([...tracked, ...untracked])].filter((path) => !specimenCopy(path));
+  if (changed.length === 0) return;
   const harnessBootstrap = process.env.VRT_ALLOW_HARNESS_CHANGES === '1'
     && changed.every((path) => VRT_HARNESS_PATHS.has(path));
   if (!harnessBootstrap) {
@@ -354,7 +248,6 @@ function assertRendererCheckout({ root, revision, label, candidate = root }) {
       );
     }
   }
-  return corpusInputs;
 }
 
 function checkoutRoot(path) {
@@ -365,11 +258,7 @@ function checkoutRoot(path) {
  * `revision` with an unmodified renderer, so its images were produced by that
  * revision's renderer and not copied into an arbitrary directory. Returns the
  * checkout's real path. */
-export function verifyBaselineCheckout(options) {
-  return verifyBaselineCheckoutState(options).real;
-}
-
-function verifyBaselineCheckoutState({ checkout, revision, candidate = ownCheckout() }) {
+export function verifyBaselineCheckout({ checkout, revision }) {
   if (!/^[0-9a-f]{40}$/.test(revision)) {
     throw new Error(`baseline revision must be a full commit SHA, got ${revision}`);
   }
@@ -389,8 +278,8 @@ function verifyBaselineCheckoutState({ checkout, revision, candidate = ownChecko
       `VRT_BASELINE_CHECKOUT must be the root of a Git checkout: ${directory} is inside ${root}`,
     );
   }
-  const corpusInputs = assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline', candidate });
-  return { real, corpusInputs };
+  assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline' });
+  return real;
 }
 
 /** Real path of the checkout that runs this process. */
@@ -478,7 +367,7 @@ export function selfVrtCorpusFiles({ corpus, format }) {
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
 
-/** URL path of a corpus input, relative to the package's public root. */
+/** Path of a corpus input below the package's `public/` directory. */
 export function selfVrtInputPath({ corpus, file }) {
   return `${corpusConfig(corpus).publicPrefix}${file}`;
 }
@@ -516,10 +405,7 @@ function baselineLocation({ snapshot = false } = {}) {
   if (existsSync(checkout) && realpathSync(checkout) === candidate) {
     throw new Error('VRT_BASELINE_CHECKOUT must name the previous-renderer checkout, not this one');
   }
-  const { real, corpusInputs } = verifyBaselineCheckoutState({
-    checkout, revision: requiredBaselineRevision(), candidate,
-  });
-  assertRecordedCopies({ root: real, candidate, label: 'self-VRT baseline', present: corpusInputs });
+  const real = verifyBaselineCheckout({ checkout, revision: requiredBaselineRevision() });
   return { checkout: real, directory: join(real, packagePath, 'tests/visual/baseline'), candidate };
 }
 
@@ -556,9 +442,18 @@ function verifiedBaselinePath(location, path) {
   return real;
 }
 
-/** Fail when any existing component of `path`, from the checkout root down, is
- * a symlink, so a write or a stale-image removal cannot be redirected out of
- * the checkout. Call it before every snapshot or candidate-output write. */
+function isSymlink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Fail when `path` leaves this checkout or any existing component of it,
+ * from the checkout root down to the leaf, is a symlink. Generated
+ * directories are sometimes linked to another worktree; nothing is written,
+ * listed for removal or removed through such a link. */
 function assertNoSymlinkBelowCheckout(path) {
   const root = ownCheckout();
   const offset = relative(root, resolve(realpathSync(process.cwd()), path));
@@ -569,23 +464,49 @@ function assertNoSymlinkBelowCheckout(path) {
   for (const component of offset.split(sep).filter(Boolean)) {
     current = join(current, component);
     if (isSymlink(current)) {
-      throw new Error(`refusing to write below a symlinked self-VRT path: ${current}`);
+      throw new Error(`refusing to use a symlinked self-VRT output path: ${current}`);
     }
   }
 }
 
-/** Write an output file: no symlink in any directory component or at the leaf
- * (checked below the checkout root), and the leaf must be a regular file. */
-function writeChecked(path, data) {
+/** The one way the harness writes a manifest or an image. */
+function writeOutput(path, data) {
   assertNoSymlinkBelowCheckout(path);
+  mkdirSync(dirname(path), { recursive: true });
   writeRegularFile(path, data);
 }
 
-function isSymlink(path) {
+const ITEM_IMAGE = /^(page|sheet|slide)-\d+\.png$/;
+const ITEM_IMAGE_OR_MANIFEST = /^(?:(page|sheet|slide)-\d+\.png|manifest\.json)$/;
+
+/** Remove the files the harness generated for documents the corpus no longer
+ * lists (a removed or renamed input), then their directories if empty, so no
+ * image of theirs outlives the run. `tree` holds one directory per document.
+ * A symlink among its entries fails the run instead of being skipped. */
+function removeStaleDocuments(tree, files, directory, generated) {
+  assertNoSymlinkBelowCheckout(tree);
+  const listed = new Set(files.map((file) => file.slice(directory.length + 1, file.lastIndexOf('.'))));
+  let entries;
   try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
+    entries = readdirSync(tree, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const path = join(tree, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`refusing to use a symlinked self-VRT output path: ${path}`);
+    }
+    if (!entry.isDirectory() || listed.has(entry.name)) continue;
+    for (const file of readdirSync(path)) {
+      if (generated.test(file)) unlinkSync(join(path, file));
+    }
+    try {
+      rmdirSync(path);
+    } catch {
+      // Files the harness did not generate remain, and so does the directory.
+    }
   }
 }
 
@@ -593,40 +514,92 @@ function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
-// Each input is read once by prepareSelfVrtCorpus, and that buffer is what the
-// manifest's SHA-256 describes. Only the digest is kept: the spec's route
-// checks the file on disk against it (verifySelfVrtInput) and lets the dev
-// server stream the file, so no input is held in memory or base64-encoded.
+// Inputs of each prepared corpus, in manifest order. `sha256` is the digest
+// the corpus manifest holds; `url` is the only address a fixture is given.
 const preparedInputs = new Map();
 
-function corpusFiles(corpus, files, selectionFiles) {
-  return files.map((name) => {
-    const digest = sha256(readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`));
-    if (selectionFiles) {
-      const selected = selectionFiles.get(name)?.sha256;
-      if (selected !== digest) {
-        throw new Error(
-          `${name} changed between the fast-tier selection and corpus preparation `
-          + `(selection ${selected}, prepared ${digest}); regenerate the selection`,
-        );
-      }
-    }
-    preparedInputs.set(`${corpus}\0${name}`, digest);
-    return { name, sha256: digest };
+function corpusFiles(corpus, format, files) {
+  const inputs = files.map((name, index) => {
+    const path = resolve(`public/${selfVrtInputPath({ corpus, file: name })}`);
+    return {
+      name, path, sha256: sha256(readRegularFile(path)),
+      url: `/__selfvrt/${corpus}/${index}.${format}`, served: 0, failure: null,
+    };
   });
+  preparedInputs.set(corpus, inputs);
+  return inputs.map(({ name, sha256: digest }) => ({ name, sha256: digest }));
 }
 
-/** Throws unless the prepared input on disk still has the digest its manifest
- * recorded. The spec's route calls it before letting the dev server serve the
- * file.
- * @param {{ corpus: string, file: string }} options */
-export function verifySelfVrtInput({ corpus, file }) {
-  const expected = preparedInputs.get(`${corpus}\0${file}`);
-  if (!expected) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
-  const path = `public/${selfVrtInputPath({ corpus, file })}`;
-  if (sha256(readRegularFile(path)) !== expected) {
-    throw new Error(`self-VRT input ${path} changed after its manifest recorded it`);
+function preparedInput(corpus, name) {
+  const input = preparedInputs.get(corpus)?.find((candidate) => candidate.name === name);
+  if (!input) throw new Error(`self-VRT input ${name} was not prepared for the ${corpus} corpus`);
+  return input;
+}
+
+// One loopback endpoint per process serves the prepared inputs. Each request
+// is one checked read: the bytes sent are the bytes whose digest was compared
+// with the manifest's, and a mismatch drops the connection, so the fixture
+// fails to load. A body goes out as it was read, without the base64 copy that
+// a Playwright `route.fulfill` body takes (which caps the input size).
+let inputEndpoint;
+
+function selfVrtInputEndpoint() {
+  inputEndpoint ??= new Promise((resolveOrigin, reject) => {
+    const server = createServer((request, response) => {
+      const input = [...preparedInputs.values()].flat().find((candidate) => candidate.url === request.url);
+      if (!input) {
+        response.writeHead(404, { connection: 'close' }).end();
+        return;
+      }
+      try {
+        const body = readRegularFile(input.path);
+        if (sha256(body) !== input.sha256) {
+          throw new Error(`self-VRT input ${input.path} changed after its manifest recorded it`);
+        }
+        input.served += 1;
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream', 'content-length': body.length, connection: 'close',
+        }).end(body);
+      } catch (error) {
+        input.failure = error;
+        response.destroy();
+      }
+    });
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolveOrigin(`http://127.0.0.1:${server.address().port}`));
+  });
+  return inputEndpoint;
+}
+
+/** Route the page's request for one prepared input to the harness endpoint and
+ * return the path to hand the fixture in place of a file name (root-relative,
+ * with the format's extension). Call it before the fixture is opened.
+ * @param {{ route(matcher: (url: URL) => boolean,
+ *   handler: (route: { continue(overrides: { url: string }): Promise<void> }) => unknown): Promise<unknown> }} page
+ *   a Playwright page
+ * @param {{ corpus: string, file: string }} input */
+export async function routeSelfVrtInput(page, { corpus, file }) {
+  const input = preparedInput(corpus, file);
+  input.served = 0;
+  input.failure = null;
+  const origin = await selfVrtInputEndpoint();
+  await page.route(
+    (url) => url.pathname === input.url,
+    (route) => route.continue({ url: `${origin}${input.url}` }),
+  );
+  return input.url.slice(1);
+}
+
+/** Name and digest of an input for its document manifest. Fails unless the
+ * endpoint served it since it was routed, and served only verified bytes. */
+function servedInput(corpus, name) {
+  const input = preparedInput(corpus, name);
+  if (input.failure) throw input.failure;
+  if (input.served === 0) {
+    throw new Error(`self-VRT input ${name} was not loaded through the harness endpoint (routeSelfVrtInput)`);
   }
+  return { name, sha256: input.sha256 };
 }
 
 function readBaselineJson(location, path) {
@@ -648,14 +621,9 @@ function assertExactManifest(actual, expected, path) {
  * merge-base revision. This prevents a candidate server or unrelated old
  * snapshot from silently becoming its own regression oracle. A subset corpus
  * (`private-fast`) is additionally bound to its selection manifest digest.
- * `selectionFiles` (private-fast) carries the digest the selection loader
- * validated for each file; every prepared input, including a file without any
- * selected item, must hash to it.
  * @param {{ corpus: string, format: string, files: string[], snapshot: boolean,
- *   selectionDigest?: string, selectionFiles?: Map<string, { sha256: string }> }} options */
-export function prepareSelfVrtCorpus({
-  corpus, format, files, snapshot, selectionDigest, selectionFiles,
-}) {
+ *   selectionDigest?: string }} options */
+export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectionDigest }) {
   if (files.length === 0) {
     throw new Error(`${format} ${corpus} corpus is empty; zero-test self-VRT is not coverage`);
   }
@@ -665,14 +633,6 @@ export function prepareSelfVrtCorpus({
       ? `${corpus} self-VRT requires a selection digest`
       : `${corpus} self-VRT does not take a selection digest`);
   }
-  if (Boolean(selection) !== Boolean(selectionFiles)) {
-    throw new Error(selection
-      ? `${corpus} self-VRT requires the selection's per-file digests`
-      : `${corpus} self-VRT does not take per-file selection digests`);
-  }
-  // Each corpus manifest is read afresh; a record from an earlier prepare must
-  // not stand in for it.
-  recordedCopies.clear();
   const location = baselineLocation({ snapshot });
   const root = join(location.directory, corpusConfig(corpus).manifestDirectory);
   const path = join(root, 'manifest.json');
@@ -682,90 +642,20 @@ export function prepareSelfVrtCorpus({
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
     ...(selection ? { selectionDigest } : {}),
-    files: corpusFiles(corpus, files, selectionFiles),
+    files: corpusFiles(corpus, format, files),
   };
+  const { outputPrefix, directory: configured } = corpusConfig(corpus);
+  const directory = configured ?? format;
   if (snapshot) {
-    const copies = snapshotCorpusInputs(location.checkout);
-    assertNoSymlinkBelowCheckout(path);
-    // Documents an earlier snapshot rendered that this corpus no longer lists.
-    const { outputPrefix, directory: configured } = corpusConfig(corpus);
-    const documents = join(location.directory, `${outputPrefix}${configured ?? format}`);
-    assertNoSymlinkBelowCheckout(documents);
-    removeOrphanedDocuments(documents, orphanedDocuments(documents, files, configured ?? format));
-    mkdirSync(root, { recursive: true });
-    writeChecked(
-      path,
-      `${JSON.stringify(copies.length > 0 ? { ...manifest, corpusInputCopies: copies } : manifest, null, 2)}\n`,
+    removeStaleDocuments(
+      join(location.directory, `${outputPrefix}${directory}`), files, directory, ITEM_IMAGE_OR_MANIFEST,
     );
+    writeOutput(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
-    const { corpusInputCopies = [], ...header } = readBaselineJson(location, path);
-    assertExactManifest(header, manifest, path);
-    if (!Array.isArray(corpusInputCopies)
-      || corpusInputCopies.some((copy) => typeof copy?.path !== 'string' || typeof copy?.sha256 !== 'string')) {
-      throw new Error(`invalid corpus input copy record in ${path}`);
-    }
-    if (corpusInputCopies.length > 0 && process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES !== '1') {
-      throw new Error(
-        `${path} records specimen copies admitted by VRT_ALLOW_CORPUS_INPUT_CHANGES=1; `
-        + 'set it for the comparison run too',
-      );
-    }
-    recordedCopies.set(location.checkout, corpusInputCopies);
-    // Verify the baseline against the record just loaded.
-    baselineLocation();
-    const { outputPrefix, directory: configured } = corpusConfig(corpus);
-    const directory = configured ?? format;
-    const documents = join(location.directory, `${outputPrefix}${directory}`);
-    const verified = verifiedBaselinePath(location, documents);
-    const stray = verified ? orphanedDocuments(verified, files, directory) : [];
-    if (stray.length > 0) {
-      throw new Error(
-        `previous-renderer baseline holds documents the corpus manifest does not list: `
-        + `${stray.map((name) => join(documents, name)).join(', ')}`,
-      );
-    }
-    // Candidate screenshots of documents this corpus no longer lists.
-    const screenshots = resolve(`tests/visual/screenshots/${outputPrefix}${directory}`);
-    // Candidate screenshots hold item images only; no manifest of the harness's.
-    const noManifest = { manifest: false };
-    removeOrphanedDocuments(screenshots, orphanedDocuments(screenshots, files, directory, noManifest), noManifest);
-  }
-}
-
-const GENERATED_ITEM = /^(page|sheet|slide)-\d+\.png$/;
-
-/** Per-document output directories below `base` that are not among the
- * corpus's documents but hold generated files (item images, a manifest). A
- * symlinked directory is never listed, so it is never followed. */
-function orphanedDocuments(base, files, directory, { manifest = true } = {}) {
-  const expected = new Set(files.map((file) => file.slice(directory.length + 1).replace(/\.[^.]+$/, '')));
-  let entries;
-  try {
-    entries = readdirSync(base, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((entry) => entry.isDirectory() && !expected.has(entry.name))
-    .map((entry) => entry.name)
-    .filter((name) => readdirSync(join(base, name))
-      .some((file) => GENERATED_ITEM.test(file) || (manifest && file === 'manifest.json')));
-}
-
-/** Remove the generated files (and then the empty folder) of documents that
- * the corpus no longer lists, through the symlink-checked path. */
-function removeOrphanedDocuments(base, names, { manifest = true } = {}) {
-  for (const name of names) {
-    const directory = join(base, name);
-    assertNoSymlinkBelowCheckout(directory);
-    for (const file of readdirSync(directory)) {
-      if (GENERATED_ITEM.test(file) || (manifest && file === 'manifest.json')) unlinkSync(join(directory, file));
-    }
-    try {
-      rmdirSync(directory);
-    } catch {
-      // Other files remain; only the generated ones were ours to remove.
-    }
+    assertExactManifest(readBaselineJson(location, path), manifest, path);
+    removeStaleDocuments(
+      resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), files, directory, ITEM_IMAGE,
+    );
   }
 }
 
@@ -811,13 +701,22 @@ function sortedItems(files, itemKind) {
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
 
-// Per document and run: the plan validated by beginSelfVrtItems, kept so that
-// capture, comparison and finalization all use that one object (a snapshot's
-// digests of the captured buffers; a comparison's single read of the baseline
-// manifest) instead of reading the disk again.
-const itemStates = new Map();
-
-function itemPlan({ corpus, format, stem, itemKind, itemCount, snapshot, itemIndices }) {
+/** Verify that the baseline contains exactly the complete page/sheet/slide set
+ * reported by the previous renderer (for a subset corpus, exactly the selected
+ * `itemIndices`), each image unchanged since that checkout's snapshot run
+ * recorded its SHA-256. An item-count reduction, a stale extra PNG or a
+ * replaced image is therefore a hard failure.
+ * @param {{ corpus: string, format: string, stem: string, itemKind: string,
+ *   itemCount: number, snapshot: boolean, itemIndices?: number[] }} options */
+export function verifySelfVrtItemManifest({
+  corpus,
+  format,
+  stem,
+  itemKind,
+  itemCount,
+  snapshot,
+  itemIndices,
+}) {
   const { selection, outputPrefix } = corpusConfig(corpus);
   if (Boolean(selection) !== Boolean(itemIndices)) {
     throw new Error(selection
@@ -829,79 +728,46 @@ function itemPlan({ corpus, format, stem, itemKind, itemCount, snapshot, itemInd
     || (position > 0 && index <= indices[position - 1]))) {
     throw new Error(`invalid ${itemKind} selection for ${stem}: ${JSON.stringify(indices)} of ${itemCount}`);
   }
-  const inputName = `${stem}.${format}`;
-  const prepared = preparedInputs.get(`${corpus}\0${inputName}`);
-  if (!prepared) throw new Error(`self-VRT input ${inputName} was not prepared for the ${corpus} corpus`);
   const location = baselineLocation({ snapshot });
   const directory = join(location.directory, `${outputPrefix}${stem}`);
-  return {
-    location,
-    directory,
-    path: join(directory, 'manifest.json'),
-    names: indices.map((index) => `${itemKind}-${index + 1}.png`),
-    header: {
-      schemaVersion: SCHEMA_VERSION,
-      format,
-      baselineRevision: baselineRevision(snapshot),
-      checkout: location.checkout,
-      input: { name: inputName, sha256: prepared },
-      itemKind,
-      itemCount,
-    },
+  const path = join(directory, 'manifest.json');
+  const names = indices.map((index) => `${itemKind}-${index + 1}.png`);
+  const header = {
+    schemaVersion: SCHEMA_VERSION,
+    format,
+    baselineRevision: baselineRevision(snapshot),
+    checkout: location.checkout,
+    input: servedInput(corpus, `${stem}.${format}`),
+    itemKind,
+    itemCount,
   };
-}
-
-/** Call once per document, after its item count is known and before the first
- * item is captured or compared.
- *
- * Snapshot: prepares the output directory (removing stale images from an
- * earlier snapshot) and starts recording the digest of every captured buffer.
- * Comparison: reads the baseline's per-document manifest exactly once, checks
- * its header (input digest, checkout, revision), its item set and the
- * baseline directory's contents, and keeps the validated hashes; every image
- * comparison then derives from this object. The baseline contains exactly the
- * complete page/sheet/slide set the previous renderer reported (for a subset
- * corpus, exactly the selected `itemIndices`), so an item-count reduction, a
- * stale extra PNG or a replaced image is a hard failure.
- * @param {{ corpus: string, format: string, stem: string, itemKind: string,
- *   itemCount: number, snapshot: boolean, itemIndices?: number[] }} options */
-export function beginSelfVrtItems(options) {
-  const { corpus, stem, itemKind, snapshot } = options;
-  const plan = itemPlan(options);
-  const { location, directory, path, names, header } = plan;
-  const key = `${corpus}\0${stem}`;
   if (snapshot) {
     assertNoSymlinkBelowCheckout(directory);
-    mkdirSync(directory, { recursive: true });
     // A previous snapshot in this checkout may have rendered more items.
     for (const stale of sortedItems(readdirSync(directory), itemKind)) {
       if (!names.includes(stale)) unlinkSync(join(directory, stale));
     }
-    itemStates.set(key, { snapshot, names, header, digests: new Map() });
+    const present = sortedItems(readdirSync(directory), itemKind);
+    if (JSON.stringify(present) !== JSON.stringify(names)) {
+      throw new Error(
+        `snapshot item set mismatch at ${directory}\n`
+        + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
+      );
+    }
+    const items = names.map((name) => ({ name, sha256: sha256(readRegularFile(join(directory, name))) }));
+    writeOutput(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
     return;
   }
   const recorded = readBaselineJson(location, path);
   const { items: recordedItems, ...recordedHeader } = recorded;
   assertExactManifest(recordedHeader, header, path);
   if (!Array.isArray(recordedItems)
-    || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)
-    || recordedItems.some((item) => typeof item?.sha256 !== 'string')) {
+    || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)) {
     throw new Error(
       `previous-renderer item set mismatch at ${path}\n`
       + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(recordedItems)}`,
     );
   }
-  assertBaselineItemSet({ location, directory, itemKind, names });
-  itemStates.set(key, {
-    snapshot,
-    names,
-    header,
-    expected: new Map(recordedItems.map((item) => [item.name, item.sha256])),
-    compared: new Set(),
-  });
-}
-
-function assertBaselineItemSet({ location, directory, itemKind, names }) {
   const verifiedDirectory = verifiedBaselinePath(location, directory);
   const actualItems = sortedItems(verifiedDirectory ? readdirSync(verifiedDirectory) : [], itemKind);
   if (JSON.stringify(actualItems) !== JSON.stringify(names)) {
@@ -910,60 +776,18 @@ function assertBaselineItemSet({ location, directory, itemKind, names }) {
       + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(actualItems)}`,
     );
   }
-}
-
-/** Finish a document's items. Same options as beginSelfVrtItems, which must
- * have run first. Snapshot: every item must have been captured, the file
- * written for it must still be the buffer that was captured, and the manifest
- * records the captured buffers' digests. Comparison: every item must have been
- * compared against the manifest beginSelfVrtItems validated; the baseline's
- * item set is checked again, and no image content is read a second time. */
-export function verifySelfVrtItemManifest(options) {
-  const { corpus, stem, itemKind, snapshot } = options;
-  const key = `${corpus}\0${stem}`;
-  const state = itemStates.get(key);
-  if (!state || state.snapshot !== snapshot) {
-    throw new Error(`self-VRT items of ${stem} were not begun for this run`);
-  }
-  const plan = itemPlan(options);
-  const { location, directory, path, names, header } = plan;
-  if (JSON.stringify(header) !== JSON.stringify(state.header)
-    || JSON.stringify(names) !== JSON.stringify(state.names)) {
-    throw new Error(`self-VRT items of ${stem} changed since they were begun`);
-  }
-  itemStates.delete(key);
-  if (snapshot) {
-    assertNoSymlinkBelowCheckout(directory);
-    const present = sortedItems(readdirSync(directory), itemKind);
-    if (JSON.stringify(present) !== JSON.stringify(names)) {
-      throw new Error(
-        `snapshot item set mismatch at ${directory}\n`
-        + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
-      );
+  for (const { name, sha256: expected } of recordedItems) {
+    const verified = verifiedBaselinePath(location, join(directory, name));
+    if (!verified || sha256(readRegularFile(verified)) !== expected) {
+      throw new Error(`previous-renderer image changed since its snapshot: ${join(directory, name)}`);
     }
-    const items = names.map((name) => {
-      const digest = state.digests.get(name);
-      if (!digest) throw new Error(`snapshot item ${name} of ${stem} was never captured`);
-      if (sha256(readRegularFile(join(directory, name))) !== digest) {
-        throw new Error(`snapshot image changed after capture: ${join(directory, name)}`);
-      }
-      return { name, sha256: digest };
-    });
-    writeChecked(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
-    return;
   }
-  for (const name of names) {
-    if (!state.compared.has(name)) throw new Error(`${stem} ${name} was never compared`);
-  }
-  assertBaselineItemSet({ location, directory, itemKind, names });
 }
 
 /** Persist the candidate artifact and return a diagnostic instead of throwing,
  * so one changed item cannot prevent later items in the same document from
- * being rendered and compared. The baseline image is read once; its SHA-256
- * must equal the one in the manifest beginSelfVrtItems validated, and the
- * pixel comparison uses that same buffer. Snapshot runs record the digest of
- * the captured buffer. */
+ * being rendered and compared. The baseline image must match the SHA-256 its
+ * snapshot run recorded. */
 export function captureOrCompareSelfVrtItem({
   corpus,
   stem,
@@ -974,28 +798,23 @@ export function captureOrCompareSelfVrtItem({
 }) {
   const key = `${itemKind}-${itemIndex + 1}.png`;
   const { outputPrefix } = corpusConfig(corpus);
-  const state = itemStates.get(`${corpus}\0${stem}`);
-  if (!state || state.snapshot !== snapshot) {
-    throw new Error(`self-VRT items of ${stem} were not begun before capture`);
-  }
   const outputDirectory = `tests/visual/${snapshot ? 'baseline' : 'screenshots'}/${outputPrefix}${stem}`;
-  assertNoSymlinkBelowCheckout(`${outputDirectory}/${key}`);
-  mkdirSync(outputDirectory, { recursive: true });
-  writeChecked(`${outputDirectory}/${key}`, actual);
-  if (snapshot) {
-    state.digests.set(key, sha256(actual));
-    return null;
-  }
+  writeOutput(`${outputDirectory}/${key}`, actual);
+  if (snapshot) return null;
   const location = baselineLocation();
-  const baselinePath = join(location.directory, `${outputPrefix}${stem}`, key);
-  const expected = state.expected.get(key);
+  const directory = join(location.directory, `${outputPrefix}${stem}`);
+  const manifestPath = join(directory, 'manifest.json');
+  const recorded = readBaselineJson(location, manifestPath);
+  const expected = Array.isArray(recorded.items)
+    ? recorded.items.find((item) => item?.name === key)?.sha256
+    : undefined;
+  const baselinePath = join(directory, key);
   const verified = verifiedBaselinePath(location, baselinePath);
   if (!verified || !expected) return `missing previous-renderer baseline: ${baselinePath}`;
   const baseline = readRegularFile(verified);
   if (sha256(baseline) !== expected) {
     throw new Error(`previous-renderer image changed since its snapshot: ${baselinePath}`);
   }
-  state.compared.add(key);
   return pngPixelsEqual(actual, baseline)
     ? null
     : `${stem} ${key} differs from the previous renderer`;

@@ -12,6 +12,28 @@ gitignored files, symlinked generated directories, and non-regular files such
 as named pipes. They do not defend against a local process that deliberately
 replaces files while a run is in progress; concurrent races are out of scope.
 
+The comment at the top of `private-corpus.mjs` states what a passing
+comparison establishes. In short:
+
+- **Same input.** A fixture never loads a corpus input by file name. The specs
+  hand it a harness URL (`/__selfvrt/<corpus>/<index>.<ext>`), and the harness
+  answers that request itself: one checked read, required to have the SHA-256
+  in the corpus manifest, whose bytes are the ones sent. Each document's
+  manifest records that digest beside its image digests, and the comparison
+  requires it to equal the candidate's.
+- **Previous renderer.** Baseline images are read only from a Git checkout
+  root at `VRT_BASELINE_REVISION` that is not the candidate and differs from
+  the revision only by what the two `VRT_ALLOW_*` flags admit.
+- **Same images.** A baseline document holds exactly the items its manifest
+  lists, each with its recorded SHA-256, reached without a symlink.
+
+Inputs are bound by content, so it does not matter whether Git tracks, ignores
+or reports a file: a missing, renamed or different input changes the input
+list or a digest and fails the comparison. Output is written, and stale output
+removed, only below the checkout and never through a symlink; documents the
+corpus no longer lists lose their generated files at the next snapshot
+(baseline) or comparison (candidate screenshots).
+
 ## Harness bootstrap exceptions
 
 When a harness change is bootstrapped against an older baseline
@@ -21,9 +43,8 @@ two more things are allowed:
 - `pnpm-lock.yaml`, but only hunks that add or remove the fixtures'
   `@fontsource/*` packages. Any other hunk fails.
 - The inputs under `packages/<fmt>/public/corpus/`. Git ignores them before
-  the corpus is tracked, so the bootstrap may copy them in. The harness lists
-  these folders from disk and compares them with the files tracked at the
-  baseline revision, so an ignored copy is checked like any other.
+  the corpus is tracked, so the bootstrap may copy them in. The manifests
+  bind them by SHA-256 like every other input.
 
 ## Added or changed public specimens
 
@@ -37,25 +58,23 @@ run:
 node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
 ```
 
-The script (built-ins only, run from the candidate checkout) lists the added
-or modified specimens against `$base`, creates a missing corpus folder, and
-refuses to write through a symlink in the destination.
+The command (built-ins only, run from the root of the candidate checkout)
+requires the destination to be the root of another Git checkout whose HEAD is
+`$base`. It copies the tracked specimens that the candidate's working tree
+adds or modifies relative to `$base`, creates a missing corpus folder, and
+refuses to write through a symlink. When the candidate deletes or renames a
+specimen it stops before writing anything: the two sides would render
+different input sets, which the self-VRT cannot compare.
 
-Only a `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
-qualifies. It must be a regular file reached without a symlink, and during the
-comparison each copy must still equal the candidate's file. The snapshot records the
-copies (path and SHA-256) in the corpus manifest; the comparison fails when a
-recorded copy is missing or differs from the record or the candidate, or when
-the flag is not set for it. The manifest's SHA-256 binding checks the inputs
-as well. Any other file, a deleted input and
-any renderer change still fail. The specs serve the fixture the input bytes
-the corpus manifest recorded (`selfVrtInputBody`), so a specimen replaced
-during capture fails instead of lending its image to another input. When the
-baseline revision predates this allowance, also copy
-`tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
-`tests/visual/corpus-features.mjs`, `tests/visual/copy-corpus-inputs.mjs`, `packages/*/tests/visual/visual.spec.ts`
-and `packages/*/tests/visual/fixture.html` (the specs and fixtures agree on
-the encoded input URL) and set `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
+The flag admits only a `.docx`/`.xlsx`/`.pptx` present directly in its own
+package's corpus folder. Any other file, a specimen deleted from the baseline
+and any renderer change still fail. The copies need no check of their own:
+the manifests bind every input by SHA-256 (threat model above), so a
+forgotten, renamed or stale copy fails the comparison. When the baseline
+revision predates this harness, also copy `tests/visual/private-corpus.mjs`,
+`tests/visual/checked-read.mjs`, `tests/visual/corpus-features.mjs` and
+`packages/*/tests/visual/visual.spec.ts` and set
+`VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 
 ## Fast private tier (PPTX/XLSX)
 

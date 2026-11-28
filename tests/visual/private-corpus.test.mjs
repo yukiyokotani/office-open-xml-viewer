@@ -3,10 +3,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
-  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -14,21 +14,20 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { copyCorpusInputs } from './copy-corpus-inputs.mjs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { PNG } from 'pngjs';
-import { createHash } from 'node:crypto';
+import { copyCorpusInputs } from './copy-corpus-inputs.mjs';
 import {
-  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
   harnessBootstrapDiffViolations,
   lockfileBootstrapDiffViolations,
   pngPixelsEqual,
+  routeSelfVrtInput,
   selfVrtBaselineRoot,
-  verifySelfVrtInput,
+  selfVrtCorpusFiles,
   selfVrtInputPath,
   verifyBaselineCheckout,
   verifySelfVrtItemManifest,
@@ -244,65 +243,6 @@ test('a baseline checkout must be a clean Git checkout at the baseline revision'
   }
 });
 
-test('candidate corpus inputs may be copied into the baseline checkout only when allowed', () => {
-  const { root, first } = baselineRepository();
-  const candidate = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-candidate-'));
-  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-outside-'));
-  const rel = 'packages/xlsx/public/corpus';
-  const place = (dir, name, bytes) => {
-    mkdirSync(join(dir, rel), { recursive: true });
-    writeFileSync(join(dir, rel, name), bytes);
-  };
-  const verify = (revision = first) => verifyBaselineCheckout({ checkout: root, revision, candidate });
-  try {
-    // The baseline revision already tracks one specimen.
-    place(root, 'xlsx-001-old.xlsx', 'v1');
-    git(root, 'add', '-f', `${rel}/xlsx-001-old.xlsx`);
-    git(root, 'commit', '-q', '-m', 'track specimen');
-    const tracked = git(root, 'rev-parse', 'HEAD');
-    // The candidate rewrites it and adds another; both are copied over.
-    place(candidate, 'xlsx-001-old.xlsx', 'v2');
-    place(candidate, 'xlsx-999-new.xlsx', 'new');
-    place(root, 'xlsx-001-old.xlsx', 'v2');
-    place(root, 'xlsx-999-new.xlsx', 'new');
-    withEnv({ VRT_ALLOW_CORPUS_INPUT_CHANGES: undefined, VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
-      assert.throws(() => verify(tracked), /clean renderer checkout; changed paths at .*xlsx-001-old\.xlsx/);
-    });
-    withEnv({ VRT_ALLOW_CORPUS_INPUT_CHANGES: '1', VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
-      verify(tracked);
-      // A copy that differs from the candidate's file is rejected, also after the snapshot.
-      place(root, 'xlsx-999-new.xlsx', 'changed');
-      assert.throws(() => verify(tracked), /corpus input .*xlsx-999-new\.xlsx differs from the candidate/);
-      place(root, 'xlsx-999-new.xlsx', 'new');
-      // So is a symlink, even to identical bytes.
-      writeFileSync(join(outside, 'x.xlsx'), 'new');
-      rmSync(join(root, rel, 'xlsx-999-new.xlsx'));
-      symlinkSync(join(outside, 'x.xlsx'), join(root, rel, 'xlsx-999-new.xlsx'));
-      assert.throws(() => verify(tracked), /must be a regular file without symlinks/);
-      rmSync(join(root, rel, 'xlsx-999-new.xlsx'));
-      place(root, 'xlsx-999-new.xlsx', 'new');
-      // A deleted tracked input is not a candidate copy.
-      rmSync(join(root, rel, 'xlsx-001-old.xlsx'));
-      assert.throws(() => verify(tracked), /corpus input .*xlsx-001-old\.xlsx is missing/);
-      place(root, 'xlsx-001-old.xlsx', 'v2');
-      // Only a specimen of the folder's own format qualifies.
-      writeFileSync(join(root, rel, 'patch.js'), 'export {};\n');
-      writeFileSync(join(root, rel, 'other.docx'), 'x');
-      assert.throws(() => verify(tracked), /changed paths at .*: .*other\.docx/);
-      rmSync(join(root, rel, 'patch.js'));
-      rmSync(join(root, rel, 'other.docx'));
-      verify(tracked);
-      // It never excuses a renderer change.
-      writeFileSync(join(root, 'renderer.js'), 'export const version = 3;\n');
-      assert.throws(() => verify(tracked), /changed paths at .*: renderer\.js/);
-    });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(candidate, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
-  }
-});
-
 test('comparison runs read only a verified previous-renderer checkout', () => {
   const { root, first } = baselineRepository();
   const plain = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-baseline-plain-'));
@@ -353,6 +293,8 @@ function selfVrtFixture() {
     'packages/*/tests/visual/baseline/\npackages/*/tests/visual/screenshots/\n',
   );
   writeFileSync(join(base, 'packages/pptx/public/demo/deck.pptx'), 'deck');
+  mkdirSync(join(base, 'packages/pptx/public/corpus'));
+  writeFileSync(join(base, 'packages/pptx/public/corpus/old.pptx'), 'v1');
   writeFileSync(join(base, 'renderer.js'), 'export const version = 1;\n');
   git(base, 'add', '.');
   git(base, 'commit', '-q', '-m', 'renderer');
@@ -364,29 +306,63 @@ function selfVrtFixture() {
 
 const DEMO = { corpus: 'demo', format: 'pptx', stem: 'demo/deck', itemKind: 'slide' };
 
-function inPackage(checkout, env, run) {
+async function inPackage(checkout, env, run) {
   const previous = process.cwd();
+  const names = ['VRT_ALLOW_HARNESS_CHANGES', 'VRT_ALLOW_CORPUS_INPUT_CHANGES', ...Object.keys(env)];
+  const saved = Object.fromEntries(names.map((key) => [key, process.env[key]]));
+  const assign = (values) => {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
   process.chdir(join(checkout, 'packages/pptx'));
+  assign({ VRT_ALLOW_HARNESS_CHANGES: undefined, VRT_ALLOW_CORPUS_INPUT_CHANGES: undefined, ...env });
   try {
-    return withEnv({ VRT_ALLOW_HARNESS_CHANGES: undefined, ...env }, run);
+    return await run();
   } finally {
+    assign(saved);
     process.chdir(previous);
   }
 }
 
+/** Load a prepared input the way a fixture does: route it on a stand-in for a
+ * Playwright page, request the returned path, and follow the route to the
+ * harness endpoint. Rejects when the endpoint refuses the input. */
+async function loadInput(corpus, file) {
+  let matches;
+  let handle;
+  const path = await routeSelfVrtInput({
+    route: async (matcher, handler) => {
+      matches = matcher;
+      handle = handler;
+    },
+  }, { corpus, file });
+  assert.equal(matches(new URL(`http://fixture.invalid/${path}`)), true);
+  let body;
+  await handle({
+    continue: async ({ url }) => {
+      const response = await fetch(url);
+      assert.equal(response.status, 200);
+      body = Buffer.from(await response.arrayBuffer());
+    },
+  });
+  return { path, body, matches };
+}
+
 function snapshot(checkout, revision, value = 7) {
-  inPackage(checkout, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision }, () => {
+  return inPackage(checkout, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision }, async () => {
     prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-    beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
+    await loadInput('demo', 'demo/deck.pptx');
     assert.equal(captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(value), snapshot: true }), null);
     verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true });
   });
 }
 
 function compare({ candidate, base, revision }, value = 7) {
-  return inPackage(candidate, { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision }, () => {
+  return inPackage(candidate, { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision }, async () => {
     prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
-    beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
+    await loadInput('demo', 'demo/deck.pptx');
     const difference = captureOrCompareSelfVrtItem({
       ...DEMO, itemIndex: 0, actual: png(value), snapshot: false,
     });
@@ -395,78 +371,21 @@ function compare({ candidate, base, revision }, value = 7) {
   });
 }
 
-test('the renderer is served only an input that still has its manifest digest', () => {
+test('a verified baseline checkout detects a changed slide and accepts an unchanged one', async () => {
   const fixture = selfVrtFixture();
   try {
-    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
-      assert.throws(() => verifySelfVrtInput({ corpus: 'demo', file: 'demo/unprepared.pptx' }), /was not prepared/);
-      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-      verifySelfVrtInput({ corpus: 'demo', file: 'demo/deck.pptx' });
-      // A specimen replaced during capture is refused, so its image cannot be
-      // recorded for the input the manifest names.
-      writeFileSync('public/demo/deck.pptx', 'other');
-      assert.throws(
-        () => verifySelfVrtInput({ corpus: 'demo', file: 'demo/deck.pptx' }),
-        /changed after its manifest recorded it/,
-      );
-      writeFileSync('public/demo/deck.pptx', 'deck');
-      verifySelfVrtInput({ corpus: 'demo', file: 'demo/deck.pptx' });
-    });
+    await snapshot(fixture.base, fixture.revision);
+    assert.equal(await compare(fixture), null);
+    assert.match(await compare(fixture, 8), /differs from the previous renderer/);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
 
-test('a private corpus input is refused when it no longer has the prepared digest', () => {
-  const fixture = fastFixture();
-  try {
-    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
-      prepareSelfVrtCorpus({
-        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
-        selectionFiles: selectionFiles('private deck'),
-      });
-      const route = () => verifySelfVrtInput({ corpus: 'private-fast', file: 'pptx/deck.pptx' });
-      route();
-      const path = 'public/private/pptx/deck.pptx';
-      writeFileSync(path, 'other');
-      assert.throws(route, /changed after its manifest recorded it/);
-      writeFileSync(path, 'private deck');
-      route();
-    });
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('an item manifest requires its input to be prepared in this process', () => {
+test('bypass: a symlink in the baseline cannot redirect reads to other images', async () => {
   const fixture = selfVrtFixture();
   try {
-    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
-      assert.throws(
-        () => beginSelfVrtItems({ ...DEMO, stem: 'demo/unprepared', itemCount: 1, snapshot: true }),
-        /was not prepared/,
-      );
-    });
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('a verified baseline checkout detects a changed slide and accepts an unchanged one', () => {
-  const fixture = selfVrtFixture();
-  try {
-    snapshot(fixture.base, fixture.revision);
-    assert.equal(compare(fixture), null);
-    assert.match(compare(fixture, 8), /differs from the previous renderer/);
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('bypass: a symlink in the baseline cannot redirect reads to other images', () => {
-  const fixture = selfVrtFixture();
-  try {
-    snapshot(fixture.base, fixture.revision);
+    await snapshot(fixture.base, fixture.revision);
     const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
     const screenshots = join(fixture.candidate, 'packages/pptx/tests/visual/screenshots/demo');
     mkdirSync(screenshots, { recursive: true });
@@ -476,37 +395,37 @@ test('bypass: a symlink in the baseline cannot redirect reads to other images', 
     // The whole corpus directory linked to the candidate's own output.
     rmSync(baselineDemo, { recursive: true });
     symlinkSync(screenshots, baselineDemo, 'dir');
-    assert.throws(() => compare(fixture, 8), /must not contain symlinks/);
+    await assert.rejects(compare(fixture, 8), /must not contain symlinks/);
 
     // A single image linked to the candidate's output.
     unlinkSync(baselineDemo);
     cpSync(screenshots, baselineDemo, { recursive: true });
     rmSync(join(baselineDemo, 'deck/slide-1.png'));
     symlinkSync(join(screenshots, 'deck/slide-1.png'), join(baselineDemo, 'deck/slide-1.png'));
-    assert.throws(() => compare(fixture, 8), /must not contain symlinks/);
+    await assert.rejects(compare(fixture, 8), /must not contain symlinks/);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
 
-test('bypass: images copied from another checkout or replaced after the snapshot are rejected', () => {
+test('bypass: images copied from another checkout or replaced after the snapshot are rejected', async () => {
   const fixture = selfVrtFixture();
   const other = join(fixture.scratch, 'other');
   try {
     git(fixture.scratch, 'clone', '-q', fixture.base, other);
-    snapshot(other, fixture.revision, 8);
+    await snapshot(other, fixture.revision, 8);
     // Real files, but written by another checkout's snapshot run.
     cpSync(
       join(other, 'packages/pptx/tests/visual/baseline'),
       join(fixture.base, 'packages/pptx/tests/visual/baseline'),
       { recursive: true },
     );
-    assert.throws(() => compare(fixture, 8), /manifest mismatch[\s\S]*"checkout"/);
+    await assert.rejects(compare(fixture, 8), /manifest mismatch[\s\S]*"checkout"/);
 
     // The genuine snapshot, with its image replaced afterwards.
-    snapshot(fixture.base, fixture.revision);
+    await snapshot(fixture.base, fixture.revision);
     writeFileSync(join(fixture.base, 'packages/pptx/tests/visual/baseline/demo/deck/slide-1.png'), png(8));
-    assert.throws(() => compare(fixture, 8), /changed since its snapshot/);
+    await assert.rejects(compare(fixture, 8), /changed since its snapshot/);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
@@ -535,16 +454,15 @@ test('bypass: GIT_* variables cannot make a plain copy answer as a checkout', ()
   }
 });
 
-test('bypass: a baseline checkout changed mid-run is caught at the next item', () => {
+test('bypass: a baseline checkout changed mid-run is caught at the next item', async () => {
   const fixture = selfVrtFixture();
   try {
-    snapshot(fixture.base, fixture.revision);
-    inPackage(
+    await snapshot(fixture.base, fixture.revision);
+    await inPackage(
       fixture.candidate,
       { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision },
       () => {
         prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
-        beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
         writeFileSync(join(fixture.base, 'renderer.js'), 'export const version = 2;\n');
         assert.throws(
           () => captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: false }),
@@ -578,17 +496,10 @@ function fastFixture() {
   return fixture;
 }
 
-function selectionFiles(content) {
-  return new Map([['pptx/deck.pptx', { unitCount: 4, units: [1, 3], sha256: createHash('sha256').update(content).digest('hex') }]]);
-}
-
-function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7, content = 'private deck' }) {
-  return inPackage(checkout, env, () => {
-    prepareSelfVrtCorpus({
-      ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest,
-      selectionFiles: selectionFiles(content),
-    });
-    beginSelfVrtItems({ ...FAST, itemCount: 4, snapshot, itemIndices: indices });
+function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7 }) {
+  return inPackage(checkout, env, async () => {
+    prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest });
+    await loadInput('private-fast', 'pptx/deck.pptx');
     const differences = indices.map((itemIndex) => captureOrCompareSelfVrtItem({
       ...FAST, itemIndex, actual: png(value), snapshot,
     })).filter(Boolean);
@@ -597,71 +508,41 @@ function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1
   });
 }
 
-test('images captured for an input are refused after the input is replaced', () => {
-  const fixture = fastFixture();
-  try {
-    const baseEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
-    const compareEnv = { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision };
-    assert.deepEqual(fastRun(fixture.base, baseEnv, { snapshot: true }), []);
-    assert.deepEqual(fastRun(fixture.candidate, compareEnv, { snapshot: false }), []);
-    for (const checkout of [fixture.base, fixture.candidate]) {
-      writeFileSync(join(checkout, 'packages/pptx/public/private/pptx/deck.pptx'), 'replaced deck');
-    }
-    // Snapshot preparation runs again for the replaced input, but its images are
-    // not recaptured or re-verified; the comparison must not accept them.
-    inPackage(fixture.base, baseEnv, () => {
-      prepareSelfVrtCorpus({
-        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
-        selectionFiles: selectionFiles('replaced deck'),
-      });
-    });
-    assert.throws(
-      () => fastRun(fixture.candidate, compareEnv, { snapshot: false, content: 'replaced deck' }),
-      /previous-renderer manifest mismatch/,
-    );
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('fast tier compares exactly the selected items under the same selection', () => {
+test('fast tier compares exactly the selected items under the same selection', async () => {
   const fixture = fastFixture();
   const { base, candidate, revision } = fixture;
   const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
   const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
   try {
-    assert.deepEqual(fastRun(base, snapshotEnv, { snapshot: true }), []);
+    assert.deepEqual(await fastRun(base, snapshotEnv, { snapshot: true }), []);
     assert.ok(existsSync(join(base, 'packages/pptx/tests/visual/baseline/private-corpus-fast/pptx/deck/slide-4.png')));
     assert.ok(!existsSync(join(base, 'packages/pptx/tests/visual/baseline/private-corpus-fast/pptx/deck/slide-1.png')));
-    assert.deepEqual(fastRun(candidate, compareEnv, { snapshot: false }), []);
-    assert.equal(fastRun(candidate, compareEnv, { snapshot: false, value: 8 }).length, 2);
+    assert.deepEqual(await fastRun(candidate, compareEnv, { snapshot: false }), []);
+    assert.equal((await fastRun(candidate, compareEnv, { snapshot: false, value: 8 })).length, 2);
     // A different selection is a different oracle.
-    assert.throws(() => fastRun(candidate, compareEnv, { snapshot: false, digest: 'selection-b' }), /manifest mismatch/);
-    assert.throws(() => fastRun(candidate, compareEnv, { snapshot: false, indices: [1] }), /item set mismatch/);
+    await assert.rejects(fastRun(candidate, compareEnv, { snapshot: false, digest: 'selection-b' }), /manifest mismatch/);
+    await assert.rejects(fastRun(candidate, compareEnv, { snapshot: false, indices: [1] }), /item set mismatch/);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
 
-test('fast tier and full corpora refuse each other\'s selection arguments', () => {
+test('fast tier and full corpora refuse each other\'s selection arguments', async () => {
   const fixture = fastFixture();
   const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
   try {
-    inPackage(fixture.base, env, () => {
+    await inPackage(fixture.base, env, () => {
       assert.throws(() => prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot: true }),
         /requires a selection digest/);
       assert.throws(() => prepareSelfVrtCorpus({
-        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
-      }), /requires the selection's per-file digests/);
-      assert.throws(() => prepareSelfVrtCorpus({
         ...FAST, corpus: 'private', files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
       }), /does not take a selection digest/);
-      assert.throws(() => beginSelfVrtItems({ ...FAST, itemCount: 4, snapshot: true }),
+      assert.throws(() => verifySelfVrtItemManifest({ ...FAST, itemCount: 4, snapshot: true }),
         /requires the selected item indices/);
-      assert.throws(() => beginSelfVrtItems({
+      assert.throws(() => verifySelfVrtItemManifest({
         ...FAST, itemCount: 4, snapshot: true, itemIndices: [3, 1],
       }), /invalid slide selection/);
-      assert.throws(() => beginSelfVrtItems({
+      assert.throws(() => verifySelfVrtItemManifest({
         ...FAST, corpus: 'private', itemCount: 4, snapshot: true, itemIndices: [1],
       }), /does not take item indices/);
     });
@@ -670,607 +551,403 @@ test('fast tier and full corpora refuse each other\'s selection arguments', () =
   }
 });
 
-test('allowance copies recorded at snapshot time must stay present and identical', () => {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-allow-'));
-  const base = join(scratch, 'base');
-  const candidate = join(scratch, 'candidate');
-  const rel = 'packages/xlsx/public/corpus';
-  const specimen = 'xlsx-999-new.xlsx';
+// ── Input binding ────────────────────────────────────────────────────────────
+// A fixture gets its document from the harness endpoint, never by file name.
+
+const PRIVATE = { corpus: 'private', format: 'pptx', stem: 'pptx/deck', itemKind: 'slide' };
+
+test('inputs are addressed by manifest position, so file names cannot alias one another', async () => {
+  const fixture = selfVrtFixture();
+  const directory = join(fixture.base, 'packages/pptx/public/private/pptx');
   try {
-    mkdirSync(join(base, rel), { recursive: true });
-    git(base, 'init', '-q');
-    git(base, 'config', 'user.email', 'vrt@example.invalid');
-    git(base, 'config', 'user.name', 'vrt');
-    writeFileSync(join(base, rel, '.gitkeep'), '');
-    writeFileSync(join(base, '.gitignore'), 'packages/*/tests/visual/baseline/\n');
-    git(base, 'add', '-f', '.');
-    git(base, 'commit', '-q', '-m', 'renderer');
-    const revision = git(base, 'rev-parse', 'HEAD');
-    git(scratch, 'clone', '-q', base, candidate);
-    writeFileSync(join(candidate, rel, specimen), 'new');
-    writeFileSync(join(base, rel, specimen), 'new');
-    const files = [`corpus/${specimen}`];
-    const spec = { corpus: 'corpus', format: 'xlsx', files };
-    const inXlsx = (checkout, env, run) => {
-      const previous = process.cwd();
-      process.chdir(join(checkout, 'packages/xlsx'));
-      try {
-        return withEnv({ VRT_ALLOW_HARNESS_CHANGES: undefined, ...env }, run);
-      } finally {
-        process.chdir(previous);
+    mkdirSync(directory, { recursive: true });
+    // A dev server that decodes the request path would serve one for the other.
+    writeFileSync(join(directory, 'A&B.pptx'), 'ampersand');
+    writeFileSync(join(directory, 'A%26B.pptx'), 'percent');
+    await inPackage(
+      fixture.base,
+      { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision },
+      async () => {
+        const files = selfVrtCorpusFiles({ corpus: 'private', format: 'pptx' });
+        assert.deepEqual([...files].sort(), ['pptx/A%26B.pptx', 'pptx/A&B.pptx']);
+        prepareSelfVrtCorpus({ corpus: 'private', format: 'pptx', files, snapshot: true });
+        const ampersand = await loadInput('private', 'pptx/A&B.pptx');
+        const percent = await loadInput('private', 'pptx/A%26B.pptx');
+        assert.match(ampersand.path, /^__selfvrt\/private\/\d+\.pptx$/);
+        assert.match(percent.path, /^__selfvrt\/private\/\d+\.pptx$/);
+        assert.notEqual(ampersand.path, percent.path);
+        assert.equal(ampersand.body.toString(), 'ampersand');
+        assert.equal(percent.body.toString(), 'percent');
+        // Only the harness URL is routed; a request by name is left alone.
+        assert.equal(ampersand.matches(new URL('http://fixture.invalid/private/pptx/A%26B.pptx')), false);
+        assert.equal(ampersand.matches(new URL(`http://fixture.invalid/${percent.path}`)), false);
+        await assert.rejects(
+          routeSelfVrtInput({ route: async () => {} }, { corpus: 'private', file: 'pptx/other.pptx' }),
+          /was not prepared for the private corpus/,
+        );
+      },
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a document is finished only if the endpoint served its input with the manifest digest', async () => {
+  const fixture = fastFixture();
+  const input = join(fixture.base, 'packages/pptx/public/private/pptx/deck.pptx');
+  try {
+    await inPackage(
+      fixture.base,
+      { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision },
+      async () => {
+        const finish = () => verifySelfVrtItemManifest({ ...PRIVATE, itemCount: 1, snapshot: true });
+        prepareSelfVrtCorpus({ ...PRIVATE, files: ['pptx/deck.pptx'], snapshot: true });
+        captureOrCompareSelfVrtItem({ ...PRIVATE, itemIndex: 0, actual: png(7), snapshot: true });
+        // The fixture loaded something, but not through the harness.
+        assert.throws(finish, /was not loaded through the harness endpoint/);
+        // The file no longer is what the corpus manifest recorded.
+        writeFileSync(input, 'replaced');
+        await assert.rejects(loadInput('private', 'pptx/deck.pptx'), /fetch failed/);
+        assert.throws(finish, /deck\.pptx changed after its manifest recorded it/);
+        writeFileSync(input, 'private deck');
+        assert.equal((await loadInput('private', 'pptx/deck.pptx')).body.toString(), 'private deck');
+        finish();
+      },
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('images kept from a snapshot of other input bytes are refused', async () => {
+  const fixture = fastFixture();
+  const { base, candidate, revision } = fixture;
+  const run = (checkout, env, snapshot, render = true) => inPackage(checkout, env, async () => {
+    prepareSelfVrtCorpus({ ...PRIVATE, files: ['pptx/deck.pptx'], snapshot });
+    if (!render) return null;
+    await loadInput('private', 'pptx/deck.pptx');
+    const difference = captureOrCompareSelfVrtItem({ ...PRIVATE, itemIndex: 0, actual: png(7), snapshot });
+    verifySelfVrtItemManifest({ ...PRIVATE, itemCount: 1, snapshot });
+    return difference;
+  });
+  const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
+  const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
+  try {
+    await run(base, snapshotEnv, true);
+    assert.equal(await run(candidate, compareEnv, false), null);
+    // The input is replaced in both checkouts and the snapshot is started
+    // again but does not render this document (a filtered or aborted run):
+    // the corpus manifest is current, the document's images are not.
+    for (const checkout of [base, candidate]) {
+      writeFileSync(join(checkout, 'packages/pptx/public/private/pptx/deck.pptx'), 'private deck, edited');
+    }
+    await run(base, snapshotEnv, true, false);
+    await assert.rejects(run(candidate, compareEnv, false), /manifest mismatch[\s\S]*"input"/);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+// ── Added or rewritten public specimens ──────────────────────────────────────
+
+const SPECIMEN = { corpus: 'corpus', format: 'pptx', itemKind: 'slide' };
+
+/** Snapshot or compare every specimen (one slide each); returns the differences. */
+function specimenRun(checkout, env, snapshot, value = 7) {
+  return inPackage(checkout, env, async () => {
+    const files = selfVrtCorpusFiles({ corpus: 'corpus', format: 'pptx' });
+    prepareSelfVrtCorpus({ ...SPECIMEN, files, snapshot });
+    const differences = [];
+    for (const file of files) {
+      const stem = file.slice(0, -'.pptx'.length);
+      await loadInput('corpus', file);
+      const difference = captureOrCompareSelfVrtItem({
+        ...SPECIMEN, stem, itemIndex: 0, actual: png(value), snapshot,
+      });
+      if (difference) differences.push(difference);
+      verifySelfVrtItemManifest({ ...SPECIMEN, stem, itemCount: 1, snapshot });
+    }
+    return differences;
+  });
+}
+
+test('specimen copies are admitted only under the flag, and only as present specimen files', () => {
+  const fixture = selfVrtFixture();
+  const { base, revision } = fixture;
+  const corpus = join(base, 'packages/pptx/public/corpus');
+  const verify = () => verifyBaselineCheckout({ checkout: base, revision });
+  const cases = (flag, run) => withEnv(
+    { VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_ALLOW_HARNESS_CHANGES: undefined }, run,
+  );
+  try {
+    writeFileSync(join(corpus, 'new.pptx'), 'new');
+    writeFileSync(join(corpus, 'old.pptx'), 'v2');
+    cases(undefined, () => assert.throws(verify, /clean renderer checkout; changed paths at .*old\.pptx.*new\.pptx/));
+    cases('1', () => {
+      verify();
+      // Nothing but a specimen of the folder's own format, directly in it.
+      for (const other of ['new.win.pdf', '~$new.pptx', 'new.docx', 'nested/new.pptx', '../demo/new.pptx']) {
+        const path = join(corpus, other);
+        mkdirSync(join(path, '..'), { recursive: true });
+        writeFileSync(path, 'x');
+        assert.throws(verify, /clean renderer checkout/, other);
+        rmSync(path);
       }
-    };
-    const compare = (flag) => inXlsx(candidate, {
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag,
-      VRT_BASELINE_CHECKOUT: base,
-      VRT_BASELINE_REVISION: revision,
-    }, () => {
-      prepareSelfVrtCorpus({ ...spec, snapshot: false });
-      selfVrtBaselineRoot();
+      rmSync(join(corpus, 'nested'), { recursive: true });
+      // The allowance never covers the renderer, or a specimen removed from the baseline.
+      writeFileSync(join(base, 'renderer.js'), 'export const version = 3;\n');
+      assert.throws(verify, /clean renderer checkout; changed paths at .*: renderer\.js$/);
+      git(base, 'checkout', '-q', '--', 'renderer.js');
+      rmSync(join(corpus, 'old.pptx'));
+      assert.throws(verify, /clean renderer checkout; changed paths at .*: packages\/pptx\/public\/corpus\/old\.pptx$/);
     });
-    inXlsx(base, {
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
-      VRT_BASELINE_CHECKOUT: undefined,
-      VRT_BASELINE_REVISION: revision,
-    }, () => prepareSelfVrtCorpus({ ...spec, snapshot: true }));
-    const record = JSON.parse(readFileSync(
-      join(base, 'packages/xlsx/tests/visual/baseline/public-corpus/manifest.json'),
-      'utf8',
-    ));
-    assert.deepEqual(record.corpusInputCopies.map((copy) => copy.path), [`${rel}/${specimen}`]);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
 
-    compare('1');
-    // The comparison needs the allowance the snapshot used.
-    assert.throws(() => compare(undefined), /clean renderer checkout/);
+test('a specimen the candidate adds or rewrites is compared only against a copy of the same bytes', async () => {
+  const fixture = selfVrtFixture();
+  const { base, candidate, revision } = fixture;
+  const corpus = 'packages/pptx/public/corpus';
+  const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
+  const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
+  const allow = { VRT_ALLOW_CORPUS_INPUT_CHANGES: '1' };
+  try {
+    writeFileSync(join(candidate, corpus, 'old.pptx'), 'v2');
+    writeFileSync(join(candidate, corpus, 'new.pptx'), 'new');
+    git(candidate, 'add', '.');
+    git(candidate, '-c', 'user.email=vrt@example.invalid', '-c', 'user.name=vrt', 'commit', '-q', '-m', 'specimens');
 
-    // A copy deleted after the snapshot is caught, with the flag set or unset.
-    rmSync(join(base, rel, specimen));
-    assert.throws(() => compare('1'), /copies differ from the snapshot's record/);
-    assert.throws(() => compare(undefined), /set it for the comparison run too/);
+    // Forgotten copies: the baseline rendered another input set.
+    await specimenRun(base, snapshotEnv, true);
+    await assert.rejects(specimenRun(candidate, compareEnv, false), /manifest mismatch/);
 
-    // A modified copy is caught.
-    writeFileSync(join(base, rel, specimen), 'edited');
-    assert.throws(() => compare('1'), /differs from the candidate/);
-    // Even when the candidate's file was edited along with it.
-    writeFileSync(join(candidate, rel, specimen), 'edited');
-    assert.throws(() => compare('1'), /changed since its snapshot recorded it|SHA-256|manifest mismatch/);
+    assert.deepEqual(
+      copyCorpusInputs({ source: candidate, destination: base, base: revision }),
+      [`${corpus}/new.pptx`, `${corpus}/old.pptx`],
+    );
+    await assert.rejects(specimenRun(base, snapshotEnv, true), /clean renderer checkout; changed paths/);
+    await specimenRun(base, { ...snapshotEnv, ...allow }, true);
+    await assert.rejects(specimenRun(candidate, compareEnv, false), /clean renderer checkout; changed paths/);
+    assert.deepEqual(await specimenRun(candidate, { ...compareEnv, ...allow }, false), []);
+    assert.equal((await specimenRun(candidate, { ...compareEnv, ...allow }, false, 8)).length, 2);
 
-    // Edited mid-run, in both checkouts to identical new bytes: only the
-    // snapshot's digest still rejects it.
-    writeFileSync(join(candidate, rel, specimen), 'new');
-    writeFileSync(join(base, rel, specimen), 'new');
-    inXlsx(candidate, {
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
-      VRT_BASELINE_CHECKOUT: base,
-      VRT_BASELINE_REVISION: revision,
-    }, () => {
-      prepareSelfVrtCorpus({ ...spec, snapshot: false });
-      writeFileSync(join(base, rel, specimen), 'rewritten');
-      writeFileSync(join(candidate, rel, specimen), 'rewritten');
-      assert.throws(() => selfVrtBaselineRoot(), /corpus input .*xlsx-999-new\.xlsx changed since its snapshot recorded it/);
-    });
+    // A stale copy: the snapshot drew other bytes than the candidate will.
+    writeFileSync(join(base, corpus, 'old.pptx'), 'v1.5');
+    await specimenRun(base, { ...snapshotEnv, ...allow }, true);
+    await assert.rejects(
+      specimenRun(candidate, { ...compareEnv, ...allow }, false),
+      /manifest mismatch[\s\S]*corpus\/old\.pptx/,
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
 
-    // Deleted mid-run, after the corpus manifest was verified.
-    writeFileSync(join(candidate, rel, specimen), 'new');
-    writeFileSync(join(base, rel, specimen), 'new');
-    inXlsx(candidate, {
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
-      VRT_BASELINE_CHECKOUT: base,
-      VRT_BASELINE_REVISION: revision,
-    }, () => {
-      prepareSelfVrtCorpus({ ...spec, snapshot: false });
-      rmSync(join(base, rel, specimen));
-      assert.throws(() => selfVrtBaselineRoot(), /copies differ from the snapshot's record/);
-    });
+test('the specimen copy command checks its destination and refuses deletions and renames', () => {
+  const fixture = selfVrtFixture();
+  const { scratch, base, candidate, revision } = fixture;
+  const corpus = 'packages/pptx/public/corpus';
+  const outside = join(scratch, 'outside');
+  const copy = (destination = base) => copyCorpusInputs({ source: candidate, destination, base: revision });
+  const put = (path, bytes) => {
+    mkdirSync(join(candidate, path, '..'), { recursive: true });
+    writeFileSync(join(candidate, path), bytes);
+  };
+  try {
+    put(`${corpus}/old.pptx`, 'v2');
+    put('packages/xlsx/public/corpus/new.xlsx', 'new');
+    put('packages/xlsx/public/corpus/new.win.pdf', 'reference');
+    put('packages/xlsx/public/corpus/wrong.pptx', 'wrong format');
+    put('renderer.js', 'export const version = 2;\n');
+    git(candidate, 'add', '-A');
+    // The baseline has no xlsx corpus folder yet: it is created.
+    assert.deepEqual(copy(), ['packages/pptx/public/corpus/old.pptx', 'packages/xlsx/public/corpus/new.xlsx']);
+    assert.equal(readFileSync(join(base, corpus, 'old.pptx'), 'utf8'), 'v2');
+    assert.deepEqual(readdirSync(join(base, 'packages/xlsx/public/corpus')), ['new.xlsx']);
+    assert.equal(readFileSync(join(base, 'renderer.js'), 'utf8'), 'export const version = 1;\n');
+
+    // The destination must be the root of another checkout at the base revision.
+    mkdirSync(outside);
+    assert.throws(() => copy(outside), /baseline checkout is not a Git checkout/);
+    assert.throws(() => copy(join(base, 'packages')), /must be the root of a Git checkout/);
+    assert.throws(() => copy(candidate), /must not be the candidate checkout/);
+    const moved = join(scratch, 'moved');
+    git(scratch, 'clone', '-q', base, moved);
+    git(moved, '-c', 'user.email=vrt@example.invalid', '-c', 'user.name=vrt', 'commit', '-q', '--allow-empty', '-m', 'moved');
+    assert.throws(() => copy(moved), /not at the base revision/);
+    assert.equal(readFileSync(join(moved, corpus, 'old.pptx'), 'utf8'), 'v1');
+
+    // Nothing is written through a symlink in the destination.
+    writeFileSync(join(outside, 'target.xlsx'), 'keep');
+    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
+    symlinkSync(join(outside, 'target.xlsx'), join(base, 'packages/xlsx/public/corpus/new.xlsx'));
+    assert.throws(copy, /symlink or non-regular file/);
+    assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
+    rmSync(join(base, 'packages/xlsx'), { recursive: true });
+    mkdirSync(join(base, 'packages/xlsx/public'), { recursive: true });
+    symlinkSync(outside, join(base, 'packages/xlsx/public/corpus'));
+    assert.throws(copy, /must be a real directory/);
+    assert.deepEqual(readdirSync(outside), ['target.xlsx']);
+    rmSync(join(base, 'packages/xlsx'), { recursive: true });
+
+    // A rename is a deletion and an addition; neither side is copied.
+    git(candidate, 'mv', `${corpus}/old.pptx`, `${corpus}/renamed.pptx`);
+    git(base, 'checkout', '-q', '--', `${corpus}/old.pptx`);
+    assert.throws(copy, /deletes or renames: D packages\/pptx\/public\/corpus\/old\.pptx$/);
+    assert.deepEqual(readdirSync(join(base, corpus)), ['old.pptx']);
+    assert.equal(existsSync(join(base, 'packages/xlsx')), false);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
 });
 
-test('a non-regular or symlinked candidate input is rejected without being read', (t) => {
-  const { root, first } = baselineRepository();
-  const candidate = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-candidate-'));
-  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-outside-'));
-  const rel = 'packages/pptx/public/corpus';
-  const module = new URL('./private-corpus.mjs', import.meta.url).href;
-  // A separate process with a timeout: reading a named pipe would block forever.
-  const verify = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
-    import { verifyBaselineCheckout } from ${JSON.stringify(module)};
-    try {
-      verifyBaselineCheckout({ checkout: ${JSON.stringify(root)}, revision: ${JSON.stringify(first)}, candidate: ${JSON.stringify(candidate)} });
-      console.log('accepted');
-    } catch (error) { console.log(error.message); }
-  `], {
-    encoding: 'utf8',
-    timeout: 15000,
-    env: { ...process.env, VRT_ALLOW_CORPUS_INPUT_CHANGES: '1', VRT_ALLOW_HARNESS_CHANGES: '' },
-  });
+// ── Generated output ─────────────────────────────────────────────────────────
+
+test('documents the corpus no longer lists keep no generated file after a snapshot or a comparison', async () => {
+  const fixture = selfVrtFixture();
+  const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
+  const screenshots = join(fixture.candidate, 'packages/pptx/tests/visual/screenshots/demo');
+  const leftover = (root, name, extra = []) => {
+    mkdirSync(join(root, name), { recursive: true });
+    writeFileSync(join(root, name, 'slide-1.png'), 'old');
+    writeFileSync(join(root, name, 'manifest.json'), '{}');
+    for (const file of extra) writeFileSync(join(root, name, file), 'mine');
+  };
   try {
-    mkdirSync(join(root, rel), { recursive: true });
-    mkdirSync(join(candidate, rel), { recursive: true });
-    writeFileSync(join(root, rel, 'deck.pptx'), 'x');
-    const fifo = join(candidate, rel, 'deck.pptx');
-    try {
-      execFileSync('mkfifo', [fifo]);
-    } catch {
-      t.diagnostic('mkfifo unavailable; skipping the named-pipe case');
-    }
-    if (existsSync(fifo)) {
-      const result = verify();
-      assert.equal(result.error, undefined, 'must not block on the pipe');
-      assert.match(result.stdout, /must be a regular file without symlinks at .*candidate/);
-      unlinkSync(fifo);
-    }
-    // A symlinked candidate input, even to identical bytes.
-    writeFileSync(join(outside, 'x.pptx'), 'x');
-    symlinkSync(join(outside, 'x.pptx'), join(candidate, rel, 'deck.pptx'));
-    assert.match(verify().stdout, /must be a regular file without symlinks at .*candidate/);
-    unlinkSync(join(candidate, rel, 'deck.pptx'));
-    // A symlinked directory component.
-    rmSync(join(candidate, rel), { recursive: true });
-    mkdirSync(join(outside, 'dir'));
-    writeFileSync(join(outside, 'dir/deck.pptx'), 'x');
-    symlinkSync(join(outside, 'dir'), join(candidate, rel));
-    assert.match(verify().stdout, /must be a regular file without symlinks at .*candidate/);
+    leftover(baselineDemo, 'gone');
+    leftover(baselineDemo, 'kept', ['notes.txt']);
+    await snapshot(fixture.base, fixture.revision);
+    assert.deepEqual(readdirSync(baselineDemo).sort(), ['deck', 'kept', 'manifest.json']);
+    assert.deepEqual(readdirSync(join(baselineDemo, 'kept')), ['notes.txt']);
+    // Candidate screenshots hold images only; a manifest there is not the harness's.
+    leftover(screenshots, 'gone');
+    leftover(screenshots, 'kept', ['notes.txt']);
+    assert.equal(await compare(fixture), null);
+    assert.deepEqual(readdirSync(screenshots).sort(), ['deck', 'gone', 'kept']);
+    assert.deepEqual(readdirSync(join(screenshots, 'gone')), ['manifest.json']);
+    assert.deepEqual(readdirSync(join(screenshots, 'kept')).sort(), ['manifest.json', 'notes.txt']);
   } finally {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(candidate, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
 
-test('a prepared input replaced by a named pipe is refused without blocking', (t) => {
-  const { root, first } = baselineRepository();
-  const rel = 'packages/pptx/public/private/pptx';
-  const module = new URL('./private-corpus.mjs', import.meta.url).href;
+test('nothing is written or removed through a symlinked output path', async () => {
+  const fixture = selfVrtFixture();
+  const outside = join(fixture.scratch, 'outside');
+  const baseline = join(fixture.base, 'packages/pptx/tests/visual/baseline');
+  const screenshots = join(fixture.candidate, 'packages/pptx/tests/visual/screenshots');
+  const untouched = () => {
+    assert.deepEqual(readdirSync(outside).sort(), ['gone', 'manifest.json']);
+    assert.deepEqual(readdirSync(join(outside, 'gone')), ['slide-1.png']);
+    assert.equal(readFileSync(join(outside, 'manifest.json'), 'utf8'), 'keep');
+  };
   try {
-    mkdirSync(join(root, rel), { recursive: true });
-    writeFileSync(join(root, rel, 'deck.pptx'), 'x');
+    mkdirSync(join(outside, 'gone'), { recursive: true });
+    writeFileSync(join(outside, 'gone/slide-1.png'), 'old');
+    writeFileSync(join(outside, 'manifest.json'), 'keep');
+    // Ignore the output folders themselves (the tracked pattern has a trailing
+    // slash), so that a symlink there reaches the guard under test and not
+    // the clean-checkout check.
+    writeFileSync(join(fixture.base, '.git/info/exclude'), 'packages/*/tests/visual/baseline\n');
+    await snapshot(fixture.base, fixture.revision);
+
+    // Snapshot: the baseline folder, a document folder and a manifest leaf.
+    const links = [
+      [baseline, outside],
+      [join(baseline, 'demo'), outside],
+      [join(baseline, 'demo/gone'), join(outside, 'gone')],
+      [join(baseline, 'demo/deck'), join(outside, 'gone')],
+      [join(baseline, 'demo/manifest.json'), join(outside, 'manifest.json')],
+    ];
+    for (const [link, target] of links) {
+      const saved = join(fixture.scratch, 'saved');
+      if (existsSync(link)) cpSync(link, saved, { recursive: true });
+      rmSync(link, { recursive: true, force: true });
+      symlinkSync(target, link);
+      await assert.rejects(snapshot(fixture.base, fixture.revision), /symlinked self-VRT output path/, link);
+      untouched();
+      unlinkSync(link);
+      if (existsSync(saved)) {
+        cpSync(saved, link, { recursive: true });
+        rmSync(saved, { recursive: true });
+      }
+    }
+    await snapshot(fixture.base, fixture.revision);
+
+    // Comparison: the candidate's screenshot tree, and a document folder in it.
+    mkdirSync(screenshots, { recursive: true });
+    symlinkSync(outside, join(screenshots, 'demo'));
+    await assert.rejects(compare(fixture), /symlinked self-VRT output path/);
+    untouched();
+    unlinkSync(join(screenshots, 'demo'));
+    mkdirSync(join(screenshots, 'demo'));
+    symlinkSync(join(outside, 'gone'), join(screenshots, 'demo/gone'));
+    await assert.rejects(compare(fixture), /symlinked self-VRT output path/);
+    untouched();
+    unlinkSync(join(screenshots, 'demo/gone'));
+    assert.equal(await compare(fixture), null);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a named pipe or symlink in place of an input or an output is refused without blocking', (t) => {
+  const fixture = fastFixture();
+  const module = new URL('./private-corpus.mjs', import.meta.url).href;
+  const input = join(fixture.base, 'packages/pptx/public/private/pptx/deck.pptx');
+  try {
     try {
-      execFileSync('mkfifo', [join(root, 'probe')]);
-      unlinkSync(join(root, 'probe'));
+      execFileSync('mkfifo', [join(fixture.scratch, 'probe')]);
     } catch {
       t.skip('mkfifo unavailable');
       return;
     }
-    // Separate process with a timeout: a blocking read of the pipe never returns.
-    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    // A separate process with a timeout: a blocking open of a pipe never returns.
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { execFileSync } from 'node:child_process';
-      import { unlinkSync } from 'node:fs';
-      import { prepareSelfVrtCorpus, verifySelfVrtInput } from ${JSON.stringify(module)};
-      process.chdir(${JSON.stringify(join(root, 'packages/pptx'))});
-      prepareSelfVrtCorpus({ corpus: 'private', format: 'pptx', files: ['pptx/deck.pptx'], snapshot: true });
-      unlinkSync('public/private/pptx/deck.pptx');
-      execFileSync('mkfifo', ['public/private/pptx/deck.pptx']);
-      try {
-        verifySelfVrtInput({ corpus: 'private', file: 'pptx/deck.pptx' });
-        console.log('accepted');
-      } catch (error) { console.log(error.message); }
+      import { mkdirSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
+      import { captureOrCompareSelfVrtItem, prepareSelfVrtCorpus } from ${JSON.stringify(module)};
+      process.chdir(${JSON.stringify(join(fixture.base, 'packages/pptx'))});
+      const PRIVATE = { corpus: 'private', format: 'pptx', stem: 'pptx/deck', itemKind: 'slide' };
+      const prepare = () => prepareSelfVrtCorpus({ ...PRIVATE, files: ['pptx/deck.pptx'], snapshot: true });
+      const attempt = (label, run) => {
+        try { run(); console.log(label + ': accepted'); } catch (error) { console.log(label + ': ' + error.message); }
+      };
+      const input = ${JSON.stringify(input)};
+      renameSync(input, input + '.saved');
+      execFileSync('mkfifo', [input]);
+      attempt('input pipe', prepare);
+      unlinkSync(input);
+      symlinkSync(input + '.saved', input);
+      attempt('input symlink', prepare);
+      unlinkSync(input);
+      renameSync(input + '.saved', input);
+      const output = 'tests/visual/baseline/private-corpus';
+      mkdirSync(output + '/pptx/deck', { recursive: true });
+      execFileSync('mkfifo', [output + '/manifest.json']);
+      attempt('manifest pipe', prepare);
+      unlinkSync(output + '/manifest.json');
+      prepare();
+      execFileSync('mkfifo', [output + '/pptx/deck/slide-1.png']);
+      attempt('image pipe', () => captureOrCompareSelfVrtItem({
+        ...PRIVATE, itemIndex: 0, actual: Buffer.from('x'), snapshot: true,
+      }));
     `], {
       encoding: 'utf8',
       timeout: 15000,
       env: {
-        ...process.env,
-        VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
-        VRT_ALLOW_HARNESS_CHANGES: '',
-        VRT_BASELINE_CHECKOUT: '',
-        VRT_BASELINE_REVISION: first,
+        ...process.env, VRT_BASELINE_CHECKOUT: '', VRT_BASELINE_REVISION: fixture.revision,
+        VRT_ALLOW_HARNESS_CHANGES: '', VRT_ALLOW_CORPUS_INPUT_CHANGES: '',
       },
-    });
-    assert.equal(result.error, undefined, 'must not block on the pipe');
-    assert.match(result.stdout, /not a regular file/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a snapshot image swapped between capture and finalization is refused', () => {
-  const fixture = selfVrtFixture();
-  try {
-    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
-      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-      beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
-      captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: true });
-      writeFileSync('tests/visual/baseline/demo/deck/slide-1.png', png(9));
-      assert.throws(
-        () => verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true }),
-        /snapshot image changed after capture/,
-      );
-      assert.equal(existsSync('tests/visual/baseline/demo/deck/manifest.json'), false);
-    });
-    // The failed run left no manifest, so no comparison can accept the swap.
-    assert.throws(() => compare(fixture, 9), /missing previous-renderer manifest/);
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('a baseline manifest and image substituted mid-comparison are not trusted, restored or not', () => {
-  const fixture = selfVrtFixture();
-  try {
-    snapshot(fixture.base, fixture.revision);
-    const directory = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo/deck');
-    const manifest = readFileSync(join(directory, 'manifest.json'), 'utf8');
-    const image = readFileSync(join(directory, 'slide-1.png'));
-    inPackage(
-      fixture.candidate,
-      { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision },
-      () => {
-        prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
-        beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
-        // A consistent forgery: a different image and a manifest that records it.
-        const forged = png(8);
-        const record = JSON.parse(manifest);
-        record.items[0].sha256 = createHash('sha256').update(forged).digest('hex');
-        writeFileSync(join(directory, 'slide-1.png'), forged);
-        writeFileSync(join(directory, 'manifest.json'), JSON.stringify(record));
-        assert.throws(
-          () => captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: forged, snapshot: false }),
-          /changed since its snapshot/,
-        );
-        // Restoring the files afterwards does not erase the observed tampering
-        // from this run's validated record, and the genuine image still matches it.
-        writeFileSync(join(directory, 'slide-1.png'), image);
-        writeFileSync(join(directory, 'manifest.json'), manifest);
-        assert.equal(
-          captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: false }),
-          null,
-        );
-        verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: false });
-      },
-    );
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('a specimen replaced between selection load and preparation is refused, with or without selected items', () => {
-  const fixture = fastFixture();
-  try {
-    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
-      for (const units of [[1, 3], []]) {
-        const loaded = selectionFiles('private deck');
-        loaded.get('pptx/deck.pptx').units = units;
-        // The loader validated 'private deck'; the file is replaced before preparation.
-        writeFileSync('public/private/pptx/deck.pptx', 'replaced deck');
-        assert.throws(
-          () => prepareSelfVrtCorpus({
-            ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
-            selectionFiles: loaded,
-          }),
-          /changed between the fast-tier selection and corpus preparation/,
-        );
-        writeFileSync('public/private/pptx/deck.pptx', 'private deck');
-        prepareSelfVrtCorpus({
-          ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
-          selectionFiles: loaded,
-        });
-      }
-    });
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('snapshot writes and stale-image removal never follow a symlinked baseline path', () => {
-  const fixture = selfVrtFixture();
-  const outside = join(fixture.scratch, 'outside');
-  try {
-    mkdirSync(join(outside, 'demo/deck'), { recursive: true });
-    writeFileSync(join(outside, 'demo/deck/slide-9.png'), 'stale');
-    writeFileSync(join(outside, 'keep.txt'), 'keep');
-    // Ignore the baseline folder itself (without a trailing slash) so a symlink
-    // there is reported by the guard and not by the clean-checkout check.
-    writeFileSync(join(fixture.base, '.git/info/exclude'), 'packages/*/tests/visual/baseline\n');
-    const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
-    const baseline = join(fixture.base, 'packages/pptx/tests/visual/baseline');
-    mkdirSync(join(fixture.base, 'packages/pptx/tests/visual'), { recursive: true });
-    const untouched = () => {
-      assert.deepEqual(readdirSync(outside).sort(), ['demo', 'keep.txt']);
-      assert.deepEqual(readdirSync(join(outside, 'demo/deck')), ['slide-9.png']);
-      assert.equal(readFileSync(join(outside, 'keep.txt'), 'utf8'), 'keep');
-    };
-    // The whole baseline folder is a symlink: the manifest write is refused.
-    symlinkSync(outside, baseline);
-    inPackage(fixture.base, env, () => {
-      assert.throws(
-        () => prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true }),
-        /symlinked self-VRT path/,
-      );
-    });
-    untouched();
-    unlinkSync(baseline);
-    // A symlinked per-document directory: stale-image cleanup and captures are refused.
-    mkdirSync(join(baseline, 'demo'), { recursive: true });
-    symlinkSync(join(outside, 'demo/deck'), join(baseline, 'demo/deck'));
-    inPackage(fixture.base, env, () => {
-      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-      assert.throws(
-        () => beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true }),
-        /symlinked self-VRT path/,
-      );
-    });
-    untouched();
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('an ignored copied specimen is subject to the allowance and the copy record', () => {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-ignored-'));
-  const base = join(scratch, 'base');
-  const candidate = join(scratch, 'candidate');
-  const rel = 'packages/xlsx/public/corpus';
-  const specimen = 'xlsx-999-new.xlsx';
-  try {
-    mkdirSync(join(base, rel), { recursive: true });
-    git(base, 'init', '-q');
-    git(base, 'config', 'user.email', 'vrt@example.invalid');
-    git(base, 'config', 'user.name', 'vrt');
-    // An older baseline revision that ignores the corpus inputs.
-    writeFileSync(join(base, '.gitignore'), 'packages/*/tests/visual/baseline/\npackages/*/public/corpus/\n');
-    writeFileSync(join(base, rel, '.gitkeep'), '');
-    git(base, 'add', '-f', '.');
-    git(base, 'commit', '-q', '-m', 'renderer');
-    const revision = git(base, 'rev-parse', 'HEAD');
-    git(scratch, 'clone', '-q', base, candidate);
-    writeFileSync(join(candidate, rel, specimen), 'new');
-    writeFileSync(join(base, rel, specimen), 'new');
-    assert.equal(git(base, 'status', '--porcelain', '--', rel), '', 'git status does not show the ignored copy');
-    const spec = { corpus: 'corpus', format: 'xlsx', files: [`corpus/${specimen}`] };
-    const inXlsx = (checkout, env, run) => {
-      const previous = process.cwd();
-      process.chdir(join(checkout, 'packages/xlsx'));
-      try {
-        return withEnv({ VRT_ALLOW_HARNESS_CHANGES: undefined, ...env }, run);
-      } finally {
-        process.chdir(previous);
-      }
-    };
-    const snapshotEnv = (flag) => ({
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision,
-    });
-    const compare = (flag) => inXlsx(candidate, {
-      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision,
-    }, () => {
-      prepareSelfVrtCorpus({ ...spec, snapshot: false });
-      selfVrtBaselineRoot();
-    });
-    // Without the allowance the ignored copy is an unrecorded change.
-    assert.throws(
-      () => inXlsx(base, snapshotEnv(undefined), () => prepareSelfVrtCorpus({ ...spec, snapshot: true })),
-      /clean renderer checkout; changed paths at .*xlsx-999-new\.xlsx/,
-    );
-    // With it, the copy is recorded in the manifest.
-    inXlsx(base, snapshotEnv('1'), () => prepareSelfVrtCorpus({ ...spec, snapshot: true }));
-    const record = JSON.parse(readFileSync(
-      join(base, 'packages/xlsx/tests/visual/baseline/public-corpus/manifest.json'), 'utf8',
-    ));
-    assert.deepEqual(record.corpusInputCopies.map((copy) => copy.path), [`${rel}/${specimen}`]);
-    compare('1');
-    rmSync(join(base, rel, specimen));
-    assert.throws(() => compare('1'), /copies differ from the snapshot's record/);
-    assert.throws(() => compare(undefined), /set it for the comparison run too/);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test('a symlink or named pipe at an output leaf is refused without touching its target or blocking', (t) => {
-  const fixture = selfVrtFixture();
-  const outside = join(fixture.scratch, 'outside');
-  const module = new URL('./private-corpus.mjs', import.meta.url).href;
-  try {
-    mkdirSync(outside);
-    writeFileSync(join(outside, 'target.json'), 'keep');
-    writeFileSync(join(fixture.base, '.git/info/exclude'), 'packages/*/tests/visual/baseline\n');
-    const baseline = join(fixture.base, 'packages/pptx/tests/visual/baseline');
-    mkdirSync(join(baseline, 'demo/deck'), { recursive: true });
-    const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
-    // A symlink at the corpus manifest leaf.
-    symlinkSync(join(outside, 'target.json'), join(baseline, 'demo/manifest.json'));
-    inPackage(fixture.base, env, () => {
-      assert.throws(
-        () => prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true }),
-        /symlinked self-VRT path/,
-      );
-    });
-    assert.equal(readFileSync(join(outside, 'target.json'), 'utf8'), 'keep');
-    unlinkSync(join(baseline, 'demo/manifest.json'));
-    // A symlink at the per-document manifest leaf, at finalization.
-    inPackage(fixture.base, env, () => {
-      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-      beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
-      captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: true });
-      symlinkSync(join(outside, 'target.json'), join(baseline, 'demo/deck/manifest.json'));
-      assert.throws(
-        () => verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true }),
-        /symlinked self-VRT path/,
-      );
-    });
-    assert.equal(readFileSync(join(outside, 'target.json'), 'utf8'), 'keep');
-    rmSync(baseline, { recursive: true });
-    mkdirSync(join(baseline, 'demo/deck'), { recursive: true });
-    // Named pipes at the corpus manifest, a per-document image and the
-    // per-document manifest leaf, in a child process with a timeout.
-    try {
-      execFileSync('mkfifo', [join(fixture.scratch, 'probe')]);
-    } catch {
-      t.diagnostic('mkfifo unavailable; skipping the named-pipe cases');
-      return;
-    }
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { execFileSync } from 'node:child_process';
-      import { unlinkSync } from 'node:fs';
-      import {
-        beginSelfVrtItems, captureOrCompareSelfVrtItem, prepareSelfVrtCorpus, verifySelfVrtItemManifest,
-      } from ${JSON.stringify(module)};
-      process.chdir(${JSON.stringify(join(fixture.base, 'packages/pptx'))});
-      const DEMO = { corpus: 'demo', format: 'pptx', stem: 'demo/deck', itemKind: 'slide' };
-      const fifo = (path) => execFileSync('mkfifo', [path]);
-      const attempt = (label, run) => {
-        try { run(); console.log(label + ': accepted'); } catch (error) { console.log(label + ': ' + error.message); }
-      };
-      const base = 'tests/visual/baseline/demo';
-      fifo(base + '/manifest.json');
-      attempt('corpus manifest', () => prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true }));
-      unlinkSync(base + '/manifest.json');
-      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
-      beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
-      fifo(base + '/deck/slide-1.png');
-      attempt('image', () => captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: Buffer.from('x'), snapshot: true }));
-      unlinkSync(base + '/deck/slide-1.png');
-      captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: Buffer.from('x'), snapshot: true });
-      fifo(base + '/deck/manifest.json');
-      attempt('item manifest', () => verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true }));
-    `], {
-      encoding: 'utf8',
-      timeout: 15000,
-      env: { ...process.env, VRT_BASELINE_CHECKOUT: '', VRT_BASELINE_REVISION: fixture.revision, VRT_ALLOW_HARNESS_CHANGES: '' },
     });
     assert.equal(child.error, undefined, `must not block on a pipe: ${child.stderr}`);
-    for (const label of ['corpus manifest', 'image', 'item manifest']) {
-      assert.match(child.stdout, new RegExp(`${label}: .*(non-regular file|not a regular file)`), child.stderr);
-    }
+    assert.match(child.stdout, /input pipe: .*not a regular file/, child.stderr);
+    assert.match(child.stdout, /input symlink: ELOOP/, child.stderr);
+    assert.match(child.stdout, /manifest pipe: .*non-regular file/, child.stderr);
+    assert.match(child.stdout, /image pipe: .*non-regular file/, child.stderr);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('an ignored Office lock file is not a specimen copy', () => {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-lock-'));
-  const base = join(scratch, 'base');
-  const rel = 'packages/xlsx/public/corpus';
-  try {
-    mkdirSync(join(base, rel), { recursive: true });
-    git(base, 'init', '-q');
-    git(base, 'config', 'user.email', 'vrt@example.invalid');
-    git(base, 'config', 'user.name', 'vrt');
-    writeFileSync(join(base, '.gitignore'), 'packages/*/tests/visual/baseline/\n~$*\n');
-    writeFileSync(join(base, rel, 'xlsx-001.xlsx'), 'tracked');
-    git(base, 'add', '-f', '.');
-    git(base, 'commit', '-q', '-m', 'renderer');
-    const revision = git(base, 'rev-parse', 'HEAD');
-    writeFileSync(join(base, rel, '~$xlsx-001.xlsx'), 'lock');
-    for (const flag of [undefined, '1']) {
-      const previous = process.cwd();
-      process.chdir(join(base, 'packages/xlsx'));
-      try {
-        withEnv({
-          VRT_ALLOW_CORPUS_INPUT_CHANGES: flag, VRT_ALLOW_HARNESS_CHANGES: undefined,
-          VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision,
-        }, () => prepareSelfVrtCorpus({
-          corpus: 'corpus', format: 'xlsx', files: ['corpus/xlsx-001.xlsx'], snapshot: true,
-        }));
-      } finally {
-        process.chdir(previous);
-      }
-      const record = JSON.parse(readFileSync(
-        join(base, 'packages/xlsx/tests/visual/baseline/public-corpus/manifest.json'), 'utf8',
-      ));
-      assert.equal(record.corpusInputCopies, undefined);
-    }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test('documents the corpus no longer lists do not survive a snapshot or a comparison', () => {
-  const fixture = selfVrtFixture();
-  try {
-    const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
-    const screenshots = join(fixture.candidate, 'packages/pptx/tests/visual/screenshots/demo');
-    const orphan = (root, name, extra = []) => {
-      mkdirSync(join(root, name), { recursive: true });
-      writeFileSync(join(root, name, 'slide-1.png'), 'old');
-      writeFileSync(join(root, name, 'manifest.json'), '{}');
-      for (const file of extra) writeFileSync(join(root, name, file), 'mine');
-    };
-    // A snapshot removes the generated files of an unlisted document.
-    orphan(baselineDemo, 'gone');
-    orphan(baselineDemo, 'kept', ['notes.txt']);
-    snapshot(fixture.base, fixture.revision);
-    assert.equal(existsSync(join(baselineDemo, 'gone')), false);
-    assert.deepEqual(readdirSync(join(baselineDemo, 'kept')), ['notes.txt']);
-    assert.ok(existsSync(join(baselineDemo, 'deck/slide-1.png')));
-    // A comparison fails when the baseline still holds one.
-    orphan(baselineDemo, 'stray');
-    assert.throws(() => compare(fixture), /corpus manifest does not list: .*stray/);
-    rmSync(join(baselineDemo, 'stray'), { recursive: true });
-    // ... and clears the candidate's own stale screenshots of unlisted documents.
-    mkdirSync(join(screenshots, 'gone'), { recursive: true });
-    writeFileSync(join(screenshots, 'gone/slide-1.png'), 'old');
-    mkdirSync(join(screenshots, 'keeps'), { recursive: true });
-    writeFileSync(join(screenshots, 'keeps/slide-1.png'), 'old');
-    writeFileSync(join(screenshots, 'keeps/notes.txt'), 'mine');
-    mkdirSync(join(screenshots, 'notes'), { recursive: true });
-    writeFileSync(join(screenshots, 'notes/manifest.json'), 'mine');
-    assert.equal(compare(fixture), null);
-    assert.equal(existsSync(join(screenshots, 'gone')), false);
-    assert.deepEqual(readdirSync(join(screenshots, 'keeps')), ['notes.txt']);
-    assert.equal(readFileSync(join(screenshots, 'notes/manifest.json'), 'utf8'), 'mine');
-  } finally {
-    rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-});
-
-test('the specimen copy script writes only qualifying files and never through a symlink', () => {
-  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-copy-inputs-'));
-  const source = join(scratch, 'source');
-  const destination = join(scratch, 'destination');
-  const outside = join(scratch, 'outside');
-  const put = (root, path, bytes) => {
-    mkdirSync(join(root, path, '..'), { recursive: true });
-    writeFileSync(join(root, path), bytes);
-  };
-  try {
-    mkdirSync(source);
-    git(source, 'init', '-q');
-    git(source, 'config', 'user.email', 'vrt@example.invalid');
-    git(source, 'config', 'user.name', 'vrt');
-    put(source, 'packages/pptx/public/corpus/old.pptx', 'v1');
-    put(source, 'README.md', 'x');
-    git(source, 'add', '.');
-    git(source, 'commit', '-q', '-m', 'base');
-    const base = git(source, 'rev-parse', 'HEAD');
-    put(source, 'packages/pptx/public/corpus/old.pptx', 'v2');
-    put(source, 'packages/xlsx/public/corpus/new.xlsx', 'new');
-    put(source, 'packages/xlsx/public/corpus/~$lock.xlsx', 'lock');
-    put(source, 'packages/xlsx/public/corpus/wrong.pptx', 'wrong format');
-    put(source, 'packages/xlsx/public/corpus/sub/nested.xlsx', 'nested');
-    put(source, 'README.md', 'changed');
-    git(source, 'add', '-A');
-    mkdirSync(join(destination, 'packages/pptx/public'), { recursive: true });
-    // The destination has no xlsx corpus folder (an older baseline): it is created.
-    assert.deepEqual(
-      copyCorpusInputs({ source, destination, base }).sort(),
-      ['packages/pptx/public/corpus/old.pptx', 'packages/xlsx/public/corpus/new.xlsx'],
-    );
-    assert.equal(readFileSync(join(destination, 'packages/xlsx/public/corpus/new.xlsx'), 'utf8'), 'new');
-    assert.equal(readFileSync(join(destination, 'packages/pptx/public/corpus/old.pptx'), 'utf8'), 'v2');
-    assert.deepEqual(readdirSync(join(destination, 'packages/xlsx/public/corpus')), ['new.xlsx']);
-    assert.equal(existsSync(join(destination, 'README.md')), false);
-
-    // A destination file that is a symlink is refused, and its target is untouched.
-    mkdirSync(outside);
-    writeFileSync(join(outside, 'target.xlsx'), 'keep');
-    unlinkSync(join(destination, 'packages/xlsx/public/corpus/new.xlsx'));
-    symlinkSync(join(outside, 'target.xlsx'), join(destination, 'packages/xlsx/public/corpus/new.xlsx'));
-    assert.throws(() => copyCorpusInputs({ source, destination, base }), /symlink or non-regular file/);
-    assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
-    // So is a symlinked corpus folder, and a symlinked destination root.
-    rmSync(join(destination, 'packages/xlsx'), { recursive: true });
-    rmSync(join(destination, 'packages/pptx'), { recursive: true });
-    mkdirSync(join(outside, 'corpus'));
-    mkdirSync(join(destination, 'packages/pptx/public'), { recursive: true });
-    symlinkSync(join(outside, 'corpus'), join(destination, 'packages/pptx/public/corpus'));
-    assert.throws(() => copyCorpusInputs({ source, destination, base }), /real directory/);
-    assert.deepEqual(readdirSync(join(outside, 'corpus')), []);
-    const link = join(scratch, 'link');
-    symlinkSync(outside, link);
-    assert.throws(() => copyCorpusInputs({ source, destination: link, base }), /real directory/);
-    assert.deepEqual(readdirSync(outside).sort(), ['corpus', 'target.xlsx']);
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
   }
 });

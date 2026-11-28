@@ -66,7 +66,7 @@
 
   try {
     if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['noto sans', 'noto sans jp', 'noto sans arabic', 'noto sans hebrew']);
-    const doc = await DocxDocument.load('/' + file.split('/').map(encodeURIComponent).join('/'), { math, threeD, regionMap, tiff, chartEx });
+    const doc = await DocxDocument.load('/' + file, { math, threeD, regionMap, tiff, chartEx });
     // Report the renderer's REAL page count so the VRT spec can assert the
     // requested page index is in range. renderPage() silently clamps an
     // out-of-range index back to page 0 (renderer.ts: `pages[pageIndex] ??
