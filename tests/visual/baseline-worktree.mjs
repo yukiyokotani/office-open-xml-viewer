@@ -50,8 +50,8 @@ function specimenChanges(source, revision) {
 /** Create a detached worktree of the checkout `source` at `base` in the new
  * directory `destination` and write into it the specimens that `source`'s
  * working tree adds or modifies relative to `base`. Returns the worktree's
- * real path and the copied repository paths. If a specimen cannot be written,
- * the worktree this call created is removed again. */
+ * real path and the copied repository paths. If the checkout or a write
+ * fails, the worktree this call registered is removed again. */
 export function createBaselineWorktree({ source, destination, base }) {
   let from;
   try {
@@ -75,9 +75,13 @@ export function createBaselineWorktree({ source, destination, base }) {
     );
   }
   const copies = changes.map(([, path]) => ({ path, data: readRegularFile(join(from, path)) }));
-  git(from, 'worktree', 'add', '--quiet', '--detach', destination, revision);
-  const worktree = realpathSync(destination);
+  const registered = () => git(from, 'worktree', 'list', '--porcelain', '-z').split('\0')
+    .filter((field) => field.startsWith('worktree ')).map((field) => field.slice('worktree '.length));
+  const before = registered();
+  let worktree;
   try {
+    git(from, 'worktree', 'add', '--quiet', '--detach', destination, revision);
+    worktree = realpathSync(destination);
     for (const { path, data } of copies) {
       let current = worktree;
       for (const component of dirname(path).split('/')) {
@@ -88,7 +92,12 @@ export function createBaselineWorktree({ source, destination, base }) {
       writeRegularFile(join(worktree, path), data);
     }
   } catch (error) {
-    git(from, 'worktree', 'remove', '--force', worktree);
+    // Undo only what this call registered (a failing checkout hook leaves a
+    // registered worktree behind), so that the command can be run again.
+    for (const added of registered().filter((path) => !before.includes(path))) {
+      git(from, 'worktree', 'remove', '--force', added);
+    }
+    git(from, 'worktree', 'prune');
     throw error;
   }
   return { worktree, copied: copies.map(({ path }) => path) };

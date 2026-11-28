@@ -33,7 +33,9 @@ list or a digest and fails the comparison.
 
 The harness writes manifests and images only below its own checkout and never
 through a symlink. It removes only earlier item images of the document it is
-rendering. Images of documents the corpus no longer lists are not removed: a
+rendering. Images of documents the run does not render (a removed or renamed
+input, a fast-tier input that no longer has a selected item) are not removed,
+and a symlinked entry in an output tree is not followed: a
 snapshot (baseline tree) or a comparison (candidate screenshots) that finds
 them fails and names the directories for the operator to delete.
 

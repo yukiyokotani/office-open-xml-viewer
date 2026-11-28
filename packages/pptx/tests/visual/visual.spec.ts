@@ -249,7 +249,11 @@ function describeSelfRegression(
       test.beforeAll(() => {
         prepareSelfVrtCorpus({
           corpus, format: 'pptx', files, snapshot: SNAPSHOT,
-          ...(selection ? { selectionDigest: selection.digest } : {}),
+          ...(selection ? {
+            selectionDigest: selection.digest,
+            // Files without a selected item are bound by the manifest but not rendered.
+            selectedFiles: files.filter((file) => (selection.files.get(file)?.units.length ?? 0) > 0),
+          } : {}),
         });
       });
     }

@@ -36,7 +36,8 @@
 // What the harness changes on disk: it writes manifests and images below its
 // own checkout, and it removes only item images of the document it is
 // rendering (pages a previous run of that document left). Images of documents
-// the corpus no longer lists are reported, not removed. Not covered: a local
+// this run does not render (a removed input, a fast-tier input without a
+// selected item) are reported, not removed, and so is a symlinked entry. Not covered: a local
 // process that replaces files while a run is in progress, and whatever the
 // renderer loads besides the input (dev server reuse, WASM provenance).
 import {
@@ -523,8 +524,8 @@ function generatedFiles(directory, pattern) {
 const ITEM_IMAGE = /^(page|sheet|slide)-\d+\.png$/;
 
 /** Fail when `tree`, which holds one directory per document, has images of a
- * document the corpus does not list (a removed or renamed input, or another
- * run's output). The harness deletes nothing it did not write for the
+ * document this run does not render (a removed or renamed input, a fast-tier
+ * input that no longer has a selected item, or another run's output). The harness deletes nothing it did not write for the
  * document it is rendering, so the operator removes them. A listed document's
  * directory is recognized by file identity, not by its spelling: on a
  * case-insensitive file system `Deck.pptx` writes into an existing `deck/`. */
@@ -548,13 +549,19 @@ function assertNoUnlistedDocuments(tree, files, directory) {
     if (error.code === 'ENOENT') return;
     throw error;
   }
+  // A symlink is never followed, so what it holds cannot be judged: any
+  // symlinked entry fails.
+  const linked = entries.find((entry) => entry.isSymbolicLink());
+  if (linked) {
+    throw new Error(`refusing to use a symlinked self-VRT output path: ${join(tree, linked.name)}`);
+  }
   const unlisted = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(tree, entry.name))
     .filter((path) => !listed.has(identity(path)) && readdirSync(path).some((file) => ITEM_IMAGE.test(file)));
   if (unlisted.length > 0) {
     throw new Error(
-      `self-VRT output holds images of documents the corpus does not list: ${unlisted.join(', ')}. `
+      `self-VRT output holds images of documents this run does not render: ${unlisted.join(', ')}. `
       + 'Delete these directories (or the whole output tree) and run again',
     );
   }
@@ -676,8 +683,13 @@ function assertExactManifest(actual, expected, path) {
  * snapshot from silently becoming its own regression oracle. A subset corpus
  * (`private-fast`) is additionally bound to its selection manifest digest.
  * @param {{ corpus: string, format: string, files: string[], snapshot: boolean,
- *   selectionDigest?: string }} options */
-export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectionDigest }) {
+ *   selectionDigest?: string, selectedFiles?: string[] }} options
+ *   `selectedFiles` (subset corpus only): the files with at least one selected
+ *   item. Every file is bound by the manifest, but only these are rendered, so
+ *   only these may have images in the output tree. */
+export function prepareSelfVrtCorpus({
+  corpus, format, files, snapshot, selectionDigest, selectedFiles,
+}) {
   if (files.length === 0) {
     throw new Error(`${format} ${corpus} corpus is empty; zero-test self-VRT is not coverage`);
   }
@@ -687,6 +699,13 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
       ? `${corpus} self-VRT requires a selection digest`
       : `${corpus} self-VRT does not take a selection digest`);
   }
+  if (Boolean(selection) !== Boolean(selectedFiles)
+    || selectedFiles?.some((file) => !files.includes(file))) {
+    throw new Error(selection
+      ? `${corpus} self-VRT requires the corpus files that have selected items`
+      : `${corpus} self-VRT renders every file; it does not take selected files`);
+  }
+  const rendered = selectedFiles ?? files;
   const location = baselineLocation({ snapshot });
   const root = join(location.directory, corpusConfig(corpus).manifestDirectory);
   const path = join(root, 'manifest.json');
@@ -701,11 +720,11 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
   const { outputPrefix, directory: configured } = corpusConfig(corpus);
   const directory = configured ?? format;
   if (snapshot) {
-    assertNoUnlistedDocuments(join(location.directory, `${outputPrefix}${directory}`), files, directory);
+    assertNoUnlistedDocuments(join(location.directory, `${outputPrefix}${directory}`), rendered, directory);
     writeOutput(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
     assertExactManifest(readBaselineJson(location, path), manifest, path);
-    assertNoUnlistedDocuments(resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), files, directory);
+    assertNoUnlistedDocuments(resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), rendered, directory);
   }
 }
 

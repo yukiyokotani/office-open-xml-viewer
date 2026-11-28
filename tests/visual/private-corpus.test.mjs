@@ -500,7 +500,9 @@ function fastFixture() {
 
 function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7 }) {
   return inPackage(checkout, env, async () => {
-    prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest });
+    prepareSelfVrtCorpus({
+      ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest, selectedFiles: ['pptx/deck.pptx'],
+    });
     await loadInput('private-fast', 'pptx/deck.pptx');
     const differences = indices.map((itemIndex) => captureOrCompareSelfVrtItem({
       ...FAST, itemIndex, actual: png(value), snapshot,
@@ -529,6 +531,34 @@ test('fast tier compares exactly the selected items under the same selection', a
   }
 });
 
+test('a fast-tier input without a selected item may not keep images of an earlier selection', async () => {
+  const fixture = fastFixture();
+  const { base, candidate, revision } = fixture;
+  const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
+  const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
+  // The selection now keeps no slide of the deck: it stays in the manifest
+  // and is not rendered.
+  const reselected = (checkout, env, snapshot) => inPackage(checkout, env, () => prepareSelfVrtCorpus({
+    ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: 'selection-b', selectedFiles: [],
+  }));
+  try {
+    await fastRun(base, snapshotEnv, { snapshot: true });
+    await fastRun(candidate, compareEnv, { snapshot: false });
+    await assert.rejects(
+      reselected(base, snapshotEnv, true),
+      /does not render: .*baseline\/private-corpus-fast\/pptx\/deck\. Delete/,
+    );
+    rmSync(join(base, 'packages/pptx/tests/visual/baseline/private-corpus-fast/pptx/deck'), { recursive: true });
+    await reselected(base, snapshotEnv, true);
+    await assert.rejects(
+      reselected(candidate, compareEnv, false),
+      /does not render: .*screenshots\/private-corpus-fast\/pptx\/deck\. Delete/,
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
 test('fast tier and full corpora refuse each other\'s selection arguments', async () => {
   const fixture = fastFixture();
   const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
@@ -539,6 +569,15 @@ test('fast tier and full corpora refuse each other\'s selection arguments', asyn
       assert.throws(() => prepareSelfVrtCorpus({
         ...FAST, corpus: 'private', files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
       }), /does not take a selection digest/);
+      assert.throws(() => prepareSelfVrtCorpus({
+        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
+      }), /requires the corpus files that have selected items/);
+      assert.throws(() => prepareSelfVrtCorpus({
+        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x', selectedFiles: ['pptx/other.pptx'],
+      }), /requires the corpus files that have selected items/);
+      assert.throws(() => prepareSelfVrtCorpus({
+        ...FAST, corpus: 'private', files: ['pptx/deck.pptx'], snapshot: true, selectedFiles: ['pptx/deck.pptx'],
+      }), /does not take selected files/);
       assert.throws(() => verifySelfVrtItemManifest({ ...FAST, itemCount: 4, snapshot: true }),
         /requires the selected item indices/);
       assert.throws(() => verifySelfVrtItemManifest({
@@ -817,11 +856,23 @@ test('the baseline worktree command creates a new worktree at the base and overw
     rmSync(join(candidate, 'packages/xlsx/public/corpus/new.xlsx'));
     put('packages/xlsx/public/corpus/new.xlsx', 'new');
 
+    // A failing checkout (here a post-checkout hook) leaves nothing registered
+    // or on disk, so the command can be run again for the same path.
+    const hook = join(candidate, '.git/hooks/post-checkout');
+    mkdirSync(join(hook, '..'), { recursive: true });
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    assert.throws(() => create('hooked'));
+    assert.equal(existsSync(join(scratch, 'hooked')), false);
+    assert.equal(worktrees(), 2);
+    rmSync(hook);
+    assert.equal(create('hooked').copied.length, 2);
+    assert.equal(worktrees(), 3);
+
     // A rename is a deletion and an addition: no worktree is created.
     git(candidate, 'mv', `${corpus}/old.pptx`, `${corpus}/renamed.pptx`);
     assert.throws(() => create('renamed'), /deletes or renames: D packages\/pptx\/public\/corpus\/old\.pptx$/);
     assert.equal(existsSync(join(scratch, 'renamed')), false);
-    assert.equal(worktrees(), 2);
+    assert.equal(worktrees(), 3);
     git(candidate, 'mv', `${corpus}/renamed.pptx`, `${corpus}/old.pptx`);
 
     // The command line, invoked through a symlink to the script.
@@ -862,19 +913,29 @@ test('images of documents the corpus no longer lists fail the run and are left f
     put(baselineDemo, 'gone/slide-1.png');
     await assert.rejects(
       snapshot(fixture.base, fixture.revision),
-      /images of documents the corpus does not list: .*baseline\/demo\/gone\. Delete/,
+      /images of documents this run does not render: .*baseline\/demo\/gone\. Delete/,
     );
     rmSync(join(baselineDemo, 'gone'), { recursive: true });
     put(screenshots, 'gone/slide-1.png');
     await assert.rejects(
       compare(fixture),
-      /images of documents the corpus does not list: .*screenshots\/demo\/gone\. Delete/,
+      /images of documents this run does not render: .*screenshots\/demo\/gone\. Delete/,
     );
     assert.equal(readFileSync(join(screenshots, 'gone/slide-1.png'), 'utf8'), 'mine');
     assert.deepEqual(readdirSync(join(baselineDemo, 'operator-notes')).sort(), ['manifest.json', 'notes.txt']);
     assert.deepEqual(readdirSync(join(screenshots, 'operator-notes')), ['manifest.json']);
     rmSync(join(screenshots, 'gone'), { recursive: true });
     assert.equal(await compare(fixture), null);
+
+    // A symlinked entry is not followed, so it fails whatever it points to.
+    const elsewhere = join(fixture.scratch, 'elsewhere');
+    put(elsewhere, 'slide-1.png');
+    symlinkSync(elsewhere, join(baselineDemo, 'linked'));
+    await assert.rejects(snapshot(fixture.base, fixture.revision), /symlinked self-VRT output path: .*demo\/linked/);
+    unlinkSync(join(baselineDemo, 'linked'));
+    symlinkSync(elsewhere, join(screenshots, 'linked'));
+    await assert.rejects(compare(fixture), /symlinked self-VRT output path: .*demo\/linked/);
+    assert.equal(readFileSync(join(elsewhere, 'slide-1.png'), 'utf8'), 'mine');
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
