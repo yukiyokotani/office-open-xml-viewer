@@ -309,6 +309,66 @@ describe('upright block table of a vertical section', () => {
   );
 
   it.each(['tbRl', 'tbLrV'] as const)(
+    'holds text above a stacked table only in at least 18 pt of room after the column top (%s)',
+    (direction) => {
+      // A paragraph, a one-row table X, five paragraphs, a two-row table Y
+      // that meets X and stacks below it, and twelve paragraphs. The strips
+      // that meet only Y have X's height as room above Y: in 17 pt (room
+      // for a 10.5 pt character) they start below Y, in 19 pt at the column
+      // top.
+      const firstLines = (roomPt: number) => {
+        const [page] = layOutPages(direction, [
+          P, table(1, roomPt - 2 * RULE), ...Array.from({ length: 5 }, () => P),
+          table(2), ...Array.from({ length: 12 }, () => P),
+        ]);
+        const [x, y] = page!.tables;
+        expect(y!.top).toBeCloseTo(x!.bottom, 6);
+        expect(y!.top - MARGIN.top).toBeCloseTo(roomPt, 6);
+        // The block range of X's text exclusion, from the first strip.
+        const xEnd = direction === 'tbRl'
+          ? PAGE_W - MARGIN.right - x!.paintedLeft + 7.14 : x!.paintedRight - MARGIN.left + 7.14;
+        const yEnd = direction === 'tbRl'
+          ? PAGE_W - MARGIN.right - y!.paintedLeft : y!.paintedRight - MARGIN.left;
+        const onlyY = page!.strips.slice(6).map(([line]) => line!)
+          .filter((line) => line.block >= xEnd && line.block < yEnd);
+        expect(onlyY.length).toBeGreaterThan(2);
+        return { onlyY, y: y! };
+      };
+      const tight = firstLines(17);
+      for (const line of tight.onlyY) expect(line.inlineStart).toBeCloseTo(tight.y.bottom, 6);
+      for (const line of firstLines(19).onlyY) expect(line.inlineStart).toBe(MARGIN.top);
+    },
+  );
+
+  it.each(['tbRl', 'tbLrV'] as const)(
+    'holds text below a table only in at least 18 pt of room before a drawing below it (%s)',
+    (direction) => {
+      // A table of one 600 pt row from the column top, then a paragraph
+      // anchoring a square-wrapped rectangle across the table's block range
+      // `roomPt` below the table that reaches the column end, then two
+      // paragraphs. In 17 pt of room between the table and the rectangle
+      // the strips that meet the table have no text below it and resume past
+      // it at the column top; in 19 pt each holds one character there.
+      const layOutWithRoom = (roomPt: number) => {
+        const top = MARGIN.top + 600 + 2 * RULE + roomPt;
+        const rectangle = anchoredRectangle(direction === 'tbRl' ? 300 : 40, top, 210, COLUMN_END - top);
+        const pages = layOutPages(direction, [table(1, 600), anchoring(5, rectangle), P, P]);
+        expect(pages).toHaveLength(1);
+        const page = pages[0]!;
+        expect(page.drawings[0]!.top - page.tables[0]!.bottom).toBeCloseTo(roomPt, 6);
+        return page;
+      };
+      const tight = layOutWithRoom(17);
+      expect(tight.strips.flat().every((line) => line.inlineStart === MARGIN.top)).toBe(true);
+      expect(tight.strips[0]![0]!.block).toBeCloseTo(TABLE_W + RULE + 7.14, 6);
+      const roomy = layOutWithRoom(19);
+      expect(roomy.strips[0]![0]!.block).toBe(0);
+      for (const line of roomy.strips[0]!) expect(line.inlineStart).toBeCloseTo(roomy.tables[0]!.bottom, 6);
+      expect(roomy.strips[0]).toHaveLength(5);
+    },
+  );
+
+  it.each(['tbRl', 'tbLrV'] as const)(
     'starts the next page with a table whose box would reach the footnote it refers to (%s)',
     (direction) => {
       // Fifteen strips and a 180 pt table fit the page's block extent. The

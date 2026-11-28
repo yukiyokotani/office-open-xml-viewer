@@ -6394,6 +6394,7 @@ function wrapExclusionFloatRects(exclusions: readonly WrapExclusion[]): FloatRec
     ...(exclusion.topEdgeInclusiveFromYPt === undefined
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
     ...(exclusion.bandStartInclusive === true ? { bandStartInclusive: true as const } : {}),
+    ...(exclusion.leastBoundedGapPt === undefined ? {} : { leastBoundedGapPt: exclusion.leastBoundedGapPt }),
   }));
 }
 
@@ -6653,6 +6654,7 @@ function exclusionSetState(exclusions: readonly WrapExclusion[]): string {
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
     ...(exclusion.wordMode14TightAnchor === true ? { wordMode14TightAnchor: true } : {}),
     ...(exclusion.bandStartInclusive === true ? { bandStartInclusive: true } : {}),
+    ...(exclusion.leastBoundedGapPt === undefined ? {} : { leastBoundedGapPt: exclusion.leastBoundedGapPt }),
   })));
 }
 

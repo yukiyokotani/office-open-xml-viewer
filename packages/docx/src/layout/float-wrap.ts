@@ -110,6 +110,10 @@ interface FloatRectCore {
    * yTop, that is on the half-open interval [yTop, yBottom)
    * (WrapExclusion.bandStartInclusive). */
   bandStartInclusive?: true;
+  /** A free gap of a line band that this rectangle bounds on either side
+   * holds text only when it is at least this wide
+   * (WrapExclusion.leastBoundedGapPt). */
+  leastBoundedGapPt?: number;
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
   /** Absolute X of the object box in the consuming wrap context's linear unit
@@ -336,6 +340,9 @@ interface ExactAttributedGap {
   readonly r: ExactRational;
   readonly leftSquareBoundary: boolean;
   readonly rightSquareBoundary: boolean;
+  /** FloatRect.leastBoundedGapPt of the object at each edge (0: none). */
+  readonly leftLeastGapPt: number;
+  readonly rightLeastGapPt: number;
 }
 
 /** Snapshot and compile geometry once at the line-wrap oracle boundary. */
@@ -421,6 +428,7 @@ function floatBlockedIntervals(
       }];
   if (projected.length === 0) return [];
   const squareBoundary = polygon === null;
+  const leastGapPt = float.leastBoundedGapPt ?? 0;
   const objectLeft = projected.reduce((minimum, interval) =>
     compareExactRational(interval.l, minimum) < 0 ? interval.l : minimum,
   projected[0]!.l);
@@ -433,17 +441,23 @@ function floatBlockedIntervals(
       r: unreducedExactFromNumber(paragraphRightPt),
       leftSquareBoundary: squareBoundary,
       rightSquareBoundary: false,
+      leftLeastGapPt: leastGapPt,
+      rightLeastGapPt: 0,
     }];
     case 'right': return [{
       l: unreducedExactFromNumber(paragraphLeftPt),
       r: objectRight,
       leftSquareBoundary: false,
       rightSquareBoundary: squareBoundary,
+      leftLeastGapPt: 0,
+      rightLeastGapPt: leastGapPt,
     }];
     case 'bothSides': return projected.map((interval) => ({
       ...interval,
       leftSquareBoundary: squareBoundary,
       rightSquareBoundary: squareBoundary,
+      leftLeastGapPt: leastGapPt,
+      rightLeastGapPt: leastGapPt,
     }));
   }
 }
@@ -545,6 +559,8 @@ function mergeAttributedIntervals(
     r: ExactRational;
     leftSquareBoundary: boolean;
     rightSquareBoundary: boolean;
+    leftLeastGapPt: number;
+    rightLeastGapPt: number;
   }> = [];
   for (const interval of sorted) {
     const previous = merged.at(-1);
@@ -555,14 +571,17 @@ function mergeAttributedIntervals(
     if (compareExactRational(interval.l, previous.l) === 0) {
       previous.leftSquareBoundary = previous.leftSquareBoundary
         && interval.leftSquareBoundary;
+      previous.leftLeastGapPt = Math.max(previous.leftLeastGapPt, interval.leftLeastGapPt);
     }
     const rightComparison = compareExactRational(interval.r, previous.r);
     if (rightComparison > 0) {
       previous.r = interval.r;
       previous.rightSquareBoundary = interval.rightSquareBoundary;
+      previous.rightLeastGapPt = interval.rightLeastGapPt;
     } else if (rightComparison === 0) {
       previous.rightSquareBoundary = previous.rightSquareBoundary
         && interval.rightSquareBoundary;
+      previous.rightLeastGapPt = Math.max(previous.rightLeastGapPt, interval.rightLeastGapPt);
     }
   }
   return merged;
@@ -588,27 +607,32 @@ function firstUsableFreeGap(
     l: ExactRational;
     r: ExactRational;
     squareConstrained: boolean;
+    leastGapPt: number;
   }> = [];
   const consider = (
     l: ExactRational,
     r: ExactRational,
     squareConstrained: boolean,
+    leastGapPt: number,
   ): void => {
     const clippedLeft = compareExactRational(exactLeft, l) >= 0 ? exactLeft : l;
     const clippedRight = compareExactRational(exactRight, r) <= 0 ? exactRight : r;
     if (compareExactRational(clippedRight, clippedLeft) > 0) {
-      gaps.push({ l: clippedLeft, r: clippedRight, squareConstrained });
+      gaps.push({ l: clippedLeft, r: clippedRight, squareConstrained, leastGapPt });
     }
   };
   let cursor = exactLeft;
   let cursorSquareBoundary = false;
+  // The least width an object bounding the gap at the cursor asks for.
+  let cursorLeastGapPt = 0;
   for (const interval of merged) {
     if (compareExactRational(interval.r, exactLeft) <= 0) {
       cursorSquareBoundary = interval.rightSquareBoundary;
+      cursorLeastGapPt = interval.rightLeastGapPt;
       continue;
     }
     if (compareExactRational(interval.l, exactRight) >= 0) {
-      consider(cursor, exactRight, cursorSquareBoundary);
+      consider(cursor, exactRight, cursorSquareBoundary, cursorLeastGapPt);
       cursor = exactRight;
       break;
     }
@@ -617,28 +641,34 @@ function firstUsableFreeGap(
         cursor,
         interval.l,
         cursorSquareBoundary || interval.leftSquareBoundary,
+        Math.max(cursorLeastGapPt, interval.leftLeastGapPt),
       );
     }
     const rightComparison = compareExactRational(interval.r, cursor);
     if (rightComparison > 0) {
       cursor = interval.r;
       cursorSquareBoundary = interval.rightSquareBoundary;
+      cursorLeastGapPt = interval.rightLeastGapPt;
     } else if (rightComparison === 0) {
       cursorSquareBoundary = cursorSquareBoundary && interval.rightSquareBoundary;
+      cursorLeastGapPt = Math.max(cursorLeastGapPt, interval.rightLeastGapPt);
     }
     if (compareExactRational(cursor, exactRight) >= 0) break;
   }
   if (compareExactRational(cursor, exactRight) < 0) {
-    consider(cursor, exactRight, cursorSquareBoundary);
+    consider(cursor, exactRight, cursorSquareBoundary, cursorLeastGapPt);
   }
   // WORD_FLOAT_GAP_FLOW selects physical gaps in reading order;
   // width admission belongs to the next
   // indivisible text atom, not a universal one-inch threshold (#1670).
   for (const gap of readingDirection === 'rtl' ? gaps.reverse() : gaps) {
     const width = subtractUnreducedExact(gap.r, gap.l);
+    // A gap an object bounds with a least width (FloatRect.leastBoundedGapPt)
+    // holds no text below that width, whatever the text would need.
     const requirement = Math.max(
       MIN_LINE_GAP,
       gap.squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
+      gap.leastGapPt,
     );
     if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0
       && (admitsGap === undefined || admitsGap(gap))) {

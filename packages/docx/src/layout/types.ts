@@ -725,6 +725,11 @@ export interface WrapExclusion {
   /** `word-vertical-section-upright-block-table`: a line band that ends
    * exactly at this exclusion's block start wraps around it too. */
   readonly bandStartInclusive?: true;
+  /** `word-vertical-section-upright-block-table`: a free gap of a line band
+   * that this exclusion bounds on either side (the room below or above an
+   * upright table, up to the column's edge or another exclusion) holds text
+   * only when it is at least this wide. */
+  readonly leastBoundedGapPt?: number;
 }
 
 /** @internal Occurrence-keyed DrawingML object bounds for §20.4.2.3.

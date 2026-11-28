@@ -4135,8 +4135,11 @@ function* paginateBodyPassSteps(
   if (endnoteIds.length > 0) endnoteFlowStartPage = state.flow.pageIndex;
   // `word-vertical-section-upright-block-table`: an upright table adds no
   // flow advance, so the flow position does not say how far the last page
-  // is occupied. The document-end notes start past its box, as the page's
-  // footnote band ends before it (committedFootnoteContentEndPt).
+  // is occupied. Word continues the notes in the next strips, those meeting
+  // the table starting below it; note lines here do not wrap around upright
+  // tables, so the document-end notes start past its box, as the page's
+  // footnote band ends before it (committedFootnoteContentEndPt), clear of
+  // the table (library policy).
   if (endnoteIds.length > 0 && uprightOccupiedEndPt() > state.flow.cursorBlockPt) {
     state = Object.freeze({ ...state, flow: Object.freeze({ ...state.flow,
       cursorBlockPt: Math.min(uprightOccupiedEndPt(), activeBlockEndPt(state)),

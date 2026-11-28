@@ -48,6 +48,7 @@ export function paragraphWrapExclusions(
       ...(float.exemptLineTopPt === undefined
         ? {} : { anchorLineExemptTopPt: float.exemptLineTopPt }),
       ...(float.bandStartInclusive === true ? { bandStartInclusive: true as const } : {}),
+      ...(float.leastBoundedGapPt === undefined ? {} : { leastBoundedGapPt: float.leastBoundedGapPt }),
     }];
   });
 }

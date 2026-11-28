@@ -3139,6 +3139,7 @@ function commitBodyFlowRegistryDelta(
 function uprightBlockExclusionFloat(
   exclusion: UprightBlockExclusion,
   ordinal: number,
+  leastBoundedGapPt: number,
 ): FloatRect {
   const { xPt, yPt, widthPt, heightPt } = exclusion.bounds;
   return {
@@ -3160,6 +3161,7 @@ function uprightBlockExclusionFloat(
     distBottom: 0,
     paraId: -1 - ordinal,
     bandStartInclusive: true,
+    leastBoundedGapPt,
   };
 }
 
@@ -3231,18 +3233,14 @@ function addUprightBlockExclusionFloats(
   const bandEndPt = band.xPt + band.widthPt;
   const context = resolveBodyParagraphLayoutContext(candidate, paragraph);
   // `word-vertical-section-upright-block-table`: a strip that meets a table
-  // has no text in less than the least room between the table's bottom
-  // edge and the column's end (with and without a line grid): the
-  // exclusion then reaches that end.
+  // has no text in less than the least room (with and without a line grid)
+  // between the table and what bounds that room along the strip: the
+  // column's end or a wrapped object below the table, the column's start or
+  // a wrapped object above a table stacked below another.
   const leastRoomPt = context.lineGrid.active
     ? WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT : WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_NO_GRID_PT;
-  const float = (exclusion: UprightBlockExclusion, ordinal: number): FloatRect => {
-    const rect = uprightBlockExclusionFloat(exclusion, ordinal);
-    const roomBelowPt = bandEndPt - rect.xRight;
-    return roomBelowPt > 0 && roomBelowPt < leastRoomPt
-      && rect.xLeft < bandEndPt
-      ? { ...rect, xRight: bandEndPt, imageW: bandEndPt - rect.imageX } : rect;
-  };
+  const float = (exclusion: UprightBlockExclusion, ordinal: number): FloatRect =>
+    uprightBlockExclusionFloat(exclusion, ordinal, leastRoomPt);
   if (fromIndex) {
     const startPt = context.physicalIndentLeftPt;
     const outdentPt = Math.max(
