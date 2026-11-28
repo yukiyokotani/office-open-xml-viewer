@@ -1519,6 +1519,10 @@ export interface TableColumnLayoutInput {
   readonly growUnpreferredColumns?: boolean | 'nonbinding';
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
+  /** Width of the uniform table border rule of the spaced geometry. */
+  readonly separatedBorderPt?: number;
+  /** The side-rule inset of the cell around a nested spaced table. */
+  readonly separatedHostInsetPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
    * fit must stay strictly inside it, so no maximum was capped. */
   readonly contentBandPt?: number;
@@ -1622,6 +1626,10 @@ export interface FloatingTablePositionInput {
 export interface TableCellLayoutInput {
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  /** For a continuation that opens its merge in a page fragment: the row
+   * exception borders of the row that opens the merge in the source, which
+   * govern its rules in place of its own row's. */
+  readonly mergeOpenerExceptionBorders?: TableEdgeInputs | null;
   readonly columnStart: number;
   readonly columnSpan: number;
   readonly verticalMerge: 'none' | 'restart' | 'continue';

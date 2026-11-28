@@ -3439,6 +3439,7 @@ function tableDecisionEnvironment(state: BodyMeasurementContext) {
     singleColumn: state.sectionLayout?.columns.length === 1,
     textDirection: state.sectionLayout.textDirection,
     quarterTurnedStory: state.storyContext?.quarterTurned === true,
+    uprightTable: state.uprightPhysicalTable === true,
     inTableCell: state.storyContext?.containers.some((container) => container.kind === 'tableCell') ?? false,
     tableCellDepth: state.storyContext?.containers.filter((container) => container.kind === 'tableCell').length ?? 0,
     contentX: state.contentX,
@@ -3446,9 +3447,13 @@ function tableDecisionEnvironment(state: BodyMeasurementContext) {
   };
 }
 
-function singleTableDecision(table: TableLayoutSource, contentWPt: number, state: BodyMeasurementContext): LogicalTableDecision {
+function singleTableDecision(
+  table: TableLayoutSource, contentWPt: number, state: BodyMeasurementContext,
+  hostCellRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>,
+): LogicalTableDecision {
   const source = state.acquisitionInputs.tableSourceAcquisitionInput(table);
-  return decideLogicalTable(table, source, [{ table, source }], contentWPt, tableDecisionEnvironment(state), true, true,
+  return decideLogicalTable(table, source, [{ table, source }], contentWPt,
+    hostCellRuleInsetPt ? { ...tableDecisionEnvironment(state), hostCellRuleInsetPt } : tableDecisionEnvironment(state), true, true,
     (candidate) => spacedAutoFitContentWidthsPt(acquireTableColumnInput(table, contentWPt, state, candidate)) !== null);
 }
 

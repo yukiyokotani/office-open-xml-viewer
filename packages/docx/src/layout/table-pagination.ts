@@ -22,6 +22,7 @@ import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import {
+  continuesMergeFromAbove,
   laidOutTableTracks,
   layoutTable,
   measureTableCellBlockFlowHeightPt,
@@ -320,6 +321,44 @@ function sourceRowFor(
   return source.input.rows[inputRowIndexOf(source, logicalRowIndex)];
 }
 
+type MergeOpener = Readonly<{ cell: TableCellLayoutInput; row: TableRowLayoutInput }>;
+const mergeOpenersBySource = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, MergeOpener>>();
+
+/** A cell's place in the source: its row and grid columns, which every
+ * fragment of the row keeps. */
+function mergePlaceKey(row: TableRowLayoutInput, cell: TableCellLayoutInput): string {
+  return `${row.logicalRowIndex}:${cell.columnStart}:${cell.columnSpan}`;
+}
+
+/** For every continuation cell of the source, by its place, the cell that opens its
+ * vertical merge and that cell's row: one pass over the rows, carried column by column. */
+function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, MergeOpener> {
+  const cached = mergeOpenersBySource.get(source);
+  if (cached) return cached;
+  const openers = new Map<string, MergeOpener>();
+  const open = new Map<string, MergeOpener>();
+  source.input.rows.forEach((row, rowIndex) => {
+    const above = source.input.rows[rowIndex - 1];
+    const next = new Map<string, MergeOpener>();
+    for (const cell of row.cells) {
+      const key = `${cell.columnStart}:${cell.columnSpan}`;
+      if (cell.verticalMerge === 'restart') next.set(key, { cell, row });
+      else if (cell.verticalMerge === 'continue'
+        && continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan)) {
+        const opener = open.get(key);
+        if (opener) {
+          next.set(key, opener);
+          openers.set(mergePlaceKey(row, cell), opener);
+        }
+      }
+    }
+    open.clear();
+    for (const [key, opener] of next) open.set(key, opener);
+  });
+  mergeOpenersBySource.set(source, openers);
+  return openers;
+}
+
 function leadingHeaderCount(input: TableLayoutInput): number {
   let count = 0;
   while (input.rows[count]?.repeatedHeader === true) count += 1;
@@ -496,7 +535,12 @@ export function completedPartialRowWindowEnd(
     const scanned = scan === rowIndex ? row : sourceRows[scan]!;
     const above = scan === rowIndex ? undefined : scan === rowIndex + 1 ? row : sourceRows[scan - 1];
     for (const cell of scanned.cells) {
-      if (projectedMergeRole(segmentOpeningLogicalRowIndex, above, scanned, cell) !== 'restart') continue;
+      // A continuation that opens the window without being a segment's
+      // opening row holds no content: its interval is not followed, so the
+      // window stays bounded by the authored merges (library policy).
+      const opens = cell.verticalMerge === 'restart' || (scanned.logicalRowIndex === segmentOpeningLogicalRowIndex
+        && projectedMergeRole(segmentOpeningLogicalRowIndex, above, scanned, cell) === 'restart');
+      if (!opens) continue;
       windowEnd = Math.max(
         windowEnd,
         mergeEndRow(sourceRows, scan, cell.columnStart, cell.columnSpan),
@@ -2132,10 +2176,34 @@ function materializeFragment(
   selected: readonly SelectedRow[],
   context: TableFragmentContext,
 ): TableFragmentLayout {
+  const openers = mergeOpeners(source);
   const fragmentInput: TableLayoutInput = {
     ...source.input,
     id: `${source.input.id}:fragment:${context.page.occurrenceId}`,
-    rows: selected.map((row) => row.input),
+    rows: selected.map((row, rowIndex) => {
+      // A continuation that opens its merge in this fragment (table.ts
+      // gridMergeRole) stands for the cell that opened it in the source: it
+      // carries that cell's shading and side rules, at cell and row-exception
+      // level, which the content beside the merge was acquired against.
+      const above = selected[rowIndex - 1]?.input;
+      let cells: TableCellLayoutInput[] | undefined;
+      row.input.cells.forEach((cell, cellIndex) => {
+        // A row cut across pages gives its cells fragment ids: the merge is
+        // found by the cell's place in the source.
+        const opener = cell.verticalMerge === 'continue' ? openers.get(mergePlaceKey(row.input, cell)) : undefined;
+        if (!opener || continuesMergeFromAbove(above, row.input, cell.columnStart, cell.columnSpan)) return;
+        cells ??= [...row.input.cells];
+        const { background: _own, ...rest } = cell;
+        cells[cellIndex] = {
+          ...rest,
+          ...(opener.cell.background ? { background: opener.cell.background } : {}),
+          borders: { ...cell.borders, left: opener.cell.borders.left, right: opener.cell.borders.right,
+            insideV: opener.cell.borders.insideV },
+          mergeOpenerExceptionBorders: opener.row.exceptionBorders,
+        };
+      });
+      return cells ? { ...row.input, cells } : row.input;
+    }),
   };
   const laidOut = layoutTableFragment(source, fragmentInput, context.placement, context.services).layout;
   const rows = laidOut.rows.map((row, rowIndex): TableRowFragmentLayout => {
@@ -2149,21 +2217,11 @@ function materializeFragment(
       physicalPageIndex: context.page.physicalPageIndex,
       displayPageNumber: context.page.displayPageNumber,
       cells: Object.freeze(row.cells.map((cell, cellIndex): TableCellFragmentLayout => {
-        const verticalMerge = selection.input.cells[cellIndex]?.verticalMerge ?? 'none';
-        const sourceCell = selection.input.cells[cellIndex];
-        const ownsRestartInFragment = verticalMerge === 'continue' && selected
-          .slice(0, rowIndex)
-          .some((earlier) => earlier.input.cells.some((candidate) => (
-            candidate.verticalMerge === 'restart'
-            && candidate.columnStart === sourceCell?.columnStart
-            && candidate.columnSpan === sourceCell?.columnSpan
-          )));
+        // The fragment's own layout names the cell that paints a merge
+        // whose restart is on an earlier page (table.ts gridMergeRole).
         return Object.freeze({
           ...cell,
           contentRanges: Object.freeze([...(selection.ranges[cellIndex] ?? [])]),
-          ...(verticalMerge === 'continue' && !ownsRestartInFragment
-            ? { visualMergeOwnership: 'continuation' as const }
-            : {}),
         });
       })),
     });

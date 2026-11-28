@@ -640,6 +640,52 @@ function fitToAvailableWidth(
   return cleanWidths(result.map((width) => width * scale));
 }
 
+/** WORD_TABLE_CELL_SPACING_GEOMETRY, AutoFit tables with a preferred table
+ * or cell width. The gaps are not part of what AutoFit distributes: the cell
+ * boxes are the widths the table resolves to in the width that is left for
+ * them. Without a preferred table width that is whatever they resolve to,
+ * the gaps widening the table, unless its border box would pass the width
+ * ceiling; then, and with a preferred table width, the boxes are resolved in
+ * that width less the gaps. Returns null for a content-sized table (its own
+ * class below) and when the gaps leave no width. */
+function spacedAutoFitPreferredBoxesPt(
+  input: TableColumnLayoutInput,
+  columnCount: number,
+  spacingPt: number,
+): readonly number[] | null {
+  const preferred = input.tablePreferredWidthPt !== null || input.rows.some((row) =>
+    row.before !== null || row.after !== null || row.cells.some((cell) => cell.preferredWidth !== null));
+  if (!preferred) return null;
+  const cellInput = { ...input, separatedCellSpacingPt: undefined, separatedBorderPt: undefined,
+    separatedHostInsetPt: undefined };
+  const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+  // Every box holds at least its own two rules; less is outside the rule.
+  const rulesPt = 2 * finiteNonNegative(input.separatedBorderPt);
+  const holdsRules = (boxes: readonly number[]): readonly number[] | null =>
+    (boxes.every((width) => width > rulesPt + EPSILON_PT) ? boxes : null);
+  // The table's border box, half a rule past the grid on either side, is
+  // held to the ceiling.
+  const ceilingPt = input.availableWidthPt === null
+    ? null : finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.separatedBorderPt)
+      - finiteNonNegative(input.separatedHostInsetPt);
+  if (input.tablePreferredWidthPt === null) {
+    const resolved = solveTableColumnWidths(cellInput);
+    const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+    if (ceilingPt === null || totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) return holdsRules(resolved);
+  }
+  const targetPt = Math.min(input.tablePreferredWidthPt ?? Number.POSITIVE_INFINITY,
+    ceilingPt ?? Number.POSITIVE_INFINITY) - gapBudgetPt;
+  if (!Number.isFinite(targetPt) || targetPt <= EPSILON_PT) return null;
+  return holdsRules(solveTableColumnWidths({
+    ...cellInput,
+    // A held automatic table stays automatic in the band the gaps leave.
+    tablePreferredWidthPt: input.tablePreferredWidthPt === null ? null : targetPt,
+    availableWidthPt: targetPt,
+    ...(input.contentBandPt === undefined
+      ? {} : { contentBandPt: Math.max(0, input.contentBandPt - gapBudgetPt) }),
+  }));
+}
+
 /** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.
  * Use this same admission test before selecting the geometry and when solving
  * it. A binding table must retain its original constraints, ceiling and boxes,
@@ -647,8 +693,10 @@ function fitToAvailableWidth(
 export function spacedAutoFitContentWidthsPt(input: TableColumnLayoutInput): readonly number[] | null {
   const columnCount = requiredColumnCount(input);
   const spacingPt = input.separatedCellSpacingPt ?? 0;
-  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0
-    || input.growUnpreferredColumns !== 'nonbinding') return null;
+  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0) return null;
+  const preferredBoxes = spacedAutoFitPreferredBoxesPt(input, columnCount, spacingPt);
+  if (preferredBoxes) return preferredBoxes;
+  if (input.growUnpreferredColumns !== 'nonbinding') return null;
   const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
     && row.cells.length === columnCount && row.cells.every((cell, index) =>
       cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));

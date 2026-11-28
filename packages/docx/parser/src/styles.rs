@@ -1,6 +1,7 @@
 use crate::xml_util::*;
 use ooxml_common::depth::parse_guarded;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// ECMA-376 §17.3.2.14 `<w:fitText>` as one cascaded run property.
 #[derive(Clone, PartialEq, Debug)]
@@ -288,6 +289,9 @@ pub struct ParaFmt {
     /// [`FramePrFacts`]); `Some` ⇒ this paragraph is part of a text frame.
     /// [`FramePrFacts::resolve`] applies the defaults once the cascade is done.
     pub frame_pr: Option<Box<FramePrFacts>>,
+    /// A neutral document default supplies attributes to higher framePr layers.
+    /// Share it across resolutions until a paragraph actually declares a frame.
+    neutral_frame_defaults: Option<Arc<FramePrFacts>>,
 }
 
 /// The authored attributes of one `<w:framePr>` level, every one optional so
@@ -349,6 +353,26 @@ impl FramePrFacts {
             x_align,
             y_align
         );
+    }
+
+    /// Word for Mac 16.115.2 paginated body text normally with the left-aligned,
+    /// zero-width paragraph default at the top of the margin. Changing only
+    /// its width to 36 pt, its height to 36 pt, or its alignment to right
+    /// produced an actual frame. ECMA-376 §17.3.1.11 makes omitted widths
+    /// automatic; the observed exception is scoped to an explicit zero in
+    /// §17.7.5.3 document defaults, without other sizing or positioning intent.
+    fn matches_inert_document_default(&self) -> bool {
+        self.h.unwrap_or(0.0) == 0.0
+            && self.h_space.unwrap_or(0.0) == 0.0
+            && self.v_space.unwrap_or(0.0) == 0.0
+            && matches!(self.h_anchor.as_deref(), None | Some("text"))
+            && self.v_anchor.as_deref() == Some("margin")
+            && self.x_align.as_deref() == Some("left")
+            && self.y == Some(0.0)
+            && self.y_align.is_none()
+            && matches!(self.wrap.as_deref(), None | Some("around"))
+            && matches!(self.drop_cap.as_deref(), None | Some("none"))
+            && !self.anchor_lock.unwrap_or(false)
     }
 
     /// The effective frame after the cascade, with defaults applied.
@@ -708,6 +732,18 @@ impl StyleMap {
                 // in a docGrid section that yields 1 grid line per text
                 // line rather than pitch × M.
                 defaults_para.line_spacing_explicit = None;
+                if defaults_para
+                    .frame_pr
+                    .as_deref()
+                    .is_some_and(FramePrFacts::matches_inert_document_default)
+                    && child_w(ppr_def, "framePr")
+                        .and_then(|node| attr_w(node, "w"))
+                        .and_then(|value| parse_measure_to_pt(&value, 20.0))
+                        == Some(0.0)
+                {
+                    defaults_para.neutral_frame_defaults =
+                        defaults_para.frame_pr.take().map(Arc::from);
+                }
             }
         }
 
@@ -1374,9 +1410,19 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     // §17.3.1.11 framePr: each attribute inherits independently (see
     // FramePrFacts); a level naming only `wrap` keeps the inherited anchors,
     // width and alignment.
+    if let Some(defaults) = &src.neutral_frame_defaults {
+        dst.neutral_frame_defaults = Some(Arc::clone(defaults));
+    }
     if let Some(src_frame) = &src.frame_pr {
         dst.frame_pr
-            .get_or_insert_with(Default::default)
+            .get_or_insert_with(|| {
+                Box::new(
+                    dst.neutral_frame_defaults
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
             .layer(src_frame);
     }
 }
