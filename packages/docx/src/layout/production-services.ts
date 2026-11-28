@@ -352,8 +352,7 @@ export function createProductionTextLayoutService(
     const previousKerning = context.fontKerning;
     const previousDirection = request.baseDirection !== undefined ? context.direction : undefined;
     const previousTextAlign = request.baseDirection !== undefined ? context.textAlign : undefined;
-    // The route's language is part of what it measures (CanvasFontRoute.lang).
-    const previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
+    let previousLang: string | undefined;
     try {
       if (request.baseDirection !== undefined) {
         context.direction = request.baseDirection;
@@ -370,6 +369,11 @@ export function createProductionTextLayoutService(
         request.weight,
         request.style,
       );
+      // The route's language is part of what it measures (CanvasFontRoute.lang).
+      // It is selected after the font: assigning the font settles the
+      // reference-em plan (core reference-advances.ts) in the context's
+      // ambient state, a per-font decision no run language changes.
+      previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
       context.letterSpacing = `${request.letterSpacingPt}px`;
       if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
       const metrics = context.measureText(request.text);
@@ -403,10 +407,11 @@ export function createProductionTextLayoutService(
         context.direction = previousDirection;
         context.textAlign = previousTextAlign;
       }
+      // The ambient language first, so restoring the font plans in it too.
+      restoreCanvasLanguage(context, previousLang);
       context.font = previousFont;
       context.letterSpacing = previousLetterSpacing;
       if (request.kerning != null) context.fontKerning = previousKerning;
-      restoreCanvasLanguage(context, previousLang);
     }
   };
   return createTextLayoutService({

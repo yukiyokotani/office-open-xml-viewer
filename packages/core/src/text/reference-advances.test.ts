@@ -163,6 +163,27 @@ describe('reference text advances', () => {
     ]);
   });
 
+  it('probes in the context\'s ambient language without reading or writing it', () => {
+    // A language-sensitive double: only its ambient ja-jp state grid-fits.
+    const accesses: string[] = [];
+    let lang = 'ja-jp';
+    const { target } = measuringContext((character, px) => (lang === 'ja-jp'
+      ? gridFitted(character, px) : linear(character, px)));
+    Object.defineProperty(target, 'lang', {
+      get: () => { accesses.push('get'); return lang; },
+      set: (value: string) => { accesses.push('set'); lang = value; },
+    });
+    const planner = createTextAdvancePlanner(new Proxy(target, {
+      has(object, key) {
+        if (key === 'lang') accesses.push('has');
+        return Reflect.has(object, key);
+      },
+    }), { probeClusters: PROBES });
+    expect(planner.plan('normal 400 11px X')).toEqual(referenceTextFont('normal 400 11px X'));
+    expect(accesses).toEqual([]);
+    expect(lang).toBe('ja-jp');
+  });
+
   it('keeps a selected language across its save() and leaves untagged text a plain save()', () => {
     const paint = (lang: string | undefined) => {
       const accesses: string[] = [];

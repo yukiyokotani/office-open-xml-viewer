@@ -169,6 +169,8 @@ export function createLayoutServices(
   const verticalContext = canvasContext === null || measured === null
     ? null
     : withReferenceAdvances(canvasContext, measured);
+  let hasLang: boolean | undefined;
+  const engineHasLang = () => hasLang ??= canvasContext !== null && 'lang' in canvasContext;
   const context: MeasurementTextContext | null = canvasContext === null || measured === null
     ? null
     : Object.freeze(Object.defineProperties({
@@ -183,14 +185,18 @@ export function createLayoutServices(
         get fontKerning() { return canvasContext.fontKerning; },
         set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
         measureText(text: string) { return measured.measureText(text); },
-      }, 'lang' in canvasContext ? {
-        // Canvas `lang` (language-specific glyphs) only where the engine has it.
+      }, {
+        // Canvas `lang` (language-specific glyphs), forwarded only where the
+        // engine has it. The engine is asked on first use, never at creation:
+        // untagged text selects no language, so its measurement reads and
+        // writes none of the caller context's language state. An engine
+        // without the attribute reads as no language and ignores writes.
         lang: {
-          get: () => (canvasContext as { lang: string }).lang,
-          set: (value: string) => { (canvasContext as { lang: string }).lang = value; },
+          get: () => engineHasLang() ? (canvasContext as { lang: string }).lang : undefined,
+          set: (value: string) => { if (engineHasLang()) (canvasContext as { lang: string }).lang = value; },
           enumerable: true,
         },
-      } : {}));
+      }));
   const canvasElement = canvasContext?.canvas as HTMLCanvasElement | undefined;
   const ownerCanvasConstructor =
     canvasElement?.ownerDocument?.defaultView?.HTMLCanvasElement;

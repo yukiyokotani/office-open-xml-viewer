@@ -754,6 +754,56 @@ describe('Canvas lang at measure and paint', () => {
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['г', 'sr-rs'], ['д', 'sr-rs'], ['е', 'sr-rs']]);
     expect(ctx.lang).toBe('inherit');
   });
+  it('plans reference-em advances in a caller context\'s ambient language', async () => {
+    // A caller canvas set to ja-jp whose double grid-fits small sizes only in
+    // that language (HTML canvas text styles: lang is caller state).
+    const planned = async (extra: Record<string, unknown>) => {
+      const { canvas, ctx } = recordingCanvas();
+      const target = ctx as unknown as Record<PropertyKey, unknown>;
+      let lang = 'ja-jp';
+      const accesses: string[] = [];
+      const measuredFonts: string[] = [];
+      Object.defineProperty(target, 'lang', {
+        get: () => { accesses.push('get'); return lang; },
+        set: (value: string) => { accesses.push('set'); lang = value; },
+      });
+      // The double's own recording of drawn languages is not an access.
+      target.fillText = () => {};
+      target.measureText = (s: string) => {
+        const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(ctx.font)?.[1] ?? String(FONT_PX));
+        if (s === 'ab') measuredFonts.push(ctx.font);
+        const half = lang === 'ja-jp' && p < 64 ? Math.floor(p / 2 + 0.5) : p / 2;
+        return {
+          width: [...s].length * half,
+          fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
+          actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+        } as TextMetrics;
+      };
+      const proxy = new Proxy(target, {
+        has(object, key) {
+          if (key === 'lang') accesses.push('has');
+          return Reflect.has(object, key);
+        },
+      });
+      (canvas as unknown as { getContext: () => unknown }).getContext = () => proxy;
+      // 8.25pt = 11px: grid-fitted in the ambient ja-jp state.
+      await renderDocumentToCanvas(documentOf([run('ab', { fontSize: 8.25, italic: false, ...extra })]),
+        canvas, 0, { dpr: 1, width: 600 });
+      expect(lang).toBe('ja-jp');
+      return { accesses: accesses.length, measuredFonts };
+    };
+    const untagged = await planned({});
+    // The reference em (core reference-advances.ts) is chosen, as before
+    // languages, with no access to the caller's language.
+    expect(untagged.measuredFonts.length).toBeGreaterThan(0);
+    expect(untagged.measuredFonts.every(font => font.includes('256px'))).toBe(true);
+    expect(untagged.accesses).toBe(0);
+    // A run language does not change the per-font decision.
+    const tagged = await planned({ lang: 'sr-rs' });
+    expect(tagged.measuredFonts.length).toBeGreaterThan(0);
+    expect(tagged.measuredFonts.every(font => font.includes('256px'))).toBe(true);
+  });
+
   it('paints untagged text with plain save() and no Canvas language access', async () => {
     const paintAccesses = async (extra: Record<string, unknown>) => {
       const { canvas, ctx } = recordingCanvas();
