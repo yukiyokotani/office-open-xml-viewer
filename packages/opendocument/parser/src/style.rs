@@ -559,10 +559,7 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
             parent: None,
             automatic: true,
             attributes: HashMap::new(),
-            groups: HashMap::from([(
-                TEXT.to_string(),
-                text_properties(attributes(text)),
-            )]),
+            groups: HashMap::from([(TEXT.to_string(), text_properties(attributes(text)))]),
         };
         level_text.insert(key, style);
     }
