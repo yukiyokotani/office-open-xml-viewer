@@ -17,7 +17,7 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
+function makeRecordingCtx(onMeasure?: () => void, fontBox = { ascent: 8, descent: 2 }): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
   const texts: Array<{ text: string; y: number; font: string }> = [];
@@ -60,7 +60,7 @@ function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext
       const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
       // A kerned "AV" pair is a quarter of the size narrower.
       const kerned = text.split('AV').length - 1;
-      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: fontBox.ascent, fontBoundingBoxDescent: fontBox.descent, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
     },
     fillText(text: string, _x: number, y: number) { texts.push({ text, y, font: String(this.font) }); }, strokeText() {},
     font: '10px sans-serif',
@@ -762,14 +762,13 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     }
   });
 
-  it('orders a group with an earlier-rule merge the same way whatever the column order', () => {
-    // A one-line merge over rows 1-4 (fits, adds nothing) and a rotated
-    // merge over rows 1-2 share row 1; a four-line merge over rows 2-3
-    // links them into one group. A group with an earlier-rule cell keeps
-    // reading order for all of its merges, so swapping the fitting and the
-    // rotated merge changes nothing: the rotated cell spreads its 12pt
-    // deficit (60pt box width over 48pt) evenly, then the four-line merge
-    // adds its 39.6pt deficit (93.6pt over 30 + 24pt) to row 3.
+  it('resolves earlier-rule merges after every growth-rule merge, whatever the column order', () => {
+    // A one-line merge over rows 1-4 (fits, adds nothing), a rotated merge
+    // over rows 1-2 and a four-line merge over rows 2-3. The growth-rule
+    // merge goes first: its 45.6pt deficit (93.6pt over 24 + 24pt) grows
+    // row 3. The rotated cell then spreads its 12pt deficit (60pt box width
+    // over 48pt) evenly over rows 1-2. Swapping the fitting and the rotated
+    // merge changes nothing.
     const fitting = [cell({ textBody: lines(1), rowSpan: 4 }), cell({ vMerge: true }), cell({ vMerge: true }), cell({ vMerge: true })];
     const rotated = [cell({ textBody: threeLines('vert'), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
     const tall = [cell(), cell({ textBody: lines(4), rowSpan: 2 }), cell({ vMerge: true }), cell()];
@@ -784,9 +783,82 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
         .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
         .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
     };
-    // 30 / 30 / 63.6 / 24pt rows: edges 30, 60, 123.6, 147.6.
-    expect(result(false)).toEqual([30, 60, 123, 147]);
+    // 30 / 30 / 69.6 / 24pt rows: edges 30, 60, 129.6, 153.6.
+    expect(result(false)).toEqual([30, 60, 129, 153]);
     expect(result(true)).toEqual(result(false));
+  });
+
+  it('lets an earlier-rule merge change nothing the growth-rule merges resolve', () => {
+    // An eight-line merge over rows 1-3 beside a five-line merge over rows
+    // 1-2 give 24/96/72/24 (edges 24/120/192/216). A rotated merge over rows
+    // 3-4 needs its 60pt box width, more than the 48pt those rows start
+    // with, but resolved after the growth-rule merges it finds 96pt and adds
+    // nothing, before or after the other merges in column order (frame
+    // slack, so the earlier rule measures it).
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const eight = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const five = [cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const rotated = [cell(), cell(), cell({ textBody: { ...body(1), vert: 'vert' } as TextBody, rowSpan: 2 }), cell({ vMerge: true })];
+    for (const rotatedFirst of [false, true]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => [
+        ...(rotatedFirst ? [rotated[r], eight[r], five[r]] : [eight[r], five[r], rotated[r]]),
+        cell({ borderB: ln() }),
+      ]), [COL, COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 100 * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, rotatedFirst ? 'rotated first' : 'rotated last').toEqual([24, 120, 192, 216]);
+    }
+  });
+
+  it('sizes a growth-rule spAutoFit cell by the painted line box, not the font bbox', () => {
+    // spAutoFit's allowance for the resolved font's design box is shape
+    // autofit. A table row measures the line advance paint uses: changing
+    // only the font bounding box the canvas reports (same advances and ink)
+    // moves no row edge. One 20pt line: 24pt rows.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'fit', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'sp',
+    } as unknown as TextBody;
+    const edges = (bboxAscent: number, bboxDescent: number) => {
+      const t = tableOf([
+        [cell({ textBody, borderB: ln() })],
+        [cell({ textBody, borderB: ln() })],
+      ], [COL]);
+      t.rows[0].height = 10 * EMU;
+      t.rows[1].height = 10 * EMU;
+      const recording = makeRecordingCtx(undefined, { ascent: bboxAscent, descent: bboxDescent });
+      renderTable(recording.ctx, t, SCALE);
+      return recording.strokes
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5)
+        .map((s) => Math.floor(s.y1));
+    };
+    expect(edges(8, 2)).toEqual([24, 48]);
+    expect(edges(40, 10)).toEqual([24, 48]);
   });
 
   it('measures an earlier-rule cell with the earlier sizing input', () => {
@@ -855,9 +927,9 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     }
   });
 
-  it('orders a large connected merge group without overflowing the stack', () => {
-    // 1000 columns of non-overlapping two-row merges over 260 rows, linked
-    // into one group by a staggered column: 130,000+ merges in one group.
+  it('orders many merges without overflowing the stack', () => {
+    // 1000 columns of non-overlapping two-row merges over 260 rows plus a
+    // staggered column: 130,000+ interacting merges.
     const merges: { ri: number; last: number; earlierRule: boolean }[] = [];
     for (let ri = 0; ri < 260; ri += 2) {
       for (let ci = 0; ci < 1000; ci++) merges.push({ ri, last: ri + 1, earlierRule: false });
@@ -866,9 +938,13 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     const order = orderTableMerges(merges);
     expect(order).toHaveLength(merges.length);
     expect(order.every((merge, k) => k === 0 || order[k - 1].last <= merge.last)).toBe(true);
-    // With an earlier-rule merge the group keeps reading order.
+    // Earlier-rule merges follow every growth-rule merge, in reading order.
     merges[0].earlierRule = true;
-    expect(orderTableMerges(merges)).toEqual(merges);
+    merges[5].earlierRule = true;
+    const mixed = orderTableMerges(merges);
+    expect(mixed).toHaveLength(merges.length);
+    expect(mixed.slice(-2)).toEqual([merges[0], merges[5]]);
+    expect(mixed.slice(0, -2).every((merge) => !merge.earlierRule)).toBe(true);
   });
 
   it('keeps a multi-column cell on the earlier rule, painting into its columns', () => {

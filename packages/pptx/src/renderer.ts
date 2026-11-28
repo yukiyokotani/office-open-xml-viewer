@@ -5094,12 +5094,17 @@ export function renderTextBody(
   // (rotated text measured by its box, ODF tables) pass false for a positive
   // row and measure an omitted-lnSpc line by its glyph size.
   measureNaturalLineSpacing = measureOnly,
-  // renderTable's measured paragraph layouts for this cell (see
-  // TableLayoutAccess). Only the cell's own flat layout uses it: rotated,
-  // stacked and warped re-entries, and any other renderTextBody call, lay out
-  // afresh.
-  tableLayouts?: TableLayoutAccess,
+  // renderTable's per-cell inputs (TableCellText). Only the cell's own flat
+  // layout uses them: rotated, stacked and warped re-entries, and any other
+  // renderTextBody call, lay out afresh.
+  tableCell?: TableCellText,
 ): number | void {
+  const tableLayouts = tableCell?.layouts;
+  // A growth-rule table measure takes every line by the painted line box.
+  // spAutoFit's allowance for the resolved font's design box (#1473) is
+  // shape autofit: it resizes a shape, and the host font's bounding box is
+  // not the line advance paint uses, so it stays out of table row sizing.
+  const paintedLineBoxMeasure = measureOnly && tableCell?.paintedLineBox === true;
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
   // above another in columns; see stacked-text.ts and core layoutStackedText.
   if (body.vert === 'wordArtVert' || body.vert === 'wordArtVertRtl') {
@@ -5444,7 +5449,8 @@ export function renderTextBody(
       // 3.6pt marT/marB on top (31.2pt). Neither path uses a substituted
       // font's design box.
       const naturalSingle = maxSizePx * 1.2;
-      const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
+      const useResolvedFontMetrics = isSpAutoFit && !paintedLineBoxMeasure
+        && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
       // being repeated between every pair of lines under spAutoFit (#1473).
@@ -7806,6 +7812,14 @@ export interface TableLayoutMemo {
   fonts?: Map<string, { font: string; refs: number }>;
 }
 
+/** What renderTable hands one cell's renderTextBody call. */
+interface TableCellText {
+  /** Measured layouts for reuse (TableLayoutAccess). */
+  layouts?: TableLayoutAccess;
+  /** Row sizing on the growth rule: measure by the painted line box. */
+  paintedLineBox?: boolean;
+}
+
 /** A cell's view of the memo: `record` is true for row sizing of a cell
  * whose paint reuses the result. */
 interface TableLayoutAccess {
@@ -7920,15 +7934,16 @@ interface TableMerge {
 
 /**
  * The order in which row sizing resolves merged cells (given in reading
- * order). Merges that share no row cannot affect each other, so the order is
- * set per group of merges linked through shared rows. A group with any cell
- * on the earlier rule keeps that rule's reading order for every merge in it:
- * the controls below cover ordinary cells only, and one order for the whole
- * group keeps the result independent of where a merge that contributes
- * nothing sits. A group of ordinary merges resolves them by the row they end
- * on, not in reading order or by span length. Synthetic PowerPoint controls
- * (four rows, 24pt minima and leading, zero margins) exported from
- * PowerPoint for Mac, 2026-11-28/29:
+ * order). Every growth-rule merge comes first, by the row it ends on; the
+ * earlier-rule merges follow in reading order, the order that rule always
+ * used, each resolved against the rows as they then stand. The two rules
+ * therefore cannot reorder each other: an earlier-rule merge (rotated,
+ * stacked, warped, multi-column) changes neither the order nor the input of
+ * any growth-rule merge, wherever it sits.
+ *
+ * Growth-rule merges resolve by the row they end on, not in reading order or
+ * by span length. Synthetic PowerPoint controls (four rows, 24pt minima and
+ * leading, zero margins) exported from PowerPoint for Mac, 2026-11-28/29:
  * - an eight-line merge over rows 1-3 beside a five-line merge over rows
  *   1-2, in either column order: 24/96/72/24 (reading order: 24/96/144/24);
  * - eight lines over rows 1-3 beside five over rows 3-4, in either column
@@ -7936,30 +7951,14 @@ interface TableMerge {
  * - five lines over rows 1-2 beside eight over rows 2-4: 24/96/24/72
  *   (longest first: 24/96/24/144).
  * Array.prototype.sort is stable: cells ending on the same row keep their
- * reading order. Exported for tests; linear apart from the sorts.
+ * reading order. Exported for tests; built by appending one merge at a
+ * time, so no argument list grows with the table.
  */
-export function orderTableMerges<T extends Pick<TableMerge, 'ri' | 'last' | 'earlierRule'>>(
+export function orderTableMerges<T extends Pick<TableMerge, 'last' | 'earlierRule'>>(
   merges: readonly T[],
 ): T[] {
-  // Groups of row intervals linked by overlap: sweep by first row.
-  const byFirstRow = [...merges].sort((a, b) => a.ri - b.ri);
-  const groupOf = new Map<T, number>();
-  let group = -1;
-  let groupLast = -1;
-  for (const merge of byFirstRow) {
-    if (merge.ri > groupLast) group++;
-    groupLast = Math.max(groupLast, merge.last);
-    groupOf.set(merge, group);
-  }
-  const members: T[][] = Array.from({ length: group + 1 }, () => []);
-  for (const merge of merges) members[groupOf.get(merge)!].push(merge);
-  const order: T[] = [];
-  for (const cells of members) {
-    const ordered = cells.some((c) => c.earlierRule) ? cells : cells.sort((a, b) => a.last - b.last);
-    // Appended one by one: a spread argument list overflows the stack for a
-    // large group.
-    for (const merge of ordered) order.push(merge);
-  }
+  const order = merges.filter((merge) => !merge.earlierRule).sort((a, b) => a.last - b.last);
+  for (const merge of merges) if (merge.earlierRule) order.push(merge);
   return order;
 }
 
@@ -8064,9 +8063,9 @@ export function renderTableWithLayoutMemo(
 
   // Row sizing records the layouts of growth-rule cells for the paint below
   // (tableParagraphLayout).
-  const sizingLayouts = (earlierRule: boolean): TableLayoutAccess | undefined =>
-    earlierRule ? undefined : { memo, record: true };
-  const paintLayouts: TableLayoutAccess = { memo, record: false };
+  const sizingInput = (earlierRule: boolean): TableCellText | undefined =>
+    earlierRule ? undefined : { layouts: { memo, record: true }, paintedLineBox: true };
+  const paintInput: TableCellText = { layouts: { memo, record: false } };
   const sizingTextColor = (cell: TableCell, earlierRule: boolean): string | null =>
     !earlierRule && cell.textColor ? hexToRgba(cell.textColor) : null;
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
@@ -8091,7 +8090,7 @@ export function renderTableWithLayoutMemo(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
         sizingTextColor(cell, earlierRule), 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false,
-        !earlierRule || row.height === 0, sizingLayouts(earlierRule),
+        !earlierRule || row.height === 0, sizingInput(earlierRule),
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
     }
@@ -8101,10 +8100,10 @@ export function renderTableWithLayoutMemo(
   // rows it spans, PowerPoint adds the whole deficit to the last spanned row:
   // PDF controls (Windows and Mac) with a 144 pt merged cell over minima of
   // 24+48, 24+24 and 48+24 pt (frame equal to the row sum) keep every earlier
-  // row at its own height and grow only the last. Merged cells are resolved
-  // in the order of the row they end on, so a cell ending lower sees the
-  // growth of every merge nested inside it whatever the column order
-  // (orderTableMerges).
+  // row at its own height and grow only the last. Growth-rule merges are
+  // resolved in the order of the row they end on, so a cell ending lower
+  // sees the growth of every merge nested inside it whatever the column
+  // order; earlier-rule merges follow (orderTableMerges).
   const spanCells: TableMerge[] = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -8119,19 +8118,17 @@ export function renderTableWithLayoutMemo(
       let hasAutoHeightRow = false;
       for (let r = ri; r <= last; r++) if (el.rows[r].height === 0) hasAutoHeightRow = true;
       // The earlier rule sizes a merge only over a zero-height row or under
-      // frame slack. A merge it skips changes no row, so it is left out
-      // before grouping and cannot link other merges into one group.
+      // frame slack.
       if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
       // The measured height does not depend on the row heights, so it is
       // taken once, here. A merge whose content already fits the rows after
-      // the first pass never adds height (rows only grow), so it is left out
-      // too, under either rule.
+      // the first pass never adds height (rows only grow) and is left out.
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
         sizingTextColor(cell, earlierRule), 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false,
-        !earlierRule || hasAutoHeightRow, sizingLayouts(earlierRule),
+        !earlierRule || hasAutoHeightRow, sizingInput(earlierRule),
       ) as number) || 0;
       let firstPass = 0;
       for (let r = ri; r <= last; r++) firstPass += rowHeights[r];
@@ -8356,7 +8353,7 @@ export function renderTableWithLayoutMemo(
           undefined,
           false,
           false,
-          paintLayouts,
+          paintInput,
         );
       } finally {
         // The cell is painted: its measured layouts are not needed again.
