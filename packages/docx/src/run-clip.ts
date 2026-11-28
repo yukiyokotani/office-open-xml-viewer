@@ -50,9 +50,12 @@ function cutPolygon(subject: readonly Point[], clip: readonly Point[]): Point[] 
 }
 
 /** At most this many polygon pieces are tracked while cutting a box by
- * nested union clips; past it a union is replaced by its bounding box, a
- * superset that keeps the work linear in the number of clips. */
-const MAX_CLIP_PIECES = 64;
+ * nested union clips, and at most MAX_CLIP_CUTS cuts are made for one clip.
+ * The bounds apply to what survives a cut, not to the number of rectangles
+ * it is cut by: strips that mostly miss each other stay exact. Past them a
+ * union is replaced by its bounding box, a superset that bounds the work. */
+const MAX_CLIP_PIECES = 256;
+const MAX_CLIP_CUTS = 4096;
 
 type Box = Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>;
 
@@ -125,41 +128,52 @@ function boundingPolygon(polygons: readonly Point[][]): Point[] {
   return [{ x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom }];
 }
 
+/** `pieces` cut by each of `regions`: the parts with area, identical ones
+ * kept once. */
+function cutPieces(pieces: readonly Point[][], regions: readonly Point[][]): Point[][] {
+  const seen = new Set<string>();
+  return pieces.flatMap((piece) => regions.map((region) => cutPolygon(piece, region)))
+    .filter((piece) => {
+      if (piece.length < 3 || !(Math.abs(area(piece)) > 1e-9)) return false;
+      const key = piece.map((point) => `${point.x.toFixed(6)},${point.y.toFixed(6)}`).join(';');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 /** The visible pieces (convex page polygons) of `box` under `clips`, each a
- * union of its rectangles; identical pieces are kept once. The cap applies
- * after each union is reduced (clipRegions), so duplicate or nested
- * rectangles never trigger the bounding-box superset. */
+ * union of its rectangles; identical pieces are kept once. The pieces are
+ * exact, each wholly visible, while they stay within the bounds above; these
+ * apply after each union is reduced (clipRegions) and to the pieces that
+ * survive it, so duplicate, nested or missed rectangles never trigger the
+ * bounding-box superset. Past the bounds a piece may extend beyond what is
+ * visible of it, but every piece returned has a visible part. */
 export function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
   const whole = placedPolygon(box.x, box.y, box.width, box.height, box.transform);
   let pieces: Point[][] = [whole];
   let capped = false;
   for (const clip of clips ?? []) {
-    let regions = clipRegions(clip, pieces);
+    const regions = clipRegions(clip, pieces);
     if (regions.length === 0) return [];
-    // Past the cap a union is cut as its bounding box, a superset: the
-    // pieces then bound what is visible, and whether anything is visible at
-    // all is decided exactly below.
-    if (pieces.length * regions.length > MAX_CLIP_PIECES) {
-      regions = [boundingPolygon(regions)];
+    const exact = pieces.length * regions.length <= MAX_CLIP_CUTS ? cutPieces(pieces, regions) : undefined;
+    if (exact && exact.length <= MAX_CLIP_PIECES) {
+      pieces = exact;
+    } else {
+      // Past the bounds the union is cut as its bounding box, a superset.
+      pieces = cutPieces(pieces, [boundingPolygon(regions)]);
       capped = true;
     }
-    const seen = new Set<string>();
-    pieces = pieces.flatMap((piece) => regions.map((region) => cutPolygon(piece, region)))
-      .filter((piece) => {
-        if (piece.length < 3 || !(Math.abs(area(piece)) > 1e-9)) return false;
-        const key = piece.map((point) => `${point.x.toFixed(6)},${point.y.toFixed(6)}`).join(';');
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
     if (pieces.length === 0) return [];
   }
-  return capped && !someVisible(whole, clips ?? [], 0) ? [] : pieces;
+  // A superset piece is kept only where some of it is visible, decided
+  // exactly: a piece that every combination of the clips hides is no piece.
+  return capped ? pieces.filter((piece) => someVisible(piece, clips ?? [], 0)) : pieces;
 }
 
 /** Whether some point of the convex `piece` lies inside every union of
  * `clips` from `from` on: one rectangle of each union at a time, depth
- * first, stopping at the first common area. Exact where the capped cut in
+ * first, stopping at the first common area. Exact where the bounded cut in
  * visiblePieces is a superset. */
 function someVisible(piece: readonly Point[], clips: readonly Readonly<DocxClipRegion>[], from: number): boolean {
   if (from === clips.length) return true;
