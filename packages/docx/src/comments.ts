@@ -67,13 +67,20 @@ const ADOPTED = new WeakSet<readonly Readonly<CommentAnchorRange>[]>();
 const RUNS_ORIGIN = new WeakMap<readonly Readonly<DocxTextRunInfo>[], CollectedRunsOrigin>();
 const COUNTERPARTS = new WeakMap<readonly Readonly<CommentAnchorRange>[], Map<string, Readonly<CommentAnchorRange>>>();
 
-/** Where an array of runs was collected: its page, and, when they come from
- * a layout other than the one the document's anchors were collected against
- * (the tracked-change view of a document shown in its final state), the
- * anchors of that layout. */
+/** Where an array of runs was collected: its page, and the anchors of the
+ * layout that produced it. That layout need not be the one the document's
+ * current anchors were collected against: the runs may be asked of another
+ * view (the tracked-change view of a document shown in its final state), or
+ * the document's view may change after they were collected. */
 export interface CollectedRunsOrigin {
   readonly pageIndex: number;
-  readonly anchors?: () => readonly Readonly<CommentAnchorRange>[];
+  readonly anchors: () => readonly Readonly<CommentAnchorRange>[];
+}
+
+export function collectedRunsOrigin(
+  runs: readonly Readonly<DocxTextRunInfo>[],
+): CollectedRunsOrigin | undefined {
+  return RUNS_ORIGIN.get(runs);
 }
 
 const anchorKey = (anchor: Readonly<CommentAnchorRange>): string =>
@@ -88,7 +95,7 @@ function anchorOfRunsLayout(
   anchor: Readonly<CommentAnchorRange>,
   origin: CollectedRunsOrigin | undefined,
 ): Readonly<CommentAnchorRange> {
-  const anchors = origin?.anchors?.();
+  const anchors = origin?.anchors();
   if (!anchors) return anchor;
   let counterparts = COUNTERPARTS.get(anchors);
   if (!counterparts) {
@@ -479,7 +486,13 @@ function collectIndexedStoryCommentRanges(
         }, reference, geometryFallback, Math.max(from, to), coveredGeometry), fallbackSide));
       }
       const covering = segments.filter((segment) => segment.endRunIndex > segment.startRunIndex);
-      ranges.push(...(covering.length > 0 ? covering : segments.slice(0, 1)));
+      // Fallback (the reference boundary, the adjacent text) stands in for a
+      // range, not for one of its segments: where some segment's covered runs
+      // are laid out, a segment none of whose runs are (deleted text in the
+      // final view) shows nothing, and is not resolved to text outside the
+      // range.
+      const laidOut = covering.filter((segment) => segment.coveredGeometry);
+      ranges.push(...(laidOut.length > 0 ? laidOut : covering.length > 0 ? covering : segments.slice(0, 1)));
       continue;
     }
 

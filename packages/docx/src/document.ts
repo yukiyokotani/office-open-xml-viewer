@@ -91,6 +91,7 @@ import {
   adoptCommentAnchorPlacements,
   collectLayoutSourceCommentRangesIfPresent,
   noteCollectedRuns,
+  collectedRunsOrigin,
   resolveDocxCommentThreadsOnPage,
   type CommentAnchorRange,
   type ResolvedDocxCommentThread,
@@ -457,8 +458,6 @@ export class DocxDocument {
    *  reads them from the meta). Nulled by {@link destroy} with the other
    *  per-document caches. */
   private _commentAnchorRanges: readonly CommentAnchorRange[] | null = null;
-  /** Worker mode: the anchors requested for views other than the active one. */
-  private _commentAnchorRangesByView?: Map<string, Promise<readonly CommentAnchorRange[]>>;
   /** Lazily-computed §17.13.5 revision source ranges (main mode; worker mode
    * reads them from metadata). */
   private _revisionAnchorRanges: readonly RevisionAnchorRange[] | null = null;
@@ -1385,7 +1384,6 @@ export class DocxDocument {
   /** Bookmark pages and the review anchor projections are derived from the
    *  layout, so they belong to the publication that produced them. */
   private _invalidateLayoutDerivedCaches(): void {
-    this._commentAnchorRangesByView?.clear();
     this._bookmarkPages = null;
     this._commentAnchorRanges = null;
     this._revisionAnchorRanges = null;
@@ -1866,39 +1864,29 @@ export class DocxDocument {
     return this._commentAnchorRanges;
   }
 
-  /** The comment anchors of the layout that `view` selects, placed against
-   * that layout: the active view's are `commentAnchorRanges()`; another
-   * view's (the tracked-change view of a document shown in its final state)
-   * are collected from its own layout, where other runs have geometry, and
-   * kept with it. */
-  private async _commentAnchorRangesForView(
+  /** Worker mode: the comment anchors of the layout that `view` selects,
+   * placed against that layout. The active view's are
+   * `commentAnchorRanges()`; another view's (the tracked-change view of a
+   * document shown in its final state) are asked of the worker, which keeps
+   * them with the layout for as long as it keeps the layout. The host keeps
+   * none: they live with the run array they were collected for. */
+  private async _workerCommentAnchorRangesFor(
     view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
   ): Promise<readonly CommentAnchorRange[]> {
     if (this._isActiveView(view)) return this.commentAnchorRanges();
-    if (this._mode !== 'worker') return this._mainCommentAnchorRangesFor(view);
     if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
     const requested = this._layoutOptionsOfView(view);
-    // One request per view and layout publication.
-    const cache = (this._commentAnchorRangesByView ??= new Map());
-    const key = `${requested.currentDateMs}|${requested.showTrackedChanges === true}`;
-    let pending = cache.get(key);
-    if (!pending) {
-      pending = this._bridge.request(
-        (id) => ({
-          type: 'collectCommentAnchors',
-          id,
-          currentDateMs: requested.currentDateMs,
-          showTrackedChanges: requested.showTrackedChanges === true,
-        }) satisfies RenderWorkerRequest,
-      ).then((res) => {
-        const collected = res as Extract<RenderWorkerResponse, { type: 'commentAnchorsCollected' }>;
-        adoptCommentAnchorPlacements(collected.ranges, collected.placements);
-        return collected.ranges;
-      });
-      cache.set(key, pending);
-      pending.catch(() => { if (cache.get(key) === pending) cache.delete(key); });
-    }
-    return pending;
+    const res = await this._bridge.request(
+      (id) => ({
+        type: 'collectCommentAnchors',
+        id,
+        currentDateMs: requested.currentDateMs,
+        showTrackedChanges: requested.showTrackedChanges === true,
+      }) satisfies RenderWorkerRequest,
+    );
+    const collected = res as Extract<RenderWorkerResponse, { type: 'commentAnchorsCollected' }>;
+    adoptCommentAnchorPlacements(collected.ranges, collected.placements);
+    return collected.ranges;
   }
 
   private _layoutOptionsOfView(
@@ -2309,8 +2297,9 @@ export class DocxDocument {
         (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
       const collected = (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
-      const anchors = this._isActiveView(wireOpts) ? undefined : await this._commentAnchorRangesForView(wireOpts);
-      noteCollectedRuns(collected, { pageIndex, ...(anchors ? { anchors: () => anchors } : {}) });
+      // The anchors of the layout that produced the runs, as it stands now.
+      const anchors = await this._workerCommentAnchorRangesFor(wireOpts);
+      noteCollectedRuns(collected, { pageIndex, anchors: () => anchors });
       return collected;
     }
     const runtime = documentLayoutRuntimeOf(this);
@@ -2325,11 +2314,14 @@ export class DocxDocument {
     });
     // The runs carry no page or layout of their own: a comment anchor joined
     // to them (resolveCommentAnchorRuns) is placed on the page they were
-    // collected for, as the layout they come from places it. Another view's
-    // anchors are collected only when such a join asks for them.
+    // collected for, as the layout that produced them places it, whichever
+    // view is active when the join is made. The anchors of a layout other
+    // than the active one are collected only when such a join asks for them.
     noteCollectedRuns(runs, {
       pageIndex,
-      ...(this._isActiveView(wireOpts) ? {} : { anchors: () => this._mainCommentAnchorRangesFor(wireOpts) }),
+      anchors: () => (this._isActiveView(wireOpts)
+        ? this.commentAnchorRanges()
+        : this._mainCommentAnchorRangesFor(wireOpts)),
     });
     return runs;
   }
@@ -2348,14 +2340,8 @@ export class DocxDocument {
     const { includeResolved, ...runOptions } = options;
     // The anchors and the runs of one layout: the layout these options
     // select, which is the active view's only when they say nothing else.
-    const view = this._withActiveView({
-      ...(runOptions.currentDate === undefined ? {} : { currentDate: runOptions.currentDate }),
-      ...(runOptions.showTrackedChanges === undefined ? {} : { showTrackedChanges: runOptions.showTrackedChanges }),
-    });
-    const [runs, anchors] = await Promise.all([
-      this.collectPageRuns(pageIndex, runOptions),
-      this._commentAnchorRangesForView(view),
-    ]);
+    const runs = await this.collectPageRuns(pageIndex, runOptions);
+    const anchors = collectedRunsOrigin(runs)?.anchors() ?? this.commentAnchorRanges();
     return resolveDocxCommentThreadsOnPage(
       this.comments,
       anchors,

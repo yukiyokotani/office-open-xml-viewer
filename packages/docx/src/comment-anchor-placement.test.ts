@@ -12,6 +12,7 @@ import { buildDocxCommentMargin } from './comment-margin.js';
 import { DocxDocument } from './document.js';
 import { layoutDocumentInput } from './layout/document.js';
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
+import { normalizeLayoutOptions } from './layout/options.js';
 import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
 import { reviewProjectionIndexForDocument } from './layout/text-index.js';
 import type { DocumentLayout } from './layout/types.js';
@@ -24,7 +25,7 @@ import {
   inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART,
 } from './test-support/painted-glyphs.test-support.js';
 import { textRunsForPage } from './text-run-projection.js';
-import type { DocxDocumentModel } from './types.js';
+import type { DocxClipRegion, DocxDocumentModel, DocxTextRunInfo } from './types.js';
 
 const COMMENT_PART = {
   parts: {
@@ -113,6 +114,25 @@ describe('a reference-only comment beside a run that crosses a page break', () =
   });
 });
 
+describe('a comment range that starts in a paragraph of deleted text only', () => {
+  it('marks its laid-out part alone, which carries the card', async () => {
+    // The range starts before a tracked deletion, the only run of its
+    // paragraph, and ends after "Covered" in the next; "Outside" follows.
+    const { layout, model, runs } = await paintedDocument(
+      '<w:p><w:commentRangeStart w:id="1"/><w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>'
+      + '<w:rPr><w:sz w:val="24"/></w:rPr><w:delText>Deleted</w:delText></w:r></w:del></w:p>'
+      + `<w:p>${sized('Covered')}<w:commentRangeEnd w:id="1"/>${REFERENCE}${sized(' Outside')}</w:p>`, COMMENT_PART);
+    const covered = runs.find((run) => run.text === 'Covered')!;
+    const anchors = placedAnchors(layout, model);
+    expect(anchors.map((anchor) => [anchor.source.path, anchor.cardOwner])).toEqual([[covered.source!.path, true]]);
+    const [thread] = resolveDocxCommentThreadsOnPage(model.comments ?? [], anchors, runs, 0);
+    expect(thread!.anchors).toHaveLength(1);
+    expect(thread!.anchors[0]!.rects).toHaveLength(1);
+    expect(thread!.anchors[0]!.rects[0]!.x).toBeCloseTo(covered.x, 6);
+    expect(thread!.anchors[0]!.rects[0]!.width).toBeCloseTo(covered.w, 6);
+  });
+});
+
 describe('a comment in a paragraph that every page repeats', () => {
   it('is shown on each of them: a repeated paragraph is not one crossing pages', async () => {
     const { layout, model } = await paintedDocument(
@@ -192,6 +212,56 @@ describe('comment threads asked for a view other than the active one', () => {
     // The active view's anchors are untouched.
     const [again] = await doc.getCommentThreads(0);
     expect(again!.anchors[0]!.rects[0]!.x).toBeCloseTo(shown!.anchors[0]!.rects[0]!.x, 6);
+  });
+
+  it('runs keep the layout that produced them when the document changes its view', async () => {
+    const { layout, model } = await paintedDocument(body, COMMENT_PART);
+    const { doc } = documentOf(model, layout);
+    const final = await doc.collectPageRuns(0);
+    // The document now shows the markup view; its anchors are that view's.
+    documentLayoutRuntimeOf(doc).activeLayoutOptions = normalizeLayoutOptions(undefined, 0, true);
+    Object.assign(doc, { _commentAnchorRanges: null, _reviewProjectionIndex: null });
+    const markup = await doc.collectPageRuns(0);
+    expect(markup.some((run) => run.text.startsWith('Deleted'))).toBe(true);
+    const anchors = doc.commentAnchorRanges();
+    const after = final.find((run) => run.text === 'After')!;
+    // The runs collected in the final view still show the point where the
+    // final layout places it.
+    expect(resolveCommentAnchorRuns(anchors[0]!, final).map((run) => run.text)).toEqual(['After']);
+    const [thread] = resolveDocxCommentThreads(doc.comments, anchors, final);
+    expect(thread!.anchors[0]!.rects[0]!.x).toBeCloseTo(after.x, 6);
+    expect(resolveCommentAnchorRuns(anchors[0]!, markup)[0]!.text.startsWith('Deleted')).toBe(true);
+  });
+
+  it('asked of a worker document leave no anchors behind on the host', async () => {
+    const source = { story: 'body' as const, storyInstance: 'body', path: [0] };
+    const anchor = (): CommentAnchorRange => ({
+      commentId: '1', source, startRunIndex: 0, endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' },
+    });
+    const doc = Object.create(DocxDocument.prototype) as DocxDocument;
+    const requests: string[] = [];
+    Object.assign(doc, {
+      _mode: 'worker', _review: null,
+      _meta: { comments: [{ id: '1', text: 'c' }], revisions: [], commentAnchorRanges: [anchor()] },
+      _bridge: {
+        request: async (build: (id: number) => { type: string }) => {
+          const request = build(1);
+          requests.push(request.type);
+          return request.type === 'collectRuns'
+            ? { type: 'runsCollected', id: 1, runs: [] }
+            : { type: 'commentAnchorsCollected', id: 1, ranges: [anchor()] };
+        },
+      },
+    });
+    attachDocumentLayoutRuntime(doc, 0);
+    for (let day = 1; day <= 20; day += 1) await doc.getCommentThreads(0, { currentDate: day * 86_400_000 });
+    // One request per call: the worker keeps the anchors with its layouts.
+    expect(requests.filter((type) => type === 'collectCommentAnchors')).toHaveLength(20);
+    const retained = Object.values(doc as unknown as Record<string, unknown>)
+      .filter((value) => value instanceof Map || value instanceof Set || Array.isArray(value))
+      .map((value) => (value instanceof Map || value instanceof Set ? value.size : (value as unknown[]).length));
+    expect(retained.every((size) => size === 0)).toBe(true);
   });
 
   it('are collected by the render worker from the layout of that view', async () => {
@@ -290,6 +360,43 @@ describe('navigation to a comment that starts in clipped text and ends on a late
     expect(point.x).toBeLessThan(344);
     expect(point.y).toBeGreaterThan(144);
     expect(point.y).toBeLessThan(144 + 80);
+  });
+
+  it('goes to a point that the text box rectangles of the picture show, not to the gap between them', async () => {
+    // A 400px inline object under 257 disjoint rectangles in two groups,
+    // x 0..129 and 272..400: more than are tracked as separate pieces, so
+    // their extent stands for them, and its middle (x 200) lies in the gap.
+    const strips = [...Array.from({ length: 129 }, (_, index) => index),
+      ...Array.from({ length: 128 }, (_, index) => 272 + index)];
+    const clip: DocxClipRegion = {
+      x: 50, y: 100, width: 400, height: 20,
+      rects: strips.map((x) => ({ x, y: 0, width: 0.5, height: 20 })),
+    };
+    const source = { story: 'body' as const, storyInstance: 'body', path: [0] };
+    const run: DocxTextRunInfo = {
+      source, sourceRunIndex: 0, text: '', inlineContent: 'object', x: 50, y: 100, w: 400, h: 20,
+      fontSize: 0, font: '', clips: [clip],
+    };
+    const doc = {
+      comments: [{ id: '1', text: 'c' }],
+      pageCount: 1,
+      layoutComplete: true,
+      commentAnchorRanges: () => [{
+        commentId: '1', source, startRunIndex: 0, endRunIndex: 1,
+        reference: { source, runIndex: 1, affinity: 'preceding' as const },
+      }],
+      collectPageRuns: async () => [run],
+    } as unknown as DocxDocument;
+    const select = vi.fn<(commentId: string, page: number, point: Readonly<{ x: number; y: number }>) => void>();
+    const navigation = new DocxScrollCommentNavigation({
+      document: () => doc, destroyed: () => false, scale: () => 1, pageWidth: () => 612,
+      currentDate: () => undefined, showTrackedChanges: () => false, waitForLayout: async () => undefined, select,
+    });
+    expect(await navigation.goToComment('1')).toBe(true);
+    const point = select.mock.calls[0]![2];
+    expect(strips.some((x) => point.x > 50 + x && point.x < 50 + x + 0.5)).toBe(true);
+    expect(point.y).toBeGreaterThan(100);
+    expect(point.y).toBeLessThan(120);
   });
 
   it('does not go to a page that shows nothing of the comment', async () => {

@@ -2,7 +2,7 @@ import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
 import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage } from './comments';
 import { overlayBoxes } from './overlay-geometry';
-import { visiblePieces } from './run-clip';
+import { visiblePoint } from './run-clip';
 
 type ScrollBehavior = { behavior?: 'auto' | 'smooth' };
 
@@ -18,17 +18,13 @@ interface CommentNavigationHooks {
   select(commentId: string, page: number, point: Readonly<{ x: number; y: number }>, options?: ScrollBehavior): void;
 }
 
-/** A point of what the page shows of `run`: the middle of the first piece
- * of its first marking box that survives its clips (overlay-geometry.ts);
- * undefined for a run the clips hide whole. */
-function visiblePoint(run: Readonly<DocxTextRunInfo>): Readonly<{ x: number; y: number }> | undefined {
+/** A point of what the page shows of `run`: one that every clip of its
+ * first visible marking box shows (overlay-geometry.ts, run-clip.ts
+ * visiblePoint); undefined for a run the clips hide whole. */
+function shownPoint(run: Readonly<DocxTextRunInfo>): Readonly<{ x: number; y: number }> | undefined {
   for (const box of overlayBoxes([run])) {
-    const piece = visiblePieces(box, box.clips)[0];
-    if (!piece) continue;
-    return {
-      x: piece.reduce((sum, point) => sum + point.x, 0) / piece.length,
-      y: piece.reduce((sum, point) => sum + point.y, 0) / piece.length,
-    };
+    const point = visiblePoint(box, box.clips);
+    if (point) return point;
   }
   return undefined;
 }
@@ -165,7 +161,7 @@ export class DocxScrollCommentNavigation {
     let target: Readonly<{ x: number; y: number }> | undefined;
     for (const anchor of anchors) {
       for (const run of resolveCommentAnchorRunsOnPage(anchor, runs, shownPage)) {
-        target = visiblePoint(run);
+        target = shownPoint(run);
         if (target) break;
       }
       if (target) break;

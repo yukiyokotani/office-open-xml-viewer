@@ -171,17 +171,39 @@ export function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>
   return capped ? pieces.filter((piece) => someVisible(piece, clips ?? [], 0)) : pieces;
 }
 
-/** Whether some point of the convex `piece` lies inside every union of
- * `clips` from `from` on: one rectangle of each union at a time, depth
- * first, stopping at the first common area. Exact where the bounded cut in
+/** A point of `box` that every one of `clips` shows: the middle of a part
+ * of the box inside one rectangle of each union. Exact for any number of
+ * rectangles, where a piece of visiblePieces may be a superset whose middle
+ * lies in a gap between them. Undefined when nothing is visible. */
+export function visiblePoint(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point | undefined {
+  const part = visiblePart(placedPolygon(box.x, box.y, box.width, box.height, box.transform), clips ?? [], 0);
+  return part && {
+    x: part.reduce((sum, point) => sum + point.x, 0) / part.length,
+    y: part.reduce((sum, point) => sum + point.y, 0) / part.length,
+  };
+}
+
+/** A part of the convex `piece` that lies inside every union of `clips`
+ * from `from` on: one rectangle of each union at a time, depth first,
+ * stopping at the first common area. Exact where the bounded cut in
  * visiblePieces is a superset. */
-function someVisible(piece: readonly Point[], clips: readonly Readonly<DocxClipRegion>[], from: number): boolean {
-  if (from === clips.length) return true;
+function visiblePart(
+  piece: readonly Point[],
+  clips: readonly Readonly<DocxClipRegion>[],
+  from: number,
+): readonly Point[] | undefined {
+  if (from === clips.length) return piece;
   for (const region of clipRegions(clips[from]!, [piece as Point[]])) {
     const cut = cutPolygon(piece, region);
-    if (cut.length >= 3 && Math.abs(area(cut)) > 1e-9 && someVisible(cut, clips, from + 1)) return true;
+    if (!(cut.length >= 3 && Math.abs(area(cut)) > 1e-9)) continue;
+    const part = visiblePart(cut, clips, from + 1);
+    if (part) return part;
   }
-  return false;
+  return undefined;
+}
+
+function someVisible(piece: readonly Point[], clips: readonly Readonly<DocxClipRegion>[], from: number): boolean {
+  return visiblePart(piece, clips, from) !== undefined;
 }
 
 /** Whether any of a box placed like
