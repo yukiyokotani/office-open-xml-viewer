@@ -46,6 +46,7 @@ import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import type { RetainedRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import type { DocumentLayoutPartial } from './worker-protocol.js';
 import {
+  markProvisionalRenderWorkerLayout,
   projectRenderWorkerLayoutMeta,
   type RenderWorkerReviewIndexInput,
 } from './render-worker-metadata.js';
@@ -134,6 +135,7 @@ export async function paginateRenderWorkerDocumentProgressively(
           return;
         }
         publishedLayout = retainedPreview;
+        markProvisionalRenderWorkerLayout(retainedPreview);
         publisher.publish(publicationOf(preview.layout, preview.exact, source, review, unchangedPages));
       },
     },

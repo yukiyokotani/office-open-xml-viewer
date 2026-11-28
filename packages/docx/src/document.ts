@@ -1865,28 +1865,6 @@ export class DocxDocument {
     return this._commentAnchorRanges;
   }
 
-  /** Worker mode: the comment anchors of the layout that `view` selects,
-   * placed against that layout. The active view's are
-   * `commentAnchorRanges()`; another view's (the tracked-change view of a
-   * document shown in its final state) are asked of the worker, which keeps
-   * them with the layout for as long as it keeps the layout. The host keeps
-   * none: they live with the run array they were collected for. */
-  private async _workerCommentAnchorRangesFor(requested: LayoutOptions): Promise<readonly CommentAnchorRange[]> {
-    if (this._isActiveView(requested)) return this.commentAnchorRanges();
-    if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
-    const res = await this._bridge.request(
-      (id) => ({
-        type: 'collectCommentAnchors',
-        id,
-        currentDateMs: requested.currentDateMs,
-        showTrackedChanges: requested.showTrackedChanges === true,
-      }) satisfies RenderWorkerRequest,
-    );
-    const collected = res as Extract<RenderWorkerResponse, { type: 'commentAnchorsCollected' }>;
-    adoptCommentAnchorPlacements(collected.ranges, collected.placements);
-    return collected.ranges;
-  }
-
   private _layoutOptionsOfView(
     view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
   ): LayoutOptions {
@@ -2297,11 +2275,26 @@ export class DocxDocument {
     let anchors: readonly CommentAnchorRange[];
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
-      const res = await this._bridge.request(
-        (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
-      );
-      runs = (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
-      anchors = await this._workerCommentAnchorRangesFor(produced);
+      // The anchors of the active view are the document's own (its metadata
+      // follows the worker's publications in message order). Another view's
+      // come with the runs, read from the same retained layout; so do the
+      // active view's if the document left that view while the runs were
+      // pending.
+      const collect = async (commentAnchors: boolean) => (await this._bridge.request(
+        (id) => ({
+          type: 'collectRuns', id, pageIndex, opts: wireOpts, ...(commentAnchors ? { commentAnchors: true as const } : {}),
+        }) satisfies RenderWorkerRequest,
+      )) as Extract<RenderWorkerResponse, { type: 'runsCollected' }>;
+      const commented = this.comments.length > 0;
+      let collected = await collect(commented && !this._isActiveView(produced));
+      if (commented && !collected.commentAnchorRanges && !this._isActiveView(produced)) collected = await collect(true);
+      runs = collected.runs;
+      if (collected.commentAnchorRanges) {
+        adoptCommentAnchorPlacements(collected.commentAnchorRanges, collected.commentAnchorPlacements);
+        anchors = collected.commentAnchorRanges;
+      } else {
+        anchors = this.commentAnchorRanges();
+      }
     } else {
       const runtime = documentLayoutRuntimeOf(this);
       const services = runtime.services;

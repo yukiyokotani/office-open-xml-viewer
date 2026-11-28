@@ -91,29 +91,40 @@ export function renderWorkerLayoutMeta(
   return projectRenderWorkerLayoutMeta(layout, source, review);
 }
 
+const PROVISIONAL_LAYOUTS = new WeakSet<object>();
+
+/** Record that `layout` is a prefix published while the document is still
+ * being paginated: whichever request reads it later, its review anchors are
+ * projected as from a prefix, as its publication was. */
+export function markProvisionalRenderWorkerLayout(layout: object): void {
+  PROVISIONAL_LAYOUTS.add(layout);
+}
+
 const COMMENT_ANCHORS_BY_LAYOUT = new WeakMap<object, Pick<
   DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'
 >>();
 
 /** The comment anchors of one retained worker variant, placed against it,
- * without selecting it: the host joins them to runs it collects for a view
- * other than the active one. Kept with the layout. */
+ * without selecting it: the host binds them to the runs it collects from
+ * that layout. A layout that is a published prefix is projected as one, as
+ * its publication was. Kept with the layout. */
 export function renderWorkerCommentAnchors(
   doc: RetainedRenderWorkerDocumentLayout,
   review: RenderWorkerReviewIndexInput,
-  currentDateMs: number,
+  currentDate: Date | number | undefined,
   showTrackedChanges: boolean,
 ): Pick<DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'> {
   const source = layoutSourceStoreOf(doc.layoutServices);
   if (!source) throw new Error('Document layout source is not initialized');
   const layout = doc.layoutVariants.layoutFor(normalizeLayoutOptions(
-    currentDateMs,
+    currentDate,
     doc.defaultCurrentDateMs,
     showTrackedChanges,
   ));
   let anchors = COMMENT_ANCHORS_BY_LAYOUT.get(layout);
   if (!anchors) {
-    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] });
+    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] },
+      { provisional: PROVISIONAL_LAYOUTS.has(layout) });
     anchors = {
       commentAnchorRanges: meta.commentAnchorRanges,
       commentAnchorPlacements: meta.commentAnchorPlacements,

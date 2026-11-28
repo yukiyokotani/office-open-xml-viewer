@@ -183,8 +183,11 @@ export function buildDocxTextLayer(
           : piece.width === undefined && piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
             ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;overflow:clip;` : '') +
         pieceTransform +
-        `white-space:pre;color:transparent;cursor:${pieceLink ? 'pointer' : 'text'};pointer-events:all;` +
-        (piece.hidden ? 'user-select:none;-webkit-user-select:none;' : '');
+        // Text the page does not show takes no pointer either: its box can
+        // reach into the visible part of its clip and would cover what is
+        // seen there (a hyperlink).
+        `white-space:pre;color:transparent;cursor:${pieceLink ? 'pointer' : 'text'};` +
+        (piece.hidden ? 'pointer-events:none;user-select:none;-webkit-user-select:none;' : 'pointer-events:all;');
       if (pieceLink && onHyperlinkClick) {
         const link = pieceLink;
         span.title = link.kind === 'external' ? link.url : link.ref;

@@ -659,22 +659,18 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
         textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
-      post({ type: 'runsCollected', id, runs });
-      return;
-    }
-    if (req.type === 'collectCommentAnchors') {
-      if (!doc || !reviewIndexInput) throw new Error('Document not loaded');
-      const anchors = renderWorkerCommentAnchors(
-        doc,
-        reviewIndexInput,
-        req.currentDateMs,
-        req.showTrackedChanges,
-      );
+      // Read in the same turn as the runs, from the same retained layout.
+      const anchors = req.commentAnchors && reviewIndexInput
+        ? renderWorkerCommentAnchors(doc, reviewIndexInput, req.opts.currentDate, req.opts.showTrackedChanges === true)
+        : undefined;
       post({
-        type: 'commentAnchorsCollected',
+        type: 'runsCollected',
         id,
-        ranges: anchors.commentAnchorRanges ?? [],
-        placements: anchors.commentAnchorPlacements,
+        runs,
+        ...(anchors ? {
+          commentAnchorRanges: anchors.commentAnchorRanges ?? [],
+          commentAnchorPlacements: anchors.commentAnchorPlacements,
+        } : {}),
       });
       return;
     }

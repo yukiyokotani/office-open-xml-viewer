@@ -20,11 +20,15 @@ import { reviewProjectionIndexForDocument } from './layout/text-index.js';
 import type { DocumentLayout } from './layout/types.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
+import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { projectRenderWorkerLayoutMeta, renderWorkerCommentAnchors } from './render-worker-metadata.js';
+import { paginateRenderWorkerDocumentProgressively } from './render-worker-progressive.js';
+import { buildDocxTextLayer } from './text-layer.js';
 import { DocxScrollCommentNavigation } from './scroll-comment-navigation.js';
 import { installDom, makeEl } from './scroll-viewer-test-dom.js';
 import {
-  inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART,
+  fakeElement, inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART, withFakeDocument,
+  type FakeElement,
 } from './test-support/painted-glyphs.test-support.js';
 import { resolveRevisionAnchorRuns } from './revisions.js';
 import { textRunsForPage } from './text-run-projection.js';
@@ -382,9 +386,7 @@ describe('comment threads asked for a view other than the active one', () => {
           const request = build(1);
           posted.push(request);
           await Promise.resolve();
-          return request.type === 'collectRuns'
-            ? { type: 'runsCollected', id: 1, runs: [] }
-            : { type: 'commentAnchorsCollected', id: 1, ranges: [] };
+          return { type: 'runsCollected', id: 1, runs: [], commentAnchorRanges: [] };
         },
       },
     });
@@ -393,8 +395,45 @@ describe('comment threads asked for a view other than the active one', () => {
     const pending = doc.collectPageRuns(0, { currentDate: date });
     date.setTime(Number.NaN);
     await expect(pending).resolves.toEqual([]);
-    expect(posted.map((request) => [request.type, request.opts?.currentDate ?? (request as { currentDateMs?: number }).currentDateMs]))
-      .toEqual([['collectRuns', 86_400_000], ['collectCommentAnchors', 86_400_000]]);
+    expect(posted.map((request) => [request.type, request.opts?.currentDate])).toEqual([['collectRuns', 86_400_000]]);
+  });
+
+  it('a worker document takes them from the answer that brought the runs', async () => {
+    // One answer, read from one retained layout: a publication between two
+    // requests cannot give the runs and the anchors different layouts.
+    const source = { story: 'body' as const, storyInstance: 'body', path: [0] };
+    const run: DocxTextRunInfo = {
+      source, sourceRunIndex: 0, text: 'Marked', x: 10, y: 20, w: 30, h: 12, fontSize: 12, font: '12px sans-serif',
+    };
+    const range: CommentAnchorRange = {
+      commentId: '1', source, startRunIndex: 0, endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' },
+    };
+    const doc = Object.create(DocxDocument.prototype) as DocxDocument;
+    const posted: { type: string; commentAnchors?: true }[] = [];
+    Object.assign(doc, {
+      _mode: 'worker', _review: null,
+      _meta: { comments: [{ id: '1', text: 'c' }], revisions: [], commentAnchorRanges: [] },
+      _bridge: {
+        request: async (build: (id: number) => { type: string; commentAnchors?: true }) => {
+          const request = build(1);
+          posted.push(request);
+          // Only the answer to a request for both carries the range.
+          return {
+            type: 'runsCollected', id: 1, runs: [run],
+            ...(request.commentAnchors ? { commentAnchorRanges: [range] } : {}),
+          };
+        },
+      },
+    });
+    attachDocumentLayoutRuntime(doc, 0);
+    const threads = await doc.getCommentThreads(0, { showTrackedChanges: true });
+    expect(posted).toEqual([expect.objectContaining({ type: 'collectRuns', commentAnchors: true })]);
+    expect(threads).toHaveLength(1);
+    // The active view asks for the runs alone and reads the document's anchors.
+    posted.length = 0;
+    expect(await doc.getCommentThreads(0)).toEqual([]);
+    expect(posted).toEqual([expect.not.objectContaining({ commentAnchors: true })]);
   });
 
   it('runs keep the layout that produced them when the document changes its view', async () => {
@@ -431,16 +470,14 @@ describe('comment threads asked for a view other than the active one', () => {
         request: async (build: (id: number) => { type: string }) => {
           const request = build(1);
           requests.push(request.type);
-          return request.type === 'collectRuns'
-            ? { type: 'runsCollected', id: 1, runs: [] }
-            : { type: 'commentAnchorsCollected', id: 1, ranges: [anchor()] };
+          return { type: 'runsCollected', id: 1, runs: [], commentAnchorRanges: [anchor()] };
         },
       },
     });
     attachDocumentLayoutRuntime(doc, 0);
     for (let day = 1; day <= 20; day += 1) await doc.getCommentThreads(0, { currentDate: day * 86_400_000 });
     // One request per call: the worker keeps the anchors with its layouts.
-    expect(requests.filter((type) => type === 'collectCommentAnchors')).toHaveLength(20);
+    expect(requests).toEqual(Array.from({ length: 20 }, () => 'collectRuns'));
     const retained = Object.values(doc as unknown as Record<string, unknown>)
       .filter((value) => value instanceof Map || value instanceof Set || Array.isArray(value))
       .map((value) => (value instanceof Map || value instanceof Set ? value.size : (value as unknown[]).length));
@@ -625,5 +662,65 @@ describe('find beside text that a clip hides', () => {
       [[{ runIndex: visible, start: 0, end: 2 }]]);
     // The hidden letter alone is no match; each visible one is.
     expect(await find.find('A')).toHaveLength(2);
+  });
+});
+
+describe('comment anchors read from a prefix the render worker has published', () => {
+  it('are projected as from a prefix: no fallback stands in for a paragraph still to come', async () => {
+    // "Unrelated" on page one; "Before" and an empty paragraph holding a
+    // reference-only comment on page two; more pages follow.
+    const filler = Array.from({ length: 400 }, (_, index) => `<w:p>${sized(`filler ${index}`)}</w:p>`).join('');
+    const { model } = await paintedDocument(`<w:p>${sized('Unrelated')}</w:p>`
+      + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${sized('Before')}</w:p><w:p>${REFERENCE}</w:p>${filler}`, COMMENT_PART);
+    const source = layoutSourceStore(model);
+    const retained = retainRenderWorkerDocumentLayout(
+      source, createLayoutServices(source, { measureContext: oracleMeasureContext() }), 0);
+    const review = { comments: model.comments ?? [], revisions: [] };
+    const seen: { pages: number; published: number; read: number }[] = [];
+    await paginateRenderWorkerDocumentProgressively(retained, source, {
+      publish: (publication) => {
+        // What a request for the runs and anchors of this view reads now.
+        const read = renderWorkerCommentAnchors(retained, review, 0, false);
+        seen.push({
+          pages: publication.pageCount,
+          published: publication.commentAnchorRanges?.length ?? 0,
+          read: read.commentAnchorRanges?.length ?? 0,
+        });
+      },
+      progress: () => undefined,
+    }, { currentDateMs: 0 }, undefined, review);
+    const first = seen.find((publication) => publication.pages === 1);
+    expect(first).toEqual({ pages: 1, published: 0, read: 0 });
+    // The complete layout places the comment.
+    expect(renderWorkerCommentAnchors(retained, review, 0, false).commentAnchorRanges).toHaveLength(1);
+  });
+});
+
+describe('text an exact-height row hides, in the text layer', () => {
+  it('takes no pointer: its box does not cover what the row shows', async () => {
+    const { runs } = await paintedDocument(
+      '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+      + '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="240" w:hRule="exact"/></w:trPr>'
+      + `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p>${sized('Visible')}<w:r><w:br/></w:r>${sized('Secret')}</w:p>`
+      + '</w:tc></w:tr></w:tbl><w:p/>');
+    const spans: FakeElement[] = [];
+    const collect = (element: FakeElement): void => {
+      if (element.children.length === 0 && (element as { textContent?: string }).textContent) spans.push(element);
+      element.children.forEach(collect);
+    };
+    withFakeDocument(() => {
+      const layer = fakeElement();
+      buildDocxTextLayer(layer as never, runs, 612, 792);
+      collect(layer);
+    });
+    const of = (value: string) => spans.filter((span) => (
+      span.dataset.runIndex === String(runs.findIndex((run) => run.text === value))));
+    expect(of('Secret').length).toBeGreaterThan(0);
+    for (const span of of('Secret')) {
+      expect(span.style.cssText).toContain('pointer-events:none');
+      expect(span.style.cssText).not.toContain('pointer-events:all');
+    }
+    for (const span of of('Visible')) expect(span.style.cssText).toContain('pointer-events:all');
   });
 });

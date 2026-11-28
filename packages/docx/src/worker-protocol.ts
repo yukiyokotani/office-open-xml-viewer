@@ -164,11 +164,10 @@ export type RenderWorkerRequest =
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
-  | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
-  // The comment anchors of one layout variant, placed against it, without
-  // selecting it: comment threads asked for a view other than the active one
-  // join that view's runs to that view's anchors.
-  | { type: 'collectCommentAnchors'; id: number; currentDateMs: number; showTrackedChanges: boolean }
+  // `commentAnchors` asks, with the runs, for the comment anchors of the
+  // layout they are read from, placed against it: one answer from one
+  // retained layout, so the two cannot come from different publications.
+  | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions; commentAnchors?: true }
   | {
       type: 'hitTestElement';
       id: number;
@@ -220,12 +219,13 @@ export type RenderWorkerResponse =
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[]; diagnostics?: readonly LayoutDiagnostic[] }
-  | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
   | {
-      type: 'commentAnchorsCollected';
+      type: 'runsCollected';
       id: number;
-      ranges: CommentAnchorRange[];
-      placements?: (CommentAnchorPlacement | null)[];
+      runs: DocxTextRunInfo[];
+      /** With `commentAnchors`: the anchors of the runs' layout. */
+      commentAnchorRanges?: CommentAnchorRange[];
+      commentAnchorPlacements?: (CommentAnchorPlacement | null)[];
     }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
