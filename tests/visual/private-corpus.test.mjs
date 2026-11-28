@@ -1216,3 +1216,37 @@ test('a baseline captured without input binding is refused with the bootstrap st
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
+
+test('the baseline command resolves a relative destination once, against the caller', () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'selfvrt-relative-')));
+  const candidate = join(scratch, 'candidate');
+  const caller = join(scratch, 'caller');
+  const previous = process.cwd();
+  try {
+    mkdirSync(join(candidate, 'baseline'), { recursive: true });
+    mkdirSync(caller);
+    git(candidate, 'init', '--quiet');
+    writeFileSync(join(candidate, 'README'), 'x');
+    git(candidate, 'add', 'README');
+    git(candidate, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', 'x');
+    const revision = git(candidate, 'rev-parse', 'HEAD');
+    process.chdir(caller);
+    const { worktree } = createBaselineWorktree({ source: candidate, destination: 'baseline', base: revision });
+    assert.equal(worktree, join(caller, 'baseline'));
+    // The candidate's own empty `baseline/` folder was never touched.
+    assert.deepEqual(readdirSync(join(candidate, 'baseline')), []);
+  } finally {
+    process.chdir(previous);
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('importing the command modules from stdin does not run or throw', () => {
+  for (const module of ['./baseline-worktree.mjs', './corpus-features.mjs']) {
+    const url = new URL(module, import.meta.url).href;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-'], {
+      input: `await import(${JSON.stringify(url)});`, encoding: 'utf8', timeout: 60000,
+    });
+    assert.equal(child.status, 0, `${module}: ${child.stderr}`);
+  }
+});

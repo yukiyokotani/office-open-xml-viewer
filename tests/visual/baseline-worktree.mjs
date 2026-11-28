@@ -52,7 +52,9 @@ function specimenChanges(source, revision) {
  * working tree adds or modifies relative to `base`. Returns the worktree's
  * real path and the copied repository paths. If the checkout or a write
  * fails, the worktree this call registered is removed again. */
-export function createBaselineWorktree({ source, destination, base }) {
+export function createBaselineWorktree({ source, destination: requested, base }) {
+  // One absolute path for the preflight, `git worktree add` and rollback.
+  const destination = resolve(requested);
   let from;
   try {
     from = realpathSync(git(source, 'rev-parse', '--show-toplevel').trim());
@@ -115,8 +117,17 @@ export function createBaselineWorktree({ source, destination, base }) {
   return { worktree, copied: copies.map(({ path }) => path) };
 }
 
-// Canonical paths, so that the command also runs when invoked through a symlink.
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+// Canonical paths, so that the command also runs when invoked through a
+// symlink; a non-file argv[1] (stdin `-`, REPL) is simply not this script.
+function isEntryPoint() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   const [destination, base, ...rest] = process.argv.slice(2);
   if (!destination || !base || rest.length > 0) {
     console.error('usage: node tests/visual/baseline-worktree.mjs <newWorktreePath> <baseRevision>');

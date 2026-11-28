@@ -742,7 +742,16 @@ function main(argv) {
   );
 }
 
-// Canonical paths, so that the tool also runs when invoked through a symlink.
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+// Canonical paths, so that the command also runs when invoked through a
+// symlink; a non-file argv[1] (stdin `-`, REPL) is simply not this script.
+function isEntryPoint() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv.slice(2));
 }
