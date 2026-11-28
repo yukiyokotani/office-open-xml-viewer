@@ -147,6 +147,43 @@ fn untagged_styles_resolve_no_language_attribute() {
 }
 
 #[test]
+fn untagged_items_build_no_cascade_for_their_own_class() {
+    // Styles naming no language give every §20.358 class none, so a field,
+    // ruby base or custom citation label after Han text is not classified:
+    // it builds (and charges the work budget for) no cascade beyond those of
+    // the same item after Latin text, whose class needs no lookup.
+    let builds = |body: &str| {
+        let before = crate::style::CASCADE_BUILDS.with(|count| count.get());
+        let document = read_fixture(Fixture {
+            body,
+            ..Fixture::default()
+        });
+        let after = crate::style::CASCADE_BUILDS.with(|count| count.get());
+        assert!(text_runs(paragraphs(&document.body)[0])
+            .iter()
+            .all(|run| run.lang_script_class.is_none()));
+        after - before
+    };
+    let field =
+        |lead: &str| format!("<text:p>{lead}<text:page-number>1</text:page-number></text:p>");
+    assert_eq!(builds(&field("\u{6F22}")), builds(&field("a")));
+    let ruby = |lead: &str, base: &str| {
+        format!("<text:p>{lead}<text:ruby><text:ruby-base>{base}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:p>")
+    };
+    assert_eq!(
+        builds(&ruby("\u{6F22}", "\u{0434}")),
+        builds(&ruby("\u{6F22}", "\u{6F22}"))
+    );
+    let note = |lead: &str, label: &str| {
+        format!("<text:p>{lead}<text:note text:note-class=\"footnote\"><text:note-citation text:label=\"{label}\">{label}</text:note-citation><text:note-body><text:p>n</text:p></text:note-body></text:note></text:p>")
+    };
+    assert_eq!(
+        builds(&note("\u{6F22}", "a")),
+        builds(&note("\u{6F22}", "\u{6F22}"))
+    );
+}
+
+#[test]
 fn western_language_and_country_become_the_run_language() {
     let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs"/></style:style><style:style style:name="Ro" style:family="text"><style:text-properties fo:language="ro"/></style:style><style:style style:name="None" style:family="text"><style:text-properties fo:language="none" fo:country="RS"/></style:style>"#;
     let document = read_fixture(Fixture {

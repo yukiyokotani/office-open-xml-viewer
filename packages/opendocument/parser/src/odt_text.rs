@@ -909,7 +909,10 @@ impl<'a> Reader<'a> {
         // A custom label is classified on its own text (it starts the note,
         // so its weak characters are Latin), keeping the base properties'
         // font and geometry: only its class language follows its text.
+        // Styles naming no language give the label none without classifying
+        // it (`RunProperties::names_language`).
         let label_language = match label {
+            Some(_) if !properties.names_language => None,
             Some(label) => self.own_text_language(
                 &contexts,
                 context,
@@ -1107,7 +1110,12 @@ impl<'a> Reader<'a> {
                     // is its own: the language is that of the class of the
                     // text the item shows, not of the character before it.
                     // (Its other properties stay those of its position.)
+                    // Styles that name no language for any class give every
+                    // class none (`RunProperties::names_language`): the item
+                    // is not classified and builds no cascade.
+                    let names_language = cache[&key].names_language;
                     let language = match &inline.items[item as usize] {
+                        _ if !names_language => None,
                         // A page number or count is set in ASCII digits or
                         // letters (`page_number_format`): Latin in Table 22.
                         Item::Field { .. } => {

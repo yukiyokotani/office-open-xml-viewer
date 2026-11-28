@@ -360,6 +360,13 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Cascades built on this thread (tests assert that untagged items build
+    /// no extra cascade for language).
+    pub(crate) static CASCADE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
 fn count_language_lookup(namespace: &str, name: &str) {
     if is_language_attribute(namespace, name) {
         LANGUAGE_LOOKUPS.with(|count| count.set(count.get() + 1));
@@ -392,6 +399,8 @@ impl<'a> Cascade<'a> {
     /// to resolve properties, and it counts its own steps: one per style
     /// of the search order, per attribute and per captured element node.
     pub fn build(styles: Vec<StyleRef<'a>>, group: Group) -> Result<Self, String> {
+        #[cfg(test)]
+        CASCADE_BUILDS.with(|count| count.set(count.get() + 1));
         budget::tick(styles.iter().fold(0usize, |steps, style| {
             steps.saturating_add(1).saturating_add(
                 style
