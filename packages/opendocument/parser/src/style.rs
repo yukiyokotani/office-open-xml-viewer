@@ -106,6 +106,10 @@ pub type Key = (String, String);
 #[derive(Debug, Default, Clone)]
 pub struct Properties {
     pub attributes: HashMap<Key, String>,
+    /// The keys of `attributes` that name a language
+    /// (`is_language_attribute`), classified once when the style is read
+    /// (text-properties only), so cascade builds never scan names.
+    pub language: Vec<Key>,
     /// Child elements of the group (e.g. `style:tab-stops`), by local name,
     /// kept as their serialized children for the readers that admit them.
     pub elements: HashMap<String, Vec<Element>>,
@@ -376,6 +380,20 @@ fn count_language_lookup(namespace: &str, name: &str) {
     }
 }
 
+/// A text-properties group whose language attributes are classified once.
+fn text_properties(attributes: HashMap<Key, String>) -> Properties {
+    let language = attributes
+        .keys()
+        .filter(|key| is_language_attribute(&key.0, &key.1))
+        .cloned()
+        .collect();
+    Properties {
+        attributes,
+        language,
+        ..Properties::default()
+    }
+}
+
 /// The ODF 1.3 Part 3 text-properties attributes that name a language for
 /// a script class: §20.202/§20.302/§20.303 language, §20.222/§20.356/§20.357
 /// script, §20.188/§20.256/§20.257 country and §§20.343–20.345
@@ -430,7 +448,7 @@ impl<'a> Cascade<'a> {
                     {
                         entry.insert(order.len());
                         order.push((key, value.as_str()));
-                        if text_group && is_language_attribute(&key.0, &key.1) {
+                        if text_group && properties.language.contains(key) {
                             names_language = true;
                             language_depths.push((key, position));
                         }
@@ -543,10 +561,7 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
             attributes: HashMap::new(),
             groups: HashMap::from([(
                 TEXT.to_string(),
-                Properties {
-                    attributes: attributes(text),
-                    ..Properties::default()
-                },
+                text_properties(attributes(text)),
             )]),
         };
         level_text.insert(key, style);
@@ -607,9 +622,13 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Option
             // Other producers' extension groups carry nothing ODF defines.
             _ => continue,
         };
-        let mut properties = Properties {
-            attributes: attributes(child),
-            ..Properties::default()
+        let mut properties = if group == TEXT {
+            text_properties(attributes(child))
+        } else {
+            Properties {
+                attributes: attributes(child),
+                ..Properties::default()
+            }
         };
         for element in child.kids().filter(|n| n.is_element()) {
             // Each element-valued property occurs at most once per group.
