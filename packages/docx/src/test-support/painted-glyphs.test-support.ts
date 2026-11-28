@@ -265,7 +265,7 @@ const encode = (text: string) => new TextEncoder().encode(`<?xml version="1.0" e
 let ready: Promise<unknown> | undefined;
 export function initParser(): Promise<unknown> {
   return ready ??= readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url))
-    .then((module) => init({ module_or_path: module }));
+    .then((wasmBytes) => init({ module_or_path: wasmBytes }));
 }
 
 /** Lay out a one-section document of `body` (compatibility mode 15; text
