@@ -232,8 +232,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
 
       expect(layer.children.length).toBeGreaterThanOrEqual(1);
       // Every box must sit within its matched run's drawn extent: left ≥ run.x,
-      // right ≤ run.x + run.w (+1px slack for sub-pixel rounding), top == run.y,
-      // and a positive width. This is the pixel-level "highlight lands on the
+      // right ≤ run.x + run.w (+1px slack for sub-pixel rounding), top and
+      // height those of the run's font box, and a positive width. This is the pixel-level "highlight lands on the
       // glyphs" assertion.
       //
       // buildDocxHighlightLayer positions each box as a PERCENTAGE of the
@@ -252,7 +252,16 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       expect(width).toBeGreaterThan(0);
       expect(left).toBeGreaterThanOrEqual(run.x - 0.5);
       expect(left + width).toBeLessThanOrEqual(run.x + run.w + 1);
-      expect(top).toBeCloseTo(run.y, 1);
+      // Across the run the box is the run's font box (`highlightBounds`),
+      // where its glyphs are painted, not the line box (`y`/`h`): a line
+      // taller than its text (line spacing above the font box) is not
+      // marked over the leading. The font box lies inside the line box.
+      const fontBox = run.highlightBounds ?? { y: run.y, height: run.h };
+      const height = (parseFloat(box.style.height) / 100) * CSS_H;
+      expect(top).toBeCloseTo(fontBox.y, 1);
+      expect(height).toBeCloseTo(fontBox.height, 1);
+      expect(top).toBeGreaterThanOrEqual(run.y - 0.5);
+      expect(top + height).toBeLessThanOrEqual(run.y + run.h + 0.5);
       // The box background is the (translucent) highlight fill, not empty.
       expect(box.style.background).toMatch(/rgba/);
     });
