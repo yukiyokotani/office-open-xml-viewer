@@ -31,7 +31,12 @@
 // Operator mistakes this is meant to catch: the wrong or a modified checkout,
 // a forgotten, renamed or stale specimen copy, images left by an earlier run
 // or a removed document, symlinked output directories, and non-regular files
-// (every read and write goes through checked-read.mjs). Not covered: a local
+// (every read and write goes through checked-read.mjs).
+//
+// What the harness changes on disk: it writes manifests and images below its
+// own checkout, and it removes only item images of the document it is
+// rendering (pages a previous run of that document left). Images of documents
+// the corpus no longer lists are reported, not removed. Not covered: a local
 // process that replaces files while a run is in progress, and whatever the
 // renderer loads besides the input (dev server reuse, WASM provenance).
 import {
@@ -40,7 +45,6 @@ import {
   mkdirSync,
   readdirSync,
   realpathSync,
-  rmdirSync,
   unlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -517,18 +521,15 @@ function generatedFiles(directory, pattern) {
 }
 
 const ITEM_IMAGE = /^(page|sheet|slide)-\d+\.png$/;
-const ITEM_IMAGE_OR_MANIFEST = /^(?:(page|sheet|slide)-\d+\.png|manifest\.json)$/;
 
-/** Remove the files the harness generated for documents the corpus no longer
- * lists (a removed or renamed input), then their directories if empty, so no
- * image of theirs outlives the run. `tree` holds one directory per document.
- * A symlink among its entries, or a generated name that is not a regular
- * file, fails the run instead of being skipped or removed. */
-function removeStaleDocuments(tree, files, directory, generated) {
+/** Fail when `tree`, which holds one directory per document, has images of a
+ * document the corpus does not list (a removed or renamed input, or another
+ * run's output). The harness deletes nothing it did not write for the
+ * document it is rendering, so the operator removes them. A listed document's
+ * directory is recognized by file identity, not by its spelling: on a
+ * case-insensitive file system `Deck.pptx` writes into an existing `deck/`. */
+function assertNoUnlistedDocuments(tree, files, directory) {
   assertNoSymlinkBelowCheckout(tree);
-  // A listed document's directory is recognized by file identity, not by its
-  // spelling: on a case-insensitive file system `Deck.pptx` writes into an
-  // existing `deck/`.
   const identity = (path) => {
     try {
       const { dev, ino } = lstatSync(path);
@@ -547,24 +548,15 @@ function removeStaleDocuments(tree, files, directory, generated) {
     if (error.code === 'ENOENT') return;
     throw error;
   }
-  // Validate the whole cleanup set first, so a foreign entry in any stale
-  // document stops the run before the first removal.
-  const removals = [];
-  for (const entry of entries) {
-    const path = join(tree, entry.name);
-    if (entry.isSymbolicLink()) {
-      throw new Error(`refusing to use a symlinked self-VRT output path: ${path}`);
-    }
-    if (!entry.isDirectory() || listed.has(identity(path))) continue;
-    removals.push({ path, stale: generatedFiles(path, generated) });
-  }
-  for (const { path, stale } of removals) {
-    for (const file of stale) unlinkSync(join(path, file));
-    try {
-      rmdirSync(path);
-    } catch {
-      // Files the harness did not generate remain, and so does the directory.
-    }
+  const unlisted = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(tree, entry.name))
+    .filter((path) => !listed.has(identity(path)) && readdirSync(path).some((file) => ITEM_IMAGE.test(file)));
+  if (unlisted.length > 0) {
+    throw new Error(
+      `self-VRT output holds images of documents the corpus does not list: ${unlisted.join(', ')}. `
+      + 'Delete these directories (or the whole output tree) and run again',
+    );
   }
 }
 
@@ -676,8 +668,8 @@ function assertExactManifest(actual, expected, path) {
 }
 
 /** Call from a suite hook (`beforeAll`), never while tests are being
- * collected: it writes the snapshot manifest and removes stale output, which a
- * list-only run must not do.
+ * collected: it writes the snapshot manifest and fails on leftover output,
+ * which a list-only run must not do.
  *
  * Fail closed on an empty/stale corpus and bind every baseline to an explicit
  * merge-base revision. This prevents a candidate server or unrelated old
@@ -709,17 +701,11 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
   const { outputPrefix, directory: configured } = corpusConfig(corpus);
   const directory = configured ?? format;
   if (snapshot) {
-    // Before the cleanup removes anything.
-    assertOutputWritable(path);
-    removeStaleDocuments(
-      join(location.directory, `${outputPrefix}${directory}`), files, directory, ITEM_IMAGE_OR_MANIFEST,
-    );
+    assertNoUnlistedDocuments(join(location.directory, `${outputPrefix}${directory}`), files, directory);
     writeOutput(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
     assertExactManifest(readBaselineJson(location, path), manifest, path);
-    removeStaleDocuments(
-      resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), files, directory, ITEM_IMAGE,
-    );
+    assertNoUnlistedDocuments(resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), files, directory);
   }
 }
 

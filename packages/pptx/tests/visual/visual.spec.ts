@@ -244,7 +244,7 @@ function describeSelfRegression(
 ): void {
   test.describe(title, () => {
     // In a hook, not at collection: preparation writes the snapshot manifest
-    // and removes stale output, which `--list` must not do.
+    // and fails on leftover output, which `--list` must not do.
     if (files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({

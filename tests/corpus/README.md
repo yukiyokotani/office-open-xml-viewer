@@ -129,9 +129,9 @@ private data, so anyone can run it:
 target=main    # the branch the PR targets; it must already have `pnpm vrt:corpus`
 git fetch origin "$target"
 base=$(git rev-parse "origin/$target")                               # the target's current head
-git worktree add --detach /tmp/ooxml-vrt-baseline "$base"            # previous renderer
-# Specimens this branch adds or rewrites, so both renderers draw the same bytes.
-node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
+# The previous renderer: a new worktree at $base, with the specimens this branch
+# adds or rewrites so both renderers draw the same bytes. The path must not exist.
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
 (cd /tmp/ooxml-vrt-baseline && pnpm install --frozen-lockfile && pnpm build:wasm \
   && VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
 pnpm build:wasm                                                      # changed renderer

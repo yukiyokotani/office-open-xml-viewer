@@ -29,10 +29,13 @@ comparison establishes. In short:
 
 Inputs are bound by content, so it does not matter whether Git tracks, ignores
 or reports a file: a missing, renamed or different input changes the input
-list or a digest and fails the comparison. Output is written, and stale output
-removed, only below the checkout and never through a symlink; documents the
-corpus no longer lists lose their generated files at the next snapshot
-(baseline) or comparison (candidate screenshots).
+list or a digest and fails the comparison.
+
+The harness writes manifests and images only below its own checkout and never
+through a symlink. It removes only earlier item images of the document it is
+rendering. Images of documents the corpus no longer lists are not removed: a
+snapshot (baseline tree) or a comparison (candidate screenshots) that finds
+them fails and names the directories for the operator to delete.
 
 ## Harness bootstrap exceptions
 
@@ -49,28 +52,22 @@ two more things are allowed:
 ## Added or changed public specimens
 
 A specimen that the PR under test adds or rewrites has no image from the
-previous renderer. Copy the candidate's specimen files into the baseline
-worktree, so both renderers draw identical bytes, and set
-`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison
-run:
+previous renderer. The baseline worktree therefore gets the candidate's
+specimen files, so both renderers draw identical bytes, and
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` is set for both the snapshot and the
+comparison run. One command makes that worktree:
 
 ```bash
-node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
 ```
 
 The command (built-ins only, run from the root of the candidate checkout)
-requires the destination to be the root of another Git checkout whose HEAD is
-`$base`. It copies the tracked specimens that the candidate's working tree
-adds or modifies relative to `$base`, and creates a missing corpus folder.
-Every destination is checked before the first write, and any of these stops
-the copy with nothing written:
-
-- the candidate deletes or renames a specimen (the two sides would render
-  different input sets, which the self-VRT cannot compare);
-- a destination is a symlink, a hard link or not a regular file, or lies
-  below a symlinked folder;
-- a destination file is neither the base revision's nor already the
-  candidate's, that is, someone edited it. `--force` overwrites such files.
+runs `git worktree add --detach` for a path that must not exist yet, then
+writes into the new tree the tracked specimens that the candidate's working
+tree adds or modifies relative to `$base`. It overwrites nothing an operator
+made: it never writes into an existing directory. When the candidate deletes
+or renames a specimen it stops before creating the worktree, because the two
+sides would render different input sets, which the self-VRT cannot compare.
 
 The flag admits only a `.docx`/`.xlsx`/`.pptx` present directly in its own
 package's corpus folder. Any other file, a specimen deleted from the baseline

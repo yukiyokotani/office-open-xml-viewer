@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { PNG } from 'pngjs';
-import { copyCorpusInputs } from './copy-corpus-inputs.mjs';
+import { createBaselineWorktree } from './baseline-worktree.mjs';
 import {
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
@@ -720,10 +720,9 @@ test('specimen copies are admitted only under the flag, and only as present spec
 
 test('a specimen the candidate adds or rewrites is compared only against a copy of the same bytes', async () => {
   const fixture = selfVrtFixture();
-  const { base, candidate, revision } = fixture;
+  const { scratch, base, candidate, revision } = fixture;
   const corpus = 'packages/pptx/public/corpus';
   const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
-  const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
   const allow = { VRT_ALLOW_CORPUS_INPUT_CHANGES: '1' };
   try {
     writeFileSync(join(candidate, corpus, 'old.pptx'), 'v2');
@@ -731,23 +730,27 @@ test('a specimen the candidate adds or rewrites is compared only against a copy 
     git(candidate, 'add', '.');
     git(candidate, '-c', 'user.email=vrt@example.invalid', '-c', 'user.name=vrt', 'commit', '-q', '-m', 'specimens');
 
-    // Forgotten copies: the baseline rendered another input set.
+    // A baseline without the copies rendered another input set.
     await specimenRun(base, snapshotEnv, true);
-    await assert.rejects(specimenRun(candidate, compareEnv, false), /manifest mismatch/);
-
-    assert.deepEqual(
-      copyCorpusInputs({ source: candidate, destination: base, base: revision }),
-      [`${corpus}/new.pptx`, `${corpus}/old.pptx`],
+    await assert.rejects(
+      specimenRun(candidate, { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision }, false),
+      /manifest mismatch/,
     );
-    await assert.rejects(specimenRun(base, snapshotEnv, true), /clean renderer checkout; changed paths/);
-    await specimenRun(base, { ...snapshotEnv, ...allow }, true);
+
+    const { worktree, copied } = createBaselineWorktree({
+      source: candidate, destination: join(scratch, 'baseline'), base: revision,
+    });
+    assert.deepEqual(copied, [`${corpus}/new.pptx`, `${corpus}/old.pptx`]);
+    const compareEnv = { VRT_BASELINE_CHECKOUT: worktree, VRT_BASELINE_REVISION: revision };
+    await assert.rejects(specimenRun(worktree, snapshotEnv, true), /clean renderer checkout; changed paths/);
+    await specimenRun(worktree, { ...snapshotEnv, ...allow }, true);
     await assert.rejects(specimenRun(candidate, compareEnv, false), /clean renderer checkout; changed paths/);
     assert.deepEqual(await specimenRun(candidate, { ...compareEnv, ...allow }, false), []);
     assert.equal((await specimenRun(candidate, { ...compareEnv, ...allow }, false, 8)).length, 2);
 
     // A stale copy: the snapshot drew other bytes than the candidate will.
-    writeFileSync(join(base, corpus, 'old.pptx'), 'v1.5');
-    await specimenRun(base, { ...snapshotEnv, ...allow }, true);
+    writeFileSync(join(worktree, corpus, 'old.pptx'), 'v1.5');
+    await specimenRun(worktree, { ...snapshotEnv, ...allow }, true);
     await assert.rejects(
       specimenRun(candidate, { ...compareEnv, ...allow }, false),
       /manifest mismatch[\s\S]*corpus\/old\.pptx/,
@@ -757,16 +760,18 @@ test('a specimen the candidate adds or rewrites is compared only against a copy 
   }
 });
 
-test('the specimen copy command checks its destination and refuses deletions and renames', () => {
+test('the baseline worktree command creates a new worktree at the base and overwrites nothing', () => {
   const fixture = selfVrtFixture();
-  const { scratch, base, candidate, revision } = fixture;
+  const { scratch, candidate, revision } = fixture;
   const corpus = 'packages/pptx/public/corpus';
-  const outside = join(scratch, 'outside');
-  const copy = (destination = base) => copyCorpusInputs({ source: candidate, destination, base: revision });
+  const create = (name, base = revision) => createBaselineWorktree({
+    source: candidate, destination: join(scratch, name), base,
+  });
   const put = (path, bytes) => {
     mkdirSync(join(candidate, path, '..'), { recursive: true });
     writeFileSync(join(candidate, path), bytes);
   };
+  const worktrees = () => git(candidate, 'worktree', 'list', '--porcelain').match(/^worktree /gm).length;
   try {
     put(`${corpus}/old.pptx`, 'v2');
     put('packages/xlsx/public/corpus/new.xlsx', 'new');
@@ -774,67 +779,63 @@ test('the specimen copy command checks its destination and refuses deletions and
     put('packages/xlsx/public/corpus/wrong.pptx', 'wrong format');
     put('renderer.js', 'export const version = 2;\n');
     git(candidate, 'add', '-A');
-    // The baseline has no xlsx corpus folder yet: it is created.
-    assert.deepEqual(copy(), ['packages/pptx/public/corpus/old.pptx', 'packages/xlsx/public/corpus/new.xlsx']);
-    assert.equal(readFileSync(join(base, corpus, 'old.pptx'), 'utf8'), 'v2');
-    assert.deepEqual(readdirSync(join(base, 'packages/xlsx/public/corpus')), ['new.xlsx']);
-    assert.equal(readFileSync(join(base, 'renderer.js'), 'utf8'), 'export const version = 1;\n');
+    git(candidate, '-c', 'user.email=vrt@example.invalid', '-c', 'user.name=vrt', 'commit', '-q', '-m', 'candidate');
+    put('packages/xlsx/public/corpus/new.xlsx', 'new, uncommitted');
 
-    // Running it again changes nothing: the destinations already hold the candidate's bytes.
-    assert.equal(copy().length, 2);
+    // The working tree's specimens, into a worktree at the base revision; the
+    // base has no xlsx corpus folder yet.
+    const { worktree, copied } = create('baseline');
+    assert.deepEqual(copied, ['packages/pptx/public/corpus/old.pptx', 'packages/xlsx/public/corpus/new.xlsx']);
+    assert.equal(git(worktree, 'rev-parse', 'HEAD'), revision);
+    assert.equal(readFileSync(join(worktree, corpus, 'old.pptx'), 'utf8'), 'v2');
+    assert.deepEqual(readdirSync(join(worktree, 'packages/xlsx/public/corpus')), ['new.xlsx']);
+    assert.equal(readFileSync(join(worktree, 'packages/xlsx/public/corpus/new.xlsx'), 'utf8'), 'new, uncommitted');
+    assert.equal(readFileSync(join(worktree, 'renderer.js'), 'utf8'), 'export const version = 1;\n');
+    assert.equal(git(worktree, 'status', '--porcelain'),
+      'M packages/pptx/public/corpus/old.pptx\n?? packages/xlsx/');
 
-    // A destination someone edited is neither the base's nor the candidate's:
-    // nothing is written, to it or to any other destination, without --force.
-    writeFileSync(join(base, corpus, 'old.pptx'), 'edited');
-    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    assert.throws(copy, /neither the base revision's nor the candidate's .*--force.*: packages\/pptx\/public\/corpus\/old\.pptx$/);
-    assert.equal(readFileSync(join(base, corpus, 'old.pptx'), 'utf8'), 'edited');
-    assert.equal(existsSync(join(base, 'packages/xlsx/public/corpus/new.xlsx')), false);
-    // Every destination is checked before the first write.
-    git(base, 'checkout', '-q', '--', `${corpus}/old.pptx`);
-    mkdirSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    assert.throws(copy, /symlink or non-regular file/);
-    assert.equal(readFileSync(join(base, corpus, 'old.pptx'), 'utf8'), 'v1');
-    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'), { recursive: true });
-    writeFileSync(join(base, corpus, 'old.pptx'), 'edited');
-    assert.equal(copyCorpusInputs({ source: candidate, destination: base, base: revision, force: true }).length, 2);
-    assert.equal(readFileSync(join(base, corpus, 'old.pptx'), 'utf8'), 'v2');
+    // An existing path is never reused, whatever it is.
+    writeFileSync(join(worktree, corpus, 'old.pptx'), 'edited');
+    assert.throws(() => create('baseline'), /already exists/);
+    assert.equal(readFileSync(join(worktree, corpus, 'old.pptx'), 'utf8'), 'edited');
+    mkdirSync(join(scratch, 'empty'));
+    assert.throws(() => create('empty'), /already exists/);
+    symlinkSync(join(scratch, 'nowhere'), join(scratch, 'dangling'));
+    assert.throws(() => create('dangling'), /already exists/);
+    assert.equal(existsSync(join(scratch, 'nowhere')), false);
+    assert.throws(
+      () => createBaselineWorktree({ source: join(candidate, 'packages'), destination: join(scratch, 'sub'), base: revision }),
+      /root of the candidate checkout/,
+    );
+    assert.equal(worktrees(), 2);
 
-    // The destination must be the root of another checkout at the base revision.
-    mkdirSync(outside);
-    assert.throws(() => copy(outside), /baseline checkout is not a Git checkout/);
-    assert.throws(() => copy(join(base, 'packages')), /must be the root of a Git checkout/);
-    assert.throws(() => copy(candidate), /must not be the candidate checkout/);
-    const moved = join(scratch, 'moved');
-    git(scratch, 'clone', '-q', base, moved);
-    git(moved, '-c', 'user.email=vrt@example.invalid', '-c', 'user.name=vrt', 'commit', '-q', '--allow-empty', '-m', 'moved');
-    assert.throws(() => copy(moved), /not at the base revision/);
-    assert.equal(readFileSync(join(moved, corpus, 'old.pptx'), 'utf8'), 'v1');
+    // A specimen the candidate cannot read leaves no worktree behind.
+    rmSync(join(candidate, 'packages/xlsx/public/corpus/new.xlsx'));
+    symlinkSync(join(candidate, corpus, 'old.pptx'), join(candidate, 'packages/xlsx/public/corpus/new.xlsx'));
+    assert.throws(() => create('unreadable'), /ELOOP/);
+    assert.equal(existsSync(join(scratch, 'unreadable')), false);
+    rmSync(join(candidate, 'packages/xlsx/public/corpus/new.xlsx'));
+    put('packages/xlsx/public/corpus/new.xlsx', 'new');
 
-    // Nothing is written through a symlink in the destination.
-    writeFileSync(join(outside, 'target.xlsx'), 'keep');
-    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    symlinkSync(join(outside, 'target.xlsx'), join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    assert.throws(copy, /symlink or non-regular file/);
-    assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
-    // Nor over a hard link, which shares its inode with another file.
-    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    linkSync(join(outside, 'target.xlsx'), join(base, 'packages/xlsx/public/corpus/new.xlsx'));
-    assert.throws(copy, /hard-linked file/);
-    assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
-    rmSync(join(base, 'packages/xlsx'), { recursive: true });
-    mkdirSync(join(base, 'packages/xlsx/public'), { recursive: true });
-    symlinkSync(outside, join(base, 'packages/xlsx/public/corpus'));
-    assert.throws(copy, /must be a real directory/);
-    assert.deepEqual(readdirSync(outside), ['target.xlsx']);
-    rmSync(join(base, 'packages/xlsx'), { recursive: true });
-
-    // A rename is a deletion and an addition; neither side is copied.
+    // A rename is a deletion and an addition: no worktree is created.
     git(candidate, 'mv', `${corpus}/old.pptx`, `${corpus}/renamed.pptx`);
-    git(base, 'checkout', '-q', '--', `${corpus}/old.pptx`);
-    assert.throws(copy, /deletes or renames: D packages\/pptx\/public\/corpus\/old\.pptx$/);
-    assert.deepEqual(readdirSync(join(base, corpus)), ['old.pptx']);
-    assert.equal(existsSync(join(base, 'packages/xlsx')), false);
+    assert.throws(() => create('renamed'), /deletes or renames: D packages\/pptx\/public\/corpus\/old\.pptx$/);
+    assert.equal(existsSync(join(scratch, 'renamed')), false);
+    assert.equal(worktrees(), 2);
+    git(candidate, 'mv', `${corpus}/renamed.pptx`, `${corpus}/old.pptx`);
+
+    // The command line, invoked through a symlink to the script.
+    const link = join(scratch, 'command.mjs');
+    symlinkSync(fileURLToPath(new URL('./baseline-worktree.mjs', import.meta.url)), link);
+    const child = spawnSync(process.execPath, [link, join(scratch, 'by-link'), revision], {
+      cwd: candidate, encoding: 'utf8', timeout: 60000,
+    });
+    if (child.status === 0 && child.stdout === '' && child.stderr === '') {
+      assert.fail('the command exited without running');
+    }
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(child.stdout, /with 2 copied specimen\(s\)/);
+    assert.equal(readFileSync(join(scratch, 'by-link', corpus, 'old.pptx'), 'utf8'), 'v2');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -842,48 +843,44 @@ test('the specimen copy command checks its destination and refuses deletions and
 
 // ── Generated output ─────────────────────────────────────────────────────────
 
-test('documents the corpus no longer lists keep no generated file after a snapshot or a comparison', async () => {
+test('images of documents the corpus no longer lists fail the run and are left for the operator', async () => {
   const fixture = selfVrtFixture();
   const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
   const screenshots = join(fixture.candidate, 'packages/pptx/tests/visual/screenshots/demo');
-  const leftover = (root, name, extra = []) => {
-    mkdirSync(join(root, name), { recursive: true });
-    writeFileSync(join(root, name, 'slide-1.png'), 'old');
-    writeFileSync(join(root, name, 'manifest.json'), '{}');
-    for (const file of extra) writeFileSync(join(root, name, file), 'mine');
+  const put = (root, path) => {
+    mkdirSync(join(root, path, '..'), { recursive: true });
+    writeFileSync(join(root, path), 'mine');
   };
   try {
-    leftover(baselineDemo, 'gone');
-    leftover(baselineDemo, 'kept', ['notes.txt']);
+    // Directories that are not a document's output do not concern the harness.
+    put(baselineDemo, 'operator-notes/manifest.json');
+    put(baselineDemo, 'operator-notes/notes.txt');
+    put(screenshots, 'operator-notes/manifest.json');
     await snapshot(fixture.base, fixture.revision);
-    assert.deepEqual(readdirSync(baselineDemo).sort(), ['deck', 'kept', 'manifest.json']);
-    assert.deepEqual(readdirSync(join(baselineDemo, 'kept')), ['notes.txt']);
-    // Candidate screenshots hold images only; a manifest there is not the harness's.
-    leftover(screenshots, 'gone');
-    leftover(screenshots, 'kept', ['notes.txt']);
     assert.equal(await compare(fixture), null);
-    assert.deepEqual(readdirSync(screenshots).sort(), ['deck', 'gone', 'kept']);
-    assert.deepEqual(readdirSync(join(screenshots, 'gone')), ['manifest.json']);
-    assert.deepEqual(readdirSync(join(screenshots, 'kept')).sort(), ['manifest.json', 'notes.txt']);
-    // A generated name that is not a regular file is not the harness's to
-    // remove: the run fails before any removal, so this stale document and
-    // another one listed before it keep every entry.
-    leftover(baselineDemo, 'a-early');
-    leftover(baselineDemo, 'gone');
-    try {
-      execFileSync('mkfifo', [join(baselineDemo, 'gone/slide-2.png')]);
-    } catch {
-      mkdirSync(join(baselineDemo, 'gone/slide-2.png'));
-    }
-    await assert.rejects(snapshot(fixture.base, fixture.revision), /not a regular file: .*gone\/slide-2\.png/);
-    assert.deepEqual(readdirSync(join(baselineDemo, 'gone')).sort(), ['manifest.json', 'slide-1.png', 'slide-2.png']);
-    assert.deepEqual(readdirSync(join(baselineDemo, 'a-early')).sort(), ['manifest.json', 'slide-1.png']);
+
+    put(baselineDemo, 'gone/slide-1.png');
+    await assert.rejects(
+      snapshot(fixture.base, fixture.revision),
+      /images of documents the corpus does not list: .*baseline\/demo\/gone\. Delete/,
+    );
+    rmSync(join(baselineDemo, 'gone'), { recursive: true });
+    put(screenshots, 'gone/slide-1.png');
+    await assert.rejects(
+      compare(fixture),
+      /images of documents the corpus does not list: .*screenshots\/demo\/gone\. Delete/,
+    );
+    assert.equal(readFileSync(join(screenshots, 'gone/slide-1.png'), 'utf8'), 'mine');
+    assert.deepEqual(readdirSync(join(baselineDemo, 'operator-notes')).sort(), ['manifest.json', 'notes.txt']);
+    assert.deepEqual(readdirSync(join(screenshots, 'operator-notes')), ['manifest.json']);
+    rmSync(join(screenshots, 'gone'), { recursive: true });
+    assert.equal(await compare(fixture), null);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
 
-test('nothing is written or removed through a symlinked output path', async () => {
+test('nothing is written, listed or removed through a symlinked output path', async () => {
   const fixture = selfVrtFixture();
   const outside = join(fixture.scratch, 'outside');
   const baseline = join(fixture.base, 'packages/pptx/tests/visual/baseline');
@@ -907,7 +904,6 @@ test('nothing is written or removed through a symlinked output path', async () =
     const links = [
       [baseline, outside],
       [join(baseline, 'demo'), outside],
-      [join(baseline, 'demo/gone'), join(outside, 'gone')],
       [join(baseline, 'demo/deck'), join(outside, 'gone')],
       [join(baseline, 'demo/manifest.json'), join(outside, 'manifest.json')],
     ];
@@ -933,10 +929,10 @@ test('nothing is written or removed through a symlinked output path', async () =
     untouched();
     unlinkSync(join(screenshots, 'demo'));
     mkdirSync(join(screenshots, 'demo'));
-    symlinkSync(join(outside, 'gone'), join(screenshots, 'demo/gone'));
-    await assert.rejects(compare(fixture), /symlinked self-VRT output path/);
+    symlinkSync(join(outside, 'gone'), join(screenshots, 'demo/deck'));
+    await assert.rejects(compare(fixture), /symlinked self-VRT output/);
     untouched();
-    unlinkSync(join(screenshots, 'demo/gone'));
+    unlinkSync(join(screenshots, 'demo/deck'));
     assert.equal(await compare(fixture), null);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
@@ -1053,7 +1049,7 @@ function nonRegular(path) {
   }
 }
 
-test('a listed document keeps its images when its directory is spelled in another case', async (t) => {
+test('a listed document is recognized when its output directory is spelled in another case', async (t) => {
   const fixture = selfVrtFixture();
   const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
   try {
@@ -1073,19 +1069,10 @@ test('a listed document keeps its images when its directory is spelled in anothe
   }
 });
 
-test('a snapshot that cannot write its manifest removes nothing first', async () => {
+test('finishing a snapshot document removes no earlier image unless the document can be completed', async () => {
   const fixture = selfVrtFixture();
   const baselineDemo = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo');
   try {
-    // Corpus manifest: the stale document of an earlier snapshot survives.
-    mkdirSync(join(baselineDemo, 'gone'), { recursive: true });
-    writeFileSync(join(baselineDemo, 'gone/slide-1.png'), 'old');
-    nonRegular(join(baselineDemo, 'manifest.json'));
-    await assert.rejects(snapshot(fixture.base, fixture.revision), /non-regular file: .*demo\/manifest\.json/);
-    assert.deepEqual(readdirSync(join(baselineDemo, 'gone')), ['slide-1.png']);
-    rmSync(join(baselineDemo, 'manifest.json'), { recursive: true });
-    rmSync(join(baselineDemo, 'gone'), { recursive: true });
-
     // Document manifest, a foreign item image, or an item this run did not
     // capture: the extra image of an earlier snapshot survives each of them.
     await snapshot(fixture.base, fixture.revision);

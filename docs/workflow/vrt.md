@@ -58,21 +58,26 @@ the exact page/sheet/slide set. The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run.
 
-The default commands include the public specimen corpus, so the block below
-first copies the specimens the candidate adds or rewrites into the baseline
-worktree ([tests/visual/README.md](../../tests/visual/README.md), "Added or
-changed public specimens"). The manifests bind every input by SHA-256, so the
-comparison fails if a copy is missing or differs. Start in the root of the
-candidate worktree; the exported flags apply to the snapshot and to the
-comparison.
+The default commands include the public specimen corpus, so the baseline
+worktree is made by one command that also writes into it the specimens the
+candidate adds or rewrites ([tests/visual/README.md](../../tests/visual/README.md),
+"Added or changed public specimens"). The manifests bind every input by
+SHA-256, so the comparison fails if a copy is missing or differs. Start in the
+root of the candidate worktree; the exported flags apply to the snapshot and
+to the comparison.
+
+The harness deletes nothing but earlier images of the document it is
+rendering. When an output tree (the baseline images in the baseline worktree,
+the screenshots in the candidate) still holds images of a document that is no
+longer in the corpus, the run fails and names the directories to delete.
 
 ```bash
 candidate=$PWD
 git fetch origin main
 base=$(git rev-parse origin/main)   # the base branch's current head (origin/v0.x for a backport), not a merge-base
-git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
-node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
-# Only if that command copied at least one specimen:
+# A new detached worktree at $base with the added or rewritten specimens; the path must not exist.
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
+# Only if that command reports at least one copied specimen:
 export VRT_ALLOW_CORPUS_INPUT_CHANGES=1
 # Only when the harness at $base differs from the candidate's (Harness
 # bootstrap below), after copying the harness files into the baseline worktree:
