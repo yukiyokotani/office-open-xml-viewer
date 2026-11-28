@@ -400,8 +400,12 @@ export interface TextShapeRequest {
   /** The source piece's whole text when this request shapes a fragment of
    * it: faces are resolved for that text (regional fallback looks at its Han,
    * for instance), so a fragment measures through the route paint draws the
-   * piece with. Independent probes resolve their own text. Shape caches key
-   * it by a compact identity, never by its content. */
+   * piece with. Independent probes resolve their own text. Only a piece
+   * that retains a route language ({@link canvasLanguagePin}) sets it, so
+   * that its fragments resolve the route the language was decided on; text
+   * without a language resolves each fragment's own text, as it always has.
+   * Shape caches key it by what a resolution reads from it, never by its
+   * content. */
   readonly faceText?: string;
   /** The text is set in a vertical CJK line (§17.6.20 tbRl), where layout
    * draws vertical presentation forms in place of some characters: a
@@ -1401,6 +1405,49 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     ...(input.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
     ...(input.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
   });
+  /**
+   * Everything {@link resolve} reads from the text it resolves a slot's face
+   * for; the rest of a resolution depends on the request's font facts alone.
+   * - Han presence admits the CJK fallback and the language-selected regional
+   *   list.
+   * - A scoped visual substitute (core substitute-script.ts) answers only
+   *   text of its script: a complex-script span is covered once it proves the
+   *   script, any other span only when all of it belongs to the proven script.
+   * `resolve` uses only this for its text, so these facts for every slot are
+   * the identity of a text as a face-resolution input ({@link faceTextKey}).
+   */
+  const faceTextFacts = (
+    request: Readonly<Pick<TextFontResolveRequest, 'fonts' | 'themeFonts' | 'themeFontPresence' | 'weight' | 'style'>>,
+    slot: FontScriptSlot,
+    text: string,
+  ) => {
+    const scoped = input.fonts.scopedSubstituteScript?.(requestedFamily(request, slot), request.weight, request.style);
+    return {
+      hasHan: containsHanScript(text),
+      scoped,
+      covers: scoped !== undefined
+        && fontSubstituteScriptCoversText(scoped, text, slot === 'complexScript' ? 'any' : 'exclusive'),
+    };
+  };
+  // The key of the last piece text fragments resolved their faces for
+  // (TextShapeRequest.faceText): a piece's fragments are shaped one after
+  // another with the same font facts, so its text is scanned once.
+  let lastFaceTextKey: Readonly<{ request: Readonly<TextShapeRequest>; key: string }> | undefined;
+  /** A piece text as a face-resolution input: one character for its Han
+   * presence, one per §17.3.2.26 slot for scoped-substitute coverage.
+   * Constant size, exact (two texts with one key resolve every slot alike),
+   * and shared by all pieces that resolve alike. */
+  const faceTextKey = (request: Readonly<TextShapeRequest>): string => {
+    const last = lastFaceTextKey?.request;
+    if (last && last.faceText === request.faceText && last.fonts === request.fonts
+      && last.themeFonts === request.themeFonts && last.themeFontPresence === request.themeFontPresence
+      && last.weight === request.weight && last.style === request.style) return lastFaceTextKey!.key;
+    const text = request.faceText!;
+    const key = (containsHanScript(text) ? 'H' : 'h')
+      + SCOPE_SLOTS.map((slot) => faceTextFacts(request, slot, text).covers ? '1' : '0').join('');
+    lastFaceTextKey = { request, key };
+    return key;
+  };
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
     const genericFamily = authoredFamily
@@ -1412,18 +1459,10 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // consumer policy changes only the script classes covered by Word output
       // evidence; every authored direct/theme face remains authoritative above.
       : request.genericFamily ?? defaultGenericForSlot(request.slot);
-    const hasHan = containsHanScript(request.text ?? '');
-    // A scoped visual substitute (core substitute-script.ts) answers only text
-    // of its script. The shaper carries the shared per-cluster scope
-    // (`substituteScope`); otherwise the same shared rule judges `text` as a
-    // whole: a complex-script span is covered once it proves the script, any
-    // other span only when all of it belongs to the proven script.
-    const scoped = input.fonts.scopedSubstituteScript?.(authoredFamily, request.weight, request.style);
-    const covered = request.substituteScope ?? (scoped !== undefined && fontSubstituteScriptCoversText(
-      scoped,
-      request.text ?? '',
-      request.slot === 'complexScript' ? 'any' : 'exclusive',
-    ));
+    const { hasHan, scoped, covers } = faceTextFacts(request, request.slot, request.text ?? '');
+    // The shaper carries the shared per-cluster scope (`substituteScope`);
+    // otherwise the text as a whole is judged (faceTextFacts).
+    const covered = request.substituteScope ?? covers;
     const substituteScript = scoped && covered ? scoped : undefined;
     return input.fonts.resolve({
       requestedFamily: authoredFamily,
@@ -1540,22 +1579,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   // all-prefix strings, occurrence ids, extra cache or public detail payload.
   type ShapeEntry = TextShapeResult | ProjectableNativeUnitResult;
   const shapeCache = new Map<string, ShapeEntry>();
-  // Identities of the piece texts fragments resolve their faces for
-  // (TextShapeRequest.faceText). Numbers are never reused, so dropping the
-  // table when it is full only costs later fragments of those pieces a
-  // repeated shape; it cannot alias two texts.
-  const faceTextIdentities = new Map<string, number>();
-  const faceTextIdentityLimit = 4096;
-  let nextFaceTextIdentity = 0;
-  const faceTextIdentity = (text: string): number => {
-    let identity = faceTextIdentities.get(text);
-    if (identity === undefined) {
-      if (faceTextIdentities.size >= faceTextIdentityLimit) faceTextIdentities.clear();
-      identity = nextFaceTextIdentity++;
-      faceTextIdentities.set(text, identity);
-    }
-    return identity;
-  };
   const scopeCache = new Map<string, Map<string, Uint8Array>>();
   let scopeScans = 0;
   let scopeUtf16Units = 0;
@@ -1901,10 +1924,11 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       shapeParts.push('verticalForms');
     }
     // A fragment resolves its faces for the piece's whole text. The key
-    // names that text by identity: its content would repeat in the key of
-    // every fragment, quadratic in the piece's length.
+    // names what a resolution reads from that text, never the text: its
+    // content would repeat in the key of every fragment, quadratic in the
+    // piece's length.
     if (request.faceText !== undefined && request.faceText !== request.text) {
-      shapeParts.push(['faceText', faceTextIdentity(request.faceText)]);
+      shapeParts.push(['faceText', faceTextKey(request)]);
     }
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);

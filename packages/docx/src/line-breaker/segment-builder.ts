@@ -1604,17 +1604,21 @@ function pushLanguagePiece(
   }); // glue applies only to a piece's FIRST segment
 }
 
+/** `request` resolving its faces for the whole piece (TextShapeRequest
+ * faceText) where it retains the piece's route language: the decision holds
+ * for one route, so a fragment of the piece must resolve that route rather
+ * than one for its own text. A request without a retained language (all text
+ * of a document without languages) is returned as is: its fragments resolve
+ * and key exactly as they did before languages. */
+function withPieceFace(request: TextShapeRequest): TextShapeRequest {
+  return request.canvasLanguagePin === undefined || request.faceText !== undefined || request.text === ''
+    ? request : Object.freeze({ ...request, faceText: request.text });
+}
+
 /** `request` retaining the route language acquired for its piece (`span`,
  * the piece's one shaped span): TextShapeRequest.canvasLanguagePin. A request
  * without a §17.3.2.20 language for that slot, or one already retaining a
  * decision, is returned as is. */
-/** `request` resolving its faces for the whole piece (TextShapeRequest
- * faceText): a fragment of the piece measures through the piece's route. */
-function withPieceFace(request: TextShapeRequest): TextShapeRequest {
-  return request.faceText !== undefined || request.text === '' ? request
-    : Object.freeze({ ...request, faceText: request.text });
-}
-
 function withAcquiredRouteLanguage(
   request: TextShapeRequest,
   span: Pick<TextShapeSpan, 'script' | 'fontRoute'>,

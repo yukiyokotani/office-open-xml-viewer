@@ -168,7 +168,7 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       .toBe('"Plain Face", serif');
   });
 
-  it('keys a fragment by its piece\'s identity, never by the piece text', () => {
+  it('keys a fragment by what a resolution reads from its piece, never by the piece text', () => {
     const regional = createTextLayoutService({
       fonts: createFontResolver([], {
         regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
@@ -189,6 +189,10 @@ describe('text service: §17.3.2.20 language per font slot', () => {
         const out = stringify(...args);
         units += out?.length ?? 0;
         carriesPiece ||= out?.includes(text) === true;
+        // The piece enters a fragment's key as constant-size facts (Han
+        // presence, coverage per slot), whatever the piece's length.
+        const part = /\["faceText",("[^"]*")\]/u.exec(out ?? '');
+        if (part) expect(part[1]).toBe('"H0000"');
         return out;
       });
       try {
@@ -206,6 +210,24 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     const small = serialized(128);
     const large = serialized(512);
     expect(large / small).toBeLessThan(4.5);
+    // 128 one-character fragments: well under the 135,424 units their keys
+    // took when each carried the piece.
+    expect(small).toBeLessThan(128 * 400);
+    // Pieces that resolve alike share their fragments' shapes.
+    const shapes: string[] = [];
+    const shared = createTextLayoutService({
+      fonts: createFontResolver([], { nativeFamilyLists: { Absent: '"Plain Face", serif' } }),
+      measurer: { fingerprint: 'shared-keys', namedFamiliesDraw: () => true,
+        measure: (request) => {
+          shapes.push(request.text);
+          return { advancePt: 10, ascentPt: 8, descentPt: 2 };
+        } },
+    });
+    for (const text of ['\u4e00\u4e8c', '\u4e00\u4e09']) {
+      shared.shape(sliceTextShapeRequest({ text, fontSizePt: 10, fonts: { eastAsia: 'Absent' },
+        eastAsiaLanguage: 'zh-cn', clusterGeometry: false as const, faceText: text }, 0, 1));
+    }
+    expect(shapes).toEqual(['\u4e00']);
   });
 
   it('selects the Canvas language of a script-class run independently of the slot table', () => {
@@ -557,6 +579,33 @@ describe('Canvas lang at measure and paint', () => {
     expect(draws.length).toBeGreaterThan(1);
     expect(new Set(draws.map(draw => draw.lang))).toEqual(new Set(['inherit']));
     expect(measures.filter(measure => measure.text.includes('г')).every(measure => measure.lang === 'inherit')).toBe(true);
+  });
+
+  it('resolves fragments of text without a language for their own text, as before languages', async () => {
+    const keys = async (extra: Record<string, unknown>) => {
+      const { canvas, draws } = recordingCanvas();
+      const stringify = JSON.stringify;
+      let pieceFaces = 0;
+      const spy = vi.spyOn(JSON, 'stringify').mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
+        const out = stringify(...args);
+        if (out?.includes('"faceText"')) pieceFaces += 1;
+        return out;
+      });
+      try {
+        await renderDocumentToCanvas(documentOf([
+          run('где'.repeat(90), extra),
+        ]), canvas, 0, { dpr: 1, width: 200 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(draws.length).toBeGreaterThan(1);
+      return pieceFaces;
+    };
+    // Only a piece that retains a route language resolves its fragments for
+    // the whole piece; untagged text has no such request or key.
+    expect(await keys({})).toBe(0);
+    expect(await keys({ lang: 'x-none' })).toBe(0);
+    expect(await keys({ lang: 'sr-rs' })).toBeGreaterThan(0);
   });
 
   it('keeps the measured language on text drawn inside a save/restore pair', async () => {
