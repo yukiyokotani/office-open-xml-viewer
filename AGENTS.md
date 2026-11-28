@@ -59,6 +59,7 @@ viewers.
 | finishing a feature or fix | [`docs/workflow/adversarial-review.md`](docs/workflow/adversarial-review.md) |
 | changing DOCX layout architecture | [`docs/workflow/docx-architecture-audit.md`](docs/workflow/docx-architecture-audit.md) |
 | needing Office ground truth (controls, PDF exports) | [`docs/workflow/office-reference-export.md`](docs/workflow/office-reference-export.md) |
+| adding or changing a public corpus specimen (`tests/corpus/`) | [`docs/workflow/corpus-specimen.md`](docs/workflow/corpus-specimen.md) |
 | recording a decision, or writing, moving or deleting docs | [`docs/workflow/documentation.md`](docs/workflow/documentation.md) |
 | preparing a release or patch release | [`docs/workflow/release.md`](docs/workflow/release.md) |
 | looking for design contracts and guides | [`docs/README.md`](docs/README.md) (index of all docs) |

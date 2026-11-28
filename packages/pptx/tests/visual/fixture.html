@@ -27,13 +27,50 @@
       '/node_modules/@fontsource/nunito-sans/300.css',
       '/node_modules/@fontsource/nunito-sans/600.css',
     ];
-    const fontFamily = (family) => family.trim().replace(/^['"]|['"]$/g, '').toLowerCase();
     const params   = new URLSearchParams(location.search);
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
     const pptxName = params.get('pptx') ?? 'sample';
     // Optional render width override (CSS px), e.g. ?width=960 — used by the
     // scale-parameterised specs; the default matches the reference images.
     const width    = Math.max(1, parseInt(params.get('width') ?? '1280', 10));
+
+    // ?fonts=corpus loads the faces the public specimen corpus names (Noto Sans,
+    // Noto Sans JP, Arabic, Hebrew) from this package's own @fontsource dependencies, so the
+    // corpus VRT runs offline. Fontsource partitions each weight/style into
+    // unicode-range faces and a font shorthand only fetches the subset matching
+    // its sample text, so every declared face is loaded before rendering.
+    const CORPUS_FONTS = {
+      'noto-sans': ['400', '400-italic', '700', '700-italic'],
+      'noto-sans-jp': ['400', '700'],
+      'noto-sans-arabic': ['400', '700'],
+      'noto-sans-hebrew': ['400', '700'],
+    };
+    const corpusFontStylesheets = Object.entries(CORPUS_FONTS)
+      .flatMap(([name, files]) => files.map((f) => `/node_modules/@fontsource/${name}/${f}.css`));
+    const fontFamilyKey = (family) => family.trim().replace(/^['"]|['"]$/g, '').toLowerCase();
+    async function loadFixtureFonts(hrefs, families) {
+      const sheets = await Promise.all(hrefs.map((href) => new Promise((resolve, reject) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = href;
+        link.onload = () => link.sheet
+          ? resolve(link.sheet)
+          : reject(new Error(`fixture font stylesheet unavailable: ${href}`));
+        link.onerror = () => reject(new Error(`fixture font stylesheet failed: ${href}`));
+        document.head.append(link);
+      })));
+      for (const family of families) {
+        const declared = sheets.reduce((count, sheet) => count + [...sheet.cssRules].filter(
+          (rule) => rule instanceof CSSFontFaceRule && fontFamilyKey(rule.style.fontFamily) === family,
+        ).length, 0);
+        const faces = [...document.fonts].filter((face) => fontFamilyKey(face.family) === family);
+        if (declared === 0 || faces.length !== declared) {
+          throw new Error(`fixture ${family} faces: declared ${declared}, registered ${faces.length}`);
+        }
+        await Promise.all(faces.map((face) => face.load()));
+      }
+      await document.fonts.ready;
+    }
 
     // ?viewer=scroll renders every slide through PptxScrollViewer (default
     // options otherwise) so the scroll path has its own pixel self-VRT.
@@ -80,28 +117,8 @@
     window.addEventListener('pagehide', destroy, { once: true });
 
     try {
-      // Fontsource partitions each weight/style into unicode-range faces.
-      // Loading a font shorthand only fetches the subset matching its sample
-      // text, so wait for the CSS and load every declared face directly.
-      const sheets = await Promise.all(fixtureFontStylesheets.map((href) => new Promise((resolve, reject) => {
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = href;
-        link.onload = () => link.sheet
-          ? resolve(link.sheet)
-          : reject(new Error(`fixture font stylesheet unavailable: ${href}`));
-        link.onerror = () => reject(new Error(`fixture font stylesheet failed: ${href}`));
-        document.head.append(link);
-      })));
-      const declaredCount = sheets.reduce((count, sheet) => count + [...sheet.cssRules].filter(
-        (rule) => rule instanceof CSSFontFaceRule && fontFamily(rule.style.fontFamily) === 'nunito sans',
-      ).length, 0);
-      const faces = [...document.fonts].filter((face) => fontFamily(face.family) === 'nunito sans');
-      if (declaredCount === 0 || faces.length !== declaredCount) {
-        throw new Error(`fixture Nunito Sans faces: declared ${declaredCount}, registered ${faces.length}`);
-      }
-      await Promise.all(faces.map((face) => face.load()));
-      await document.fonts.ready;
+      await loadFixtureFonts(fixtureFontStylesheets, ['nunito sans']);
+      if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['noto sans', 'noto sans jp', 'noto sans arabic', 'noto sans hebrew']);
       const resp = await fetch(`/${pptxName}.pptx`);
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();

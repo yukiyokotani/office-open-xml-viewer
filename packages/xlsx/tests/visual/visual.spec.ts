@@ -10,6 +10,7 @@ import {
   selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
+import { loadFastTierSelection, privateCorpusTier } from '../../../../tests/visual/corpus-features.mjs';
 
 // ── Fidelity targets ──────────────────────────────────────────────────────────
 // Tracked demo workbooks with committed reference images (references/{name}/)
@@ -206,16 +207,34 @@ test.describe('xlsx visual fidelity', () => {
 // with the previous renderer's images, bound by manifest to
 // VRT_BASELINE_REVISION. `demo` runs under `pnpm vrt`; `private` under
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
-type SelfVrtCorpus = 'demo' | 'private';
+type SelfVrtCorpus = 'demo' | 'corpus' | 'private' | 'private-fast';
 
-function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: string[]): void {
+// Fast-tier selection (tests/visual/corpus-features.mjs): per file, the
+// sheets that add structural XML features, out of the file's sheet count.
+type FastTierSelection = {
+  digest: string;
+  files: Map<string, { unitCount: number; units: number[] }>;
+};
+
+// `query` holds extra fixture parameters (the public specimens load their
+// Roboto / Noto Sans JP faces offline with ?fonts=corpus). `selection` limits
+// a `private-fast` run to the selected sheets; a file without any is skipped.
+function describeSelfRegression(
+  title: string,
+  corpus: SelfVrtCorpus,
+  files: string[],
+  { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
+): void {
   test.describe(title, () => {
-    if (corpus === 'demo' && files.length > 0) {
+    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({ corpus, format: 'xlsx', files, snapshot: SNAPSHOT });
       });
     }
     for (const file of files) {
+      const selected = selection?.files.get(file);
+      if (selection && !selected) throw new Error(`${file} is missing from the fast-tier selection`);
+      if (selected && selected.units.length === 0) continue;
       test(file, async ({ page }) => {
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.xlsx'.length);
@@ -223,7 +242,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
         const openSheet = async (sheetIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
-            + `&sheet=${sheetIndex}`,
+            + `&sheet=${sheetIndex}${query}`,
           );
           await page.waitForFunction(
             () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
@@ -237,12 +256,20 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
           await page.waitForTimeout(200);
         };
 
-        await openSheet(0);
+        const firstSheet = selected?.units[0] ?? 0;
+        await openSheet(firstSheet);
         const sheetCount = Number(await page.evaluate(() => document.body.dataset.sheetCount));
         expect(sheetCount, `${stem} must report its complete sheet count`).toBeGreaterThan(0);
+        if (selected && selected.unitCount !== sheetCount) {
+          throw new Error(
+            `${stem}: renderer reports ${sheetCount} sheets but the fast-tier selection `
+            + `expects ${selected.unitCount}; regenerate it with pnpm vrt:private:fast:select`,
+          );
+        }
+        const sheetIndices = selected?.units ?? Array.from({ length: sheetCount }, (_, index) => index);
         const differences: string[] = [];
-        for (let sheetIndex = 0; sheetIndex < sheetCount; sheetIndex++) {
-          if (sheetIndex > 0) {
+        for (const sheetIndex of sheetIndices) {
+          if (sheetIndex !== firstSheet) {
             await page.evaluate(async (index) => {
               const render = (globalThis as unknown as {
                 renderXlsxVrtSheet(sheetIndex: number): Promise<void>;
@@ -262,6 +289,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
         }
         verifySelfVrtItemManifest({
           corpus, format: 'xlsx', stem, itemKind: 'sheet', itemCount: sheetCount, snapshot: SNAPSHOT,
+          ...(selected ? { itemIndices: selected.units } : {}),
         });
         expect(differences, differences.join('\n')).toEqual([]);
       });
@@ -270,13 +298,33 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
 }
 
 const XLSX_DEMO_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'demo', format: 'xlsx' }) : [];
+// Public specimen corpus (tests/corpus/, generated into public/corpus/): runs
+// under `pnpm vrt` with the demo corpus, or alone under `pnpm vrt:corpus`.
+const XLSX_PUBLIC_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'corpus', format: 'xlsx' }) : [];
 const XLSX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
   ? selfVrtCorpusFiles({ corpus: 'private', format: 'xlsx' })
   : [];
 
+// VRT_PRIVATE_TIER=fast renders only the sheets chosen by
+// tests/visual/corpus-features.mjs (structural XML feature cover) into the
+// separate `private-fast` baseline tree; the default full tier renders every sheet.
+const XLSX_PRIVATE_SELF_VRT: SelfVrtCorpus = privateCorpusTier() === 'fast' ? 'private-fast' : 'private';
+const XLSX_FAST_SELECTION: FastTierSelection | undefined =
+  process.env.VRT_PRIVATE_CORPUS === '1' && XLSX_PRIVATE_SELF_VRT === 'private-fast'
+    ? loadFastTierSelection({ format: 'xlsx', files: XLSX_PRIVATE_CORPUS })
+    : undefined;
+
 if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({ corpus: 'private', format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+  prepareSelfVrtCorpus({
+    corpus: XLSX_PRIVATE_SELF_VRT, format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
+    selectionDigest: XLSX_FAST_SELECTION?.digest,
+  });
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', XLSX_DEMO_CORPUS);
-describeSelfRegression('private corpus self regression', 'private', XLSX_PRIVATE_CORPUS);
+describeSelfRegression('public corpus self regression', 'corpus', XLSX_PUBLIC_CORPUS, {
+  query: '&rows=40&cols=10&width=1280&height=960&fonts=corpus',
+});
+describeSelfRegression('private corpus self regression', XLSX_PRIVATE_SELF_VRT, XLSX_PRIVATE_CORPUS, {
+  selection: XLSX_FAST_SELECTION,
+});
