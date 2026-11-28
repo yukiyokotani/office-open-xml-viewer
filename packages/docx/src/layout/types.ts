@@ -345,6 +345,11 @@ export interface TextClusterLayout {
   readonly range: TextRange;
   readonly offset: PointPt;
   readonly advancePt: number;
+  /** The advance paint draws the cluster's glyph at, from its pen: its font
+   * advance with character scaling, without tracking, justification,
+   * distribution, kashida or grid-cell padding (which belong to `advancePt`
+   * and the pens). Absent where the glyph fills its advance. */
+  readonly glyphAdvancePt?: number;
 }
 
 export interface TextPaintOp {
@@ -413,6 +418,11 @@ export interface RetainedRunTypographyFacts {
 }
 
 export interface TextPlacement {
+  /** The kashida plan's tatweel insertions (code point index into `text`,
+   * count) this piece paints: its one paint operation holds them while the
+   * retained clusters keep their natural advances. Geometry derived from the
+   * piece reads them (visual-cluster-geometry). */
+  readonly kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
   readonly kind: 'text';
   /** Authored discretionary '-' ink has an empty logical source owner.
    * Paint still consumes text/paintOps; copy and find consume the typed owner. */
@@ -504,6 +514,9 @@ export interface TextPlacement {
 export interface TabPlacement {
   readonly kind: 'tab';
   readonly range: TextRange;
+  /** Parsed run occurrence of the tab character, for readers that address
+   * content by source run (comment ranges). */
+  readonly sourceRunIndex?: number;
   readonly bounds?: LayoutRect;
   readonly advancePt: number;
   readonly leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
@@ -617,6 +630,9 @@ export interface ResourcePlacement {
    * testing and element bounds use its turned, line-clipped outline
    * (`resourcePlacementOutline` in resource-outline.ts). */
   readonly rotationDeg?: number;
+  /** WORD_CELL_CONTENT_CLIP: a VML picture, painted outside its table cell's
+   * content clip. */
+  readonly escapesCellClip?: true;
   readonly advancePt: number;
 }
 
@@ -639,6 +655,9 @@ export interface DrawingPlacement {
    * picture (ResourcePlacement.lineClip): top and bottom of the line box
    * relative to `bounds.yPt`. */
   readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
+  /** WORD_CELL_CONTENT_CLIP: the placeholder of a VML picture escapes the cell
+   * content clip like that picture. */
+  readonly escapesCellClip?: true;
   readonly advancePt: number;
 }
 
@@ -877,6 +896,11 @@ export interface TableCellLayout extends LayoutNodeBase {
   readonly vAlign: 'top' | 'center' | 'bottom';
   readonly background?: FillPaint;
   readonly blocks: readonly TableCellBlockLayout[];
+  /** WORD_CELL_CONTENT_CLIP: the box that clips the cell's own paragraphs
+   * (nested tables, anchored drawings and VML pictures are outside it).
+   * Absent for rotated cells, which clip all their blocks to the cell, and for
+   * suppressed merge continuations. */
+  readonly contentClipBounds?: LayoutRect;
   /** Present for rotated cell text: blocks are in the local frame. */
   readonly verticalText?: TableCellVerticalTextLayout;
 }

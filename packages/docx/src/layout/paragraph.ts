@@ -38,6 +38,7 @@ import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
+import { wordCellContentClipEscapesInlinePicture } from './table-compatibility.js';
 import {
   autoContrastColor,
   canvasFontString,
@@ -84,7 +85,7 @@ import {
   replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
-import { wordTrackChangeDecoration } from './paint-compatibility.js';
+import { wordTextBoxContentClipBounds, wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
@@ -265,6 +266,9 @@ export type MeasuredTextPlanSegment = Readonly<
     /** A list label emitted as leading runs (`LayoutSegSource.listLabel`):
      * its spaces take no justification. */
     listLabel?: true;
+    /** The kashida plan's tatweel insertions (code point index, count) the
+     * line applied to this segment's paint text. */
+    kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
@@ -329,6 +333,7 @@ function retainedTypographyInput(
 export interface MeasuredTabPlanSegment {
   readonly kind: 'tab';
   readonly range: import('./types.js').TextRange;
+  readonly sourceRunIndex?: number;
   readonly measuredWidthPt: number;
   /** WORD_ALIGNED_TAB_CELL_FIT_BACK: gap the tab may still take from the slack. */
   readonly alignedGapLimitPt?: number;
@@ -375,6 +380,8 @@ export interface MeasuredResourcePlanSegment {
   /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: paint clipped to the line box's
    * vertical extent. */
   readonly clipToLine?: true;
+  /** WORD_CELL_CONTENT_CLIP: a VML picture is painted outside the cell clip. */
+  readonly escapesCellClip?: true;
   /** Clockwise turn (degrees) the resource paints with about its box centre. */
   readonly rotationDeg?: number;
 }
@@ -392,6 +399,8 @@ export interface MeasuredUnavailableResourcePlanSegment {
   /** WORD_INLINE_OBJECT_EXACT_LINE: the placeholder is clipped to its line
    * like the picture it stands for. */
   readonly clipToLine?: true;
+  /** WORD_CELL_CONTENT_CLIP: as the VML picture it stands for. */
+  readonly escapesCellClip?: true;
   readonly drawingId: string;
 }
 
@@ -1749,6 +1758,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           nativeBaseDirection: undefined,
           nativeVisiblePrefix: undefined,
           measuredWidthPt: segment.measuredWidthPt + plan.advanceDeltaPx,
+          kashidaInsertions: plan.insertions,
           basePaintOps: [{ ...base, text: plan.text, sourceMapping: 'kashida' }],
         };
       });
@@ -2027,6 +2037,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         : tabDecorations;
       placements.push({
         kind: 'tab', range: segment.range,
+        ...(segment.sourceRunIndex === undefined ? {} : { sourceRunIndex: segment.sourceRunIndex }),
         bounds,
         advancePt: segment.measuredWidthPt,
         leader: segment.leader,
@@ -2055,6 +2066,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
           bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
         } } : {}),
+        ...(segment.escapesCellClip ? { escapesCellClip: true as const } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'unavailable-resource' || segment.kind === 'inline-drawing') {
@@ -2072,6 +2084,8 @@ export function planLine(input: PlanLineInput): LineLayout {
           topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
           bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
         } } : {}),
+        ...(segment.kind === 'unavailable-resource' && segment.escapesCellClip
+          ? { escapesCellClip: true as const } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'anchor-host') {
@@ -2196,6 +2210,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         highlightBounds,
         advancePt: widthPt,
         clusters: textGeometry.clusters,
+        ...(segment.kashidaInsertions ? { kashidaInsertions: segment.kashidaInsertions } : {}),
         paintOps,
         decorations,
         ...(emphasis ? { emphasis } : {}),
@@ -2640,6 +2655,21 @@ function fieldDependency(run: Extract<DocRun, { type: 'field' }>): TextPlacement
   if (/^date$/i.test(run.fieldType)) return 'date';
   if (/^time$/i.test(run.fieldType)) return 'time';
   return 'document';
+}
+
+/** The run of a shared text sequence that holds the character at `offset`.
+ * Lines ask in rising offsets, so the last answer of each sequence is where
+ * the next search starts: the work over a paragraph is linear. */
+const sequenceMemberCursors = new WeakMap<object, number>();
+function sequenceMemberRunIndex(
+  sequence: readonly Readonly<{ runIndex: number; start: number; end: number }>[],
+  offset: number,
+): number | undefined {
+  let member = sequenceMemberCursors.get(sequence) ?? 0;
+  if ((sequence[member]?.start ?? 0) > offset) member = 0;
+  while (member < sequence.length - 1 && sequence[member]!.end <= offset) member += 1;
+  sequenceMemberCursors.set(sequence, member);
+  return sequence[member]?.runIndex;
 }
 
 function sourceRunIndex(segment: { sourceRunIndex?: number }): number | undefined {
@@ -3433,7 +3463,7 @@ function textPlanSegment(
   }
   let precedingScalars = 0;
   let precedingPitchBearing = 0;
-  let clusters = (shapedClusters ?? []).map((cluster, index) => {
+  let clusters: TextClusterLayout[] = (shapedClusters ?? []).map((cluster, index): TextClusterLayout => {
     const prefix = segment.text.slice(0, cluster.range.start);
     const text = segment.text.slice(cluster.range.start, cluster.range.end);
     const counts = countSpacingCharacters(text);
@@ -3477,6 +3507,9 @@ function textPlanSegment(
           + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
+      // The glyph as paint draws it: its font advance, scaled, without the
+      // spacing, justification or padding added between glyphs.
+      glyphAdvancePt: cluster.advancePt * scaleX,
       advancePt:
         cluster.advancePt * scaleX
         + clusterSpacingPt
@@ -3517,7 +3550,9 @@ function textPlanSegment(
         unitStart = range.end;
         const advancePt = advances[index]! > 0 ? advances[index]! : 0;
         if (advances[index]! < 0) flooredClusterNaturalPt.set(range.start, unit.advancePx * scaleX);
-        const placed = { range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt };
+        const placed = {
+          range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt, glyphAdvancePt: unit.advancePx * scaleX,
+        };
         penPt += advancePt;
         return placed;
       });
@@ -4130,6 +4165,7 @@ function planMeasuredLines(
       lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength);
       if ('isTab' in segment) {
         const tab = segment as LayoutTabSeg;
+        const tabRunIndex = sequence ? sequenceMemberRunIndex(sequence, segment.sourceTextOffset ?? 0) : runIndex;
         const leader = tab.leader ?? 'none';
         let leaderShape: MeasuredTabPlanSegment['leaderShape'];
         let underline: MeasuredTabPlanSegment['underline'];
@@ -4218,6 +4254,9 @@ function planMeasuredLines(
         }
         segments.push({
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+          // The run that holds the tab character: the owning member of a
+          // shared text sequence, else the segment's own run.
+          ...(tabRunIndex === undefined ? {} : { sourceRunIndex: tabRunIndex }),
           measuredWidthPt: tab.measuredWidth, leader,
           ...(tab.alignedGapLimit ? { alignedGapLimitPt: tab.alignedGapLimit } : {}),
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
@@ -4261,10 +4300,17 @@ function planMeasuredLines(
           ) / 2;
         // Exact-line clipping (and its tbLrV placement) is decided apart from a
         // rotated picture's own clip to the line.
+        const inlineObjectOrigin = (sourceRun as {
+          readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
+        } | undefined)?.inlineObjectOrigin;
         const exactClipped = !image.chart && exactObjectClips
-          && wordInlineObjectExactLineClips(
-            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
-              ?.inlineObjectOrigin);
+          && wordInlineObjectExactLineClips(inlineObjectOrigin);
+        // Only a cell paragraph (a nested source path) has a cell clip to escape.
+        const escapesCellClip = source.path.length > 1 && wordCellContentClipEscapesInlinePicture({
+          chart: Boolean(image.chart),
+          listLabel: image.listLabel !== undefined,
+          inlineObjectOrigin,
+        });
         const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
           : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
         const clipToLine = !image.chart && (image.clipToLine || exactClipped);
@@ -4278,6 +4324,7 @@ function planMeasuredLines(
             heightPt: objectHeightPt,
             topOffsetPt,
             ...(clipToLine ? { clipToLine: true as const } : {}),
+            ...(escapesCellClip ? { escapesCellClip: true as const } : {}),
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
@@ -4296,6 +4343,7 @@ function planMeasuredLines(
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
           ...(clipToLine ? { clipToLine: true as const } : {}),
+          ...(escapesCellClip ? { escapesCellClip: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {
@@ -6122,7 +6170,11 @@ export function acquireShapeTextBoxLayout(
       } : {}),
       // Word issue #1668 controls retain overflow in fixed stacked WordArt
       // boxes (wrap square/none and multi-paragraph cases); do not add a body clip.
-      ...((shape.vmlTextRects?.length || shape.textAutofit === 'none') && !stackedWordArt ? { clipBounds: effectiveInnerBounds } : {}),
+      ...((shape.vmlTextRects?.length || shape.textAutofit === 'none') && !stackedWordArt ? {
+        clipBounds: !verticalMode && !shape.vmlTextRects?.length
+          ? wordTextBoxContentClipBounds(effectiveContentBounds, effectiveInnerBounds)
+          : effectiveInnerBounds,
+      } : {}),
       ...(regions?.length ? { clipRects: regions.map(r => ({
         xPt: effectiveContentBounds.xPt+r[0]*effectiveContentBounds.widthPt,
         yPt: effectiveContentBounds.yPt+r[1]*effectiveContentBounds.heightPt,

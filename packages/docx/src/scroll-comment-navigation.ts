@@ -1,6 +1,8 @@
 import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
-import { resolveCommentAnchorRuns } from './comments';
+import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage } from './comments';
+import { overlayBoxes } from './overlay-geometry';
+import { visiblePoint } from './run-clip';
 
 type ScrollBehavior = { behavior?: 'auto' | 'smooth' };
 
@@ -12,12 +14,33 @@ interface CommentNavigationHooks {
   currentDate(): Date | number | undefined;
   showTrackedChanges(): boolean;
   waitForLayout(doc: DocxDocument): Promise<void>;
-  select(commentId: string, page: number, run: Readonly<DocxTextRunInfo>, options?: ScrollBehavior): void;
+  /** `point` (page CSS px) lies in the part of the comment that is seen. */
+  select(commentId: string, page: number, point: Readonly<{ x: number; y: number }>, options?: ScrollBehavior): void;
+}
+
+/** A point of what the page shows of an anchor's `runs`: one that every clip
+ * of the first visible box of its tint shows (overlay-geometry.ts
+ * overlayBoxes, run-clip.ts visiblePoint). The boxes are those of the tint,
+ * made from the runs together: a tab is marked beside the text it leads,
+ * not over the whole height of its line. Undefined when the clips hide
+ * everything. */
+function shownPoint(runs: readonly Readonly<DocxTextRunInfo>[]): Readonly<{ x: number; y: number }> | undefined {
+  for (const box of overlayBoxes(runs)) {
+    const point = visiblePoint(box, box.clips);
+    if (point) return point;
+  }
+  return undefined;
 }
 
 /** DOCX anchor-to-page index for application-owned comment list navigation.
- * Pages are indexed in order because repeated header anchors must resolve to
- * their earliest occurrence; run collection is shared by concurrent requests. */
+ * A comment is reached where it is seen: on the page that carries its card
+ * (CommentAnchorPlacement.cardPageIndex), else on the first page that shows
+ * something of an anchor of it, at the first run with a visible part, and
+ * at a point of that part: the middle of the run's own box may lie where a
+ * clip hides it (a picture wider than its fixed cell). A run its clips hide
+ * whole is not a destination. Pages are indexed in order
+ * because repeated header anchors must resolve to their earliest occurrence;
+ * run collection is shared by concurrent requests. */
 export class DocxScrollCommentNavigation {
   private readonly pageById = new Map<string, number>();
   private readonly runsByPage = new Map<number, {
@@ -48,7 +71,8 @@ export class DocxScrollCommentNavigation {
     anchors: ReturnType<DocxDocument['commentAnchorRanges']>): void {
     if (this.indexedPages.has(page)) return;
     for (const anchor of anchors) {
-      if (!this.pageById.has(anchor.commentId) && resolveCommentAnchorRuns(anchor, runs).length > 0) {
+      if (!this.pageById.has(anchor.commentId)
+        && overlayBoxes(resolveCommentAnchorRunsOnPage(anchor, runs, page)).length > 0) {
         this.pageById.set(anchor.commentId, page);
       }
     }
@@ -96,7 +120,14 @@ export class DocxScrollCommentNavigation {
     if (requestedPage !== undefined && (!Number.isInteger(requestedPage) || requestedPage < 0)) {
       return false;
     }
-    let page = requestedPage ?? this.pageById.get(commentId);
+    const cardPage = (): number | undefined => {
+      for (const anchor of anchors) {
+        const page = commentAnchorPlacement(anchor)?.cardPageIndex;
+        if (page !== undefined) return page;
+      }
+      return undefined;
+    };
+    let page = requestedPage ?? cardPage() ?? this.pageById.get(commentId);
     const scanAvailablePages = async (): Promise<void> => {
       const allAnchors = doc.commentAnchorRanges();
       while (page === undefined && this.frontier < doc.pageCount) {
@@ -121,15 +152,20 @@ export class DocxScrollCommentNavigation {
       this.runsByPage.clear();
       this.indexedPages.clear();
       this.frontier = 0;
-      page = requestedPage;
-      if (requestedPage === undefined && anchors.length > 0) await scanAvailablePages();
+      page = requestedPage ?? cardPage();
+      if (page === undefined && anchors.length > 0) await scanAvailablePages();
     }
     if (anchors.length === 0 || page === undefined ||
         (requestedPage !== undefined && requestedPage >= doc.pageCount)) return false;
     const runs = await this.runsForPage(page, doc);
     if (this.hooks.destroyed()) throw new Error('DocxScrollViewer is destroyed');
     if (this.hooks.document() !== doc || generation !== this.generation || !runs) return false;
-    const target = anchors.flatMap((anchor) => resolveCommentAnchorRuns(anchor, runs))[0];
+    const shownPage = page;
+    let target: Readonly<{ x: number; y: number }> | undefined;
+    for (const anchor of anchors) {
+      target = shownPoint(resolveCommentAnchorRunsOnPage(anchor, runs, shownPage));
+      if (target) break;
+    }
     if (!target) return false;
     this.hooks.select(commentId, page, target, opts);
     return true;

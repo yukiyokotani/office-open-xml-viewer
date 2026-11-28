@@ -212,11 +212,15 @@ export function collectLayoutSourceRevisionRangesIfPresent(
   options: ReviewAnchorProjectionOptions = {},
 ): RevisionAnchorRange[] {
   if ((revisions?.length ?? 0) === 0) return [];
-  const ranges = collectLayoutSourceRevisionRanges(revisions ?? [], source, renderedRunIndex);
+  // A revision is text: its own runs and the run that stands in for a
+  // deletion are chosen among the laid-out text, not the tabs and inline
+  // objects the rendered index may also list.
+  const textRunIndex = options.textRunIndex ?? renderedRunIndex;
+  const ranges = collectLayoutSourceRevisionRanges(revisions ?? [], source, textRunIndex);
   const completed = options.completedSourceKeys;
   if (completed === undefined) return ranges;
   return ranges.filter((range) => {
-    const indices = renderedRunIndex.get(sourceKey(range.source));
+    const indices = textRunIndex.get(sourceKey(range.source));
     const hasCoveredRun = indices !== undefined && [...indices].some((index) =>
       index >= range.startRunIndex && index < range.endRunIndex);
     return hasCoveredRun || completed.has(sourceKey(range.source));

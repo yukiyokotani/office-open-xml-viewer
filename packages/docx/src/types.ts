@@ -1846,6 +1846,16 @@ export interface DocxStorySource {
 }
 
 /** Information about a rendered text segment for overlays and read-only integrations. */
+/** A clip region in canvas CSS px; see {@link DocxTextRunInfo.clips}. */
+export interface DocxClipRegion {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly transform?: string;
+  readonly rects?: readonly Readonly<{ x: number; y: number; width: number; height: number }>[];
+}
+
 export interface DocxTextRunInfo {
   /** Canonical structural source of the owning paragraph. */
   source?: Readonly<DocxStorySource>;
@@ -1892,12 +1902,63 @@ export interface DocxTextRunInfo {
   referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
+  /** Where each glyph cluster of `text` lies, from the layout's retained
+   * geometry: UTF-16 offsets `[start, end)` in `text` and whether the cluster
+   * reads right to left. Each cluster has two intervals along the run, in
+   * CSS px from `x`: its advance box `x`/`width`, from its pen to the next
+   * pen (tracking included), for the caret, hit testing and selection; and
+   * its glyph box `glyphX`/`glyphWidth`, where its paint operation draws its
+   * glyph (its drawn advance, a floored condensed glyph and a centred
+   * vertical-text cell included), for find highlights, comment highlights
+   * and clip visibility. The glyph box is listed only where it differs from
+   * the advance box. The run's final cluster carries `trackingExcluded` when
+   * its box already leaves out the tracking after it (a fitted run). Across
+   * the run a glyph is painted in the run's font box
+   * ({@link highlightBounds}) unless the cluster carries
+   * `glyphY`/`glyphHeight`, its own interval across the run from the run's
+   * top, in CSS px: a vertical-text cell drawn centred on its column, or a
+   * tate-chu-yoko character. A tate-chu-yoko character stands upright across
+   * the run: both boxes span the run's cell along it, and `y`/`height` place
+   * its advance box across the run. Overlays use these instead of measuring
+   * text. */
+  clusterBoxes?: readonly Readonly<{
+    start: number; end: number; x: number; width: number; rtl: boolean; trackingExcluded?: true;
+    glyphX?: number; glyphWidth?: number;
+    y?: number; height?: number;
+    glyphY?: number; glyphHeight?: number;
+  }>[];
   /** CSS transform used by the overlay for vertical-page text. */
   transform?: string;
   /** Resolved external or internal hyperlink target. */
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
+  /** Set on an entry that stands for inline content without text: a tab
+   *  (`'tab'`) or an inline picture, chart, equation or drawing
+   *  (`'object'`). `text` is empty, `x`/`y`/`w`/`h` are the box it occupies
+   *  on its line, and `sourceRunIndex` its source run, so a reader that marks
+   *  a range of source runs (a comment) covers it with the text around it.
+   *  `font` and `fontSize` carry no meaning. */
+  inlineContent?: 'tab' | 'object';
+  /** Every clip the run is painted under (a table cell, an exact-height
+   *  row, a text box), outermost first, turned clips included; the run is
+   *  visible only where all of them overlap. Each is placed like
+   *  {@link highlightBounds}: `x`/`y` is the canvas CSS px position of its
+   *  top-left corner, `width`/`height` lie along its own axes, and
+   *  `transform` (about that corner) orients it. A clip with `rects` is
+   *  their union instead of its whole box (a VML text box's text
+   *  rectangles); each is given as offsets along the clip's axes from its
+   *  corner. These are the logical clips; the Canvas widens a cell's clip
+   *  to whole device pixels. An overlay that nests one `overflow:hidden`
+   *  container per clip (cut to `rects` where present), as the viewer's
+   *  text, find and comment layers do, has the browser clip the run exactly
+   *  for any transform or responsive resize. Positions and lengths are
+   *  written in percentages of the page, so an overlay must be resized with
+   *  the page's aspect ratio, as the page itself is: scale the canvas and its
+   *  overlay layer uniformly (for example a CSS width with `height:auto`);
+   *  scaling one axis alone distorts a turned clip. Absent for an unclipped
+   *  run. */
+  clips?: readonly Readonly<DocxClipRegion>[];
 }
 
 export interface RenderPageOptions {

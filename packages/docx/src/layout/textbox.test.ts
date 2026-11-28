@@ -357,7 +357,9 @@ describe('rich text-box story acquisition', () => {
       kind: 'textbox',
       story: retainedStory,
       flowBounds: { xPt: 5, yPt: 8, widthPt: 86, heightPt: 52 },
-      clipBounds: { xPt: 7, yPt: 11, widthPt: 80, heightPt: 44 },
+      // word-text-box-content-clip: the whole shape width, inside the
+      // top and bottom insets.
+      clipBounds: { xPt: 5, yPt: 11, widthPt: 86, heightPt: 44 },
       transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     });
     expect(layout).not.toHaveProperty('paragraphs');

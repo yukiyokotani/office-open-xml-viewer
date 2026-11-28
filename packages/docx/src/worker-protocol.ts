@@ -1,6 +1,6 @@
 import type { LayoutDiagnostic } from './layout/types.js';
 import type { DocComment, DocNote, DocRevision, RenderPageOptions, WorkerResponse } from './types';
-import type { CommentAnchorRange } from './comments';
+import type { CommentAnchorPlacement, CommentAnchorRange } from './comments';
 import type { RevisionAnchorRange } from './revisions';
 import type { DocxTextRunInfo } from './renderer';
 import type {
@@ -41,6 +41,10 @@ export interface DocumentMeta {
    *  text runs, so consumers can join anchors to geometry without the full
    *  model. Absent for metadata produced by an older worker build. */
   commentAnchorRanges?: CommentAnchorRange[];
+  /** Where the worker's layout places each of `commentAnchorRanges`,
+   *  index-aligned (comments.ts CommentAnchorPlacement); absent when none is
+   *  placed. The host joins the two when it first reads the ranges. */
+  commentAnchorPlacements?: (CommentAnchorPlacement | null)[];
   /** ECMA-376 §17.13.5 revision ranges joined to retained source identities.
    * Deletions carry a deterministic final-state geometry fallback. */
   revisionAnchorRanges?: RevisionAnchorRange[];
@@ -60,6 +64,7 @@ export type DocumentLayoutMeta = Pick<
   | 'pageSizes'
   | 'bookmarkPages'
   | 'commentAnchorRanges'
+  | 'commentAnchorPlacements'
   | 'revisionAnchorRanges'
 >;
 
@@ -83,6 +88,8 @@ export interface DocumentLayoutPartial {
   bookmarkPages: [string, number][];
   /** Comment anchors resolvable within the published prefix. */
   commentAnchorRanges?: CommentAnchorRange[];
+  /** The placements of `commentAnchorRanges` in the published prefix. */
+  commentAnchorPlacements?: (CommentAnchorPlacement | null)[];
   /** Revision anchors resolvable within the published prefix. */
   revisionAnchorRanges?: RevisionAnchorRange[];
   /** Whether these pages are known to match the final layout. Always false
@@ -157,7 +164,10 @@ export type RenderWorkerRequest =
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
-  | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  // `commentAnchors` asks, with the runs, for the comment anchors of the
+  // layout they are read from, placed against it: one answer from one
+  // retained layout, so the two cannot come from different publications.
+  | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions; commentAnchors?: true }
   | {
       type: 'hitTestElement';
       id: number;
@@ -209,7 +219,14 @@ export type RenderWorkerResponse =
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[]; diagnostics?: readonly LayoutDiagnostic[] }
-  | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  | {
+      type: 'runsCollected';
+      id: number;
+      runs: DocxTextRunInfo[];
+      /** With `commentAnchors`: the anchors of the runs' layout. */
+      commentAnchorRanges?: CommentAnchorRange[];
+      commentAnchorPlacements?: (CommentAnchorPlacement | null)[];
+    }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
   // authoritative `parsedMeta`. Keyed by `forId` rather than `id` ON PURPOSE —

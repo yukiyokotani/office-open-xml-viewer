@@ -1,4 +1,4 @@
-import { buildTextIndex, findMatches } from '../search/text-index';
+import { buildTextIndex, findAcceptedMatches } from '../search/text-index';
 import { nextActive, prevActive } from '../search/find-cursor';
 import type { FindMatchesOptions, SearchRun, TextMatch } from '../search/text-index';
 import type { FindMatch } from '../search/find-match';
@@ -101,8 +101,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
     for (let unit = 0; unit < units; unit++) {
       if (!included[unit]) continue;
       const runs = committedRuns.get(unit) ?? [];
-      for (const match of findMatches(buildTextIndex(runs), query, opts)) {
-        if (!this._acceptMatch(runs, match.slices)) continue;
+      // Acceptance is part of the scan: an occurrence that is not accepted
+      // must not take the place of an accepted one that overlaps it.
+      for (const match of findAcceptedMatches(buildTextIndex(runs), query, opts,
+        (slices) => this._acceptMatch(runs, slices))) {
         const text = match.slices.map((slice) =>
           runs[slice.runIndex].text.slice(slice.start, slice.end)).join('');
         matches.push({ unit, text, slices: match.slices });

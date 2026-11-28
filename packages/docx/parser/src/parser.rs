@@ -12297,14 +12297,17 @@ fn parse_shape_text_body(
     // `noAutofit → "none"` (fixed box; retained layout owns the overflow policy),
     // `spAutoFit → "sp"` (box grows to fit), `normAutofit → "norm"` (text
     // shrinks to fit). This matches the pptx path so all three formats emit the
-    // same enum; an absent auto-fit ⇒ None (overflow visible).
-    let autofit = body_pr.and_then(|b| {
-        b.children().find_map(|n| match n.tag_name().name() {
-            "noAutofit" if n.is_element() => Some("none".to_string()),
-            "spAutoFit" if n.is_element() => Some("sp".to_string()),
-            "normAutofit" if n.is_element() => Some("norm".to_string()),
-            _ => None,
-        })
+    // same enum. ECMA-376 §21.1.2.1.2: when a bodyPr names no auto-fit,
+    // noAutofit is implied, so it is "none" (a fixed box) as well.
+    let autofit = body_pr.map(|b| {
+        b.children()
+            .find_map(|n| match n.tag_name().name() {
+                "noAutofit" if n.is_element() => Some("none".to_string()),
+                "spAutoFit" if n.is_element() => Some("sp".to_string()),
+                "normAutofit" if n.is_element() => Some("norm".to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "none".to_string())
     });
     let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
     // ECMA-376 §21.1.2.1.1 defaults: lIns=rIns=91440 EMU, tIns=bIns=45720 EMU
@@ -28501,7 +28504,7 @@ mod txbx_inline_image_tests {
     /// `parse_shape_text_body` normalizes the bodyPr auto-fit CHILD element
     /// (§21.1.2.1.1) to the shared core vocabulary: `<a:noAutofit/>` ⇒
     /// Some("none") (fixed box → the renderer clips overflow), `<a:spAutoFit/>`
-    /// ⇒ Some("sp"), and an absent auto-fit ⇒ None (overflow visible).
+    /// ⇒ Some("sp"), and an absent auto-fit ⇒ Some("none") (§21.1.2.1.2).
     #[test]
     fn parse_shape_text_body_records_autofit_mode() {
         let wsp = |body_pr: &str| {
@@ -28533,7 +28536,8 @@ mod txbx_inline_image_tests {
             autofit_of(wsp(r#"<wps:bodyPr><a:spAutoFit/></wps:bodyPr>"#)).as_deref(),
             Some("sp")
         );
-        assert_eq!(autofit_of(wsp(r#"<wps:bodyPr/>"#)), None);
+        // §21.1.2.1.2: an omitted auto-fit implies noAutofit.
+        assert_eq!(autofit_of(wsp(r#"<wps:bodyPr/>"#)).as_deref(), Some("none"));
     }
 
     /// `parse_shape_text_body` carries the `<wps:bodyPr vert>` attribute

@@ -132,3 +132,25 @@ export function wordTrackChangeDecoration(
   if (kind === 'deletion' || kind === 'moveFrom') return DELETION_TRACK_CHANGE_DECORATION;
   return NO_TRACK_CHANGE_DECORATION;
 }
+
+export const WORD_TEXT_BOX_CONTENT_CLIP = defineCompatibilityRule({
+  id: 'word-text-box-content-clip',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'cell-content-clip-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.37 / §21.1.2.1.1 define the text-box insets but no clip. Windows Word 16.0.20625 clips a fixed-size (noAutofit, which §21.1.2.1.2 also implies when bodyPr names no auto-fit) horizontal DrawingML text box to one box: horizontally the whole shape (a 300pt box with 2.83pt left and right insets clips at its edges, not at the insets), vertically inside the top and bottom insets (28.35pt and 2.83pt). A picture raised past the first line is cut at the top inset; one lowered past the last line is drawn while it stays above the bottom inset. The clip is the box, not the line, as for table cells (word-cell-content-clip). The clip edges lie a further half outline (0.25pt) inside; the library clips at the shape edge. Library scope: vertical text boxes, VML text boxes and autofit boxes keep their established clip (unmeasured).',
+});
+
+/** WORD_TEXT_BOX_CONTENT_CLIP: the clip of a horizontal DrawingML text box,
+ * from its shape bounds and its inner (inset) bounds. */
+export function wordTextBoxContentClipBounds<Rect extends Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>>(
+  shapeBounds: Rect,
+  innerBounds: Rect,
+): Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }> {
+  void WORD_TEXT_BOX_CONTENT_CLIP;
+  return { xPt: shapeBounds.xPt, yPt: innerBounds.yPt, widthPt: shapeBounds.widthPt, heightPt: innerBounds.heightPt };
+}

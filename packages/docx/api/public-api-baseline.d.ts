@@ -1182,6 +1182,8 @@ export interface CommentAnchorRange {
     readonly endRunIndex: number;
     readonly reference: CommentAnchorPoint;
     readonly geometryFallback?: CommentAnchorGeometryFallback;
+    readonly coveredGeometry?: true;
+    readonly cardOwner?: true;
 }
 export type DecodedImageBudgetStrategy = 'adaptive' | 'strict';
 export interface DocComment {
@@ -1339,6 +1341,19 @@ export interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
+export interface DocxClipRegion {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly transform?: string;
+    readonly rects?: readonly Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    }>[];
+}
 export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
 export interface DocxCommentHighlightRect {
     readonly x: number;
@@ -1346,6 +1361,7 @@ export interface DocxCommentHighlightRect {
     readonly width: number;
     readonly height: number;
     readonly transform?: string;
+    readonly clips?: readonly Readonly<DocxClipRegion>[];
 }
 export interface DocxCommentMark {
     id: string;
@@ -1631,9 +1647,25 @@ export interface DocxTextRunInfo {
         scale: number;
     }>;
     letterSpacingPx?: number;
+    clusterBoxes?: readonly Readonly<{
+        start: number;
+        end: number;
+        x: number;
+        width: number;
+        rtl: boolean;
+        trackingExcluded?: true;
+        glyphX?: number;
+        glyphWidth?: number;
+        y?: number;
+        height?: number;
+        glyphY?: number;
+        glyphHeight?: number;
+    }>[];
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
+    inlineContent?: 'tab' | 'object';
+    clips?: readonly Readonly<DocxClipRegion>[];
 }
 export interface DocxTextSelectionContext {
     readonly format: 'docx';

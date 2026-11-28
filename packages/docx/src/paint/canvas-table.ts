@@ -16,7 +16,7 @@ import {
   paintCompoundBorderFrame,
   paintStrokeSegment,
 } from './canvas-border.js';
-import { paintParagraphLayout } from './canvas-text.js';
+import { paintParagraphLayout, paragraphEscapesCellClip } from './canvas-text.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import type { CanvasPaintContext } from './types.js';
 
@@ -66,6 +66,7 @@ function paintPlacedChild(
   placement: Readonly<{ xPt: number; yPt: number }>,
   context: CanvasPaintContext,
   paintOwnTableBorders = true,
+  cellContentClip?: LayoutRect,
 ): void {
   const dxPt = placement.xPt - layout.flowBounds.xPt;
   const dyPt = placement.yPt - layout.flowBounds.yPt;
@@ -77,14 +78,36 @@ function paintPlacedChild(
     context.pointToCss ?? scaleAffine(context.scale),
     translationAffine(dxPt, dyPt),
   );
-  const frame = canvasPaintFrame(context.ctx, () => context.ctx.translate(dxPt, dyPt));
-  const childContext = {
+  // WORD_CELL_CONTENT_CLIP: a cell paragraph paints under the cell content
+  // clip, widened to whole device pixels so content flush with the cell edge
+  // keeps a single anti-aliased edge instead of being faded by a second,
+  // fractional clip edge. A paragraph without escaping content is clipped
+  // whole in this frame; otherwise the clip is handed to the paragraph.
+  // An empty clip stays empty: widening it would open a one-pixel strip.
+  const clip = cellContentClip && layout.kind === 'paragraph'
+    ? cellContentClip.widthPt <= 0 || cellContentClip.heightPt <= 0
+      ? cellContentClip : outwardRasterClipBounds(cellContentClip, context)
+    : undefined;
+  const clipWhole = clip !== undefined && layout.kind === 'paragraph'
+    && !paragraphEscapesCellClip(layout, context.omitAnchoredDrawings);
+  const frame = canvasPaintFrame(context.ctx, () => {
+    if (clipWhole) {
+      context.ctx.beginPath();
+      context.ctx.rect(clip.xPt, clip.yPt, clip.widthPt, clip.heightPt);
+      context.ctx.clip();
+    }
+    context.ctx.translate(dxPt, dyPt);
+  });
+  const childContext: CanvasPaintContext = {
     ...context,
     pointToCss,
     layoutTranslationPt: {
       xPt: parentLayoutTranslation.xPt + dxPt,
       yPt: parentLayoutTranslation.yPt + dyPt,
     },
+    ...(clip && !clipWhole
+      ? { cellContentClip: { ...clip, xPt: clip.xPt - dxPt, yPt: clip.yPt - dyPt } }
+      : {}),
   };
   frame(() => {
     if (layout.kind === 'paragraph') paintParagraphLayout(layout, childContext);
@@ -174,21 +197,27 @@ function paintTableContents(
           cell.flowBounds.heightPt,
         );
       }
+      const placeBlock = (block: (typeof cell.blocks)[number]) => ({
+        // Paragraphs are normalized to the cell content origin. A nested
+        // table's own flowBounds additionally retain jc/tblInd placement
+        // within that band, so translate its coordinate space by the outer
+        // content origin without erasing that local offset.
+        xPt: cell.contentBounds.xPt
+          + (block.layout.kind === 'table' ? block.layout.flowBounds.xPt : 0),
+        yPt: cell.flowBounds.yPt + block.offsetPt
+          + (block.layout.kind === 'table' ? block.layout.flowBounds.yPt : 0),
+      });
+      // WORD_CELL_CONTENT_CLIP: paragraphs paint under the cell content clip;
+      // a nested table is not clipped by it.
+      const contentClip = cell.contentClipBounds;
       const paintBlocks = (
         blockContext: CanvasPaintContext,
         paintDirectNestedTableBorders = true,
       ): void => {
         for (const block of cell.blocks) {
-          paintPlacedChild(block.layout, {
-            // Paragraphs are normalized to the cell content origin. A nested
-            // table's own flowBounds additionally retain jc/tblInd placement
-            // within that band, so translate its coordinate space by the outer
-            // content origin without erasing that local offset.
-            xPt: cell.contentBounds.xPt
-              + (block.layout.kind === 'table' ? block.layout.flowBounds.xPt : 0),
-            yPt: cell.flowBounds.yPt + block.offsetPt
-              + (block.layout.kind === 'table' ? block.layout.flowBounds.yPt : 0),
-          }, blockContext, block.layout.kind !== 'table' || paintDirectNestedTableBorders);
+          paintPlacedChild(block.layout, placeBlock(block), blockContext,
+            block.layout.kind !== 'table' || paintDirectNestedTableBorders,
+            block.layout.kind === 'paragraph' ? contentClip : undefined);
         }
       };
       if (cell.verticalText) {

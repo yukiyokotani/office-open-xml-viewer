@@ -1,5 +1,7 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
-import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
+import { collectLayoutSourceCommentRangesIfPresent, type CommentAnchorPlacement } from './comments.js';
+import { isProvisionalLayout } from './review-projection.js';
+import { textRunsForPage } from './text-run-projection.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
@@ -27,8 +29,24 @@ export function projectRenderWorkerLayoutMeta(
   const reviewIndex = hasComments || hasRevisions
     ? reviewProjectionIndexForDocument(layout)
     : undefined;
-  const reviewProjection = options.provisional && reviewIndex
-    ? { completedSourceKeys: reviewIndex.completedSourceKeys }
+  // A published prefix is projected as one by every route that reads it
+  // (its publication, a view selection, a runs request), not only by the
+  // route that says so: the mark belongs to the layout.
+  const provisional = options.provisional === true || isProvisionalLayout(layout);
+  const reviewProjection = reviewIndex
+    ? {
+        ...(provisional ? { completedSourceKeys: reviewIndex.completedSourceKeys } : {}),
+        // Each comment's card owner is decided once against this layout.
+        cardOwners: {
+          sourcePages: reviewIndex.sourcePages,
+          runsForPage: (pageIndex: number) => textRunsForPage(layout as DocumentLayout, pageIndex, { scale: 1 }),
+        },
+        splitRuns: reviewIndex.splitRuns,
+        textRunIndex: reviewIndex.textRunIndex,
+        // A placement is kept beside its range, so it is sent beside the
+        // ranges: the collector fills this as it returns them.
+        commentAnchorPlacements: [] as (CommentAnchorPlacement | null)[],
+      }
     : undefined;
   return {
     diagnostics: layout.diagnostics,
@@ -46,6 +64,9 @@ export function projectRenderWorkerLayoutMeta(
           reviewProjection,
         )
       : [],
+    // Evaluated after the ranges above. Always present: a view switch
+    // replaces the previous view's placements.
+    commentAnchorPlacements: reviewProjection?.commentAnchorPlacements ?? [],
     revisionAnchorRanges: hasRevisions
       ? collectLayoutSourceRevisionRangesIfPresent(
           review.revisions,
@@ -73,4 +94,37 @@ export function renderWorkerLayoutMeta(
     showTrackedChanges,
   ));
   return projectRenderWorkerLayoutMeta(layout, source, review);
+}
+
+const COMMENT_ANCHORS_BY_LAYOUT = new WeakMap<object, Pick<
+  DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'
+>>();
+
+/** The comment anchors of one retained worker variant, placed against it,
+ * without selecting it: the host binds them to the runs it collects from
+ * that layout. A layout that is a published prefix is projected as one, as
+ * its publication was. Kept with the layout. */
+export function renderWorkerCommentAnchors(
+  doc: RetainedRenderWorkerDocumentLayout,
+  review: RenderWorkerReviewIndexInput,
+  currentDate: Date | number | undefined,
+  showTrackedChanges: boolean,
+): Pick<DocumentLayoutMeta, 'commentAnchorRanges' | 'commentAnchorPlacements'> {
+  const source = layoutSourceStoreOf(doc.layoutServices);
+  if (!source) throw new Error('Document layout source is not initialized');
+  const layout = doc.layoutVariants.layoutFor(normalizeLayoutOptions(
+    currentDate,
+    doc.defaultCurrentDateMs,
+    showTrackedChanges,
+  ));
+  let anchors = COMMENT_ANCHORS_BY_LAYOUT.get(layout);
+  if (!anchors) {
+    const meta = projectRenderWorkerLayoutMeta(layout, source, { comments: review.comments, revisions: [] });
+    anchors = {
+      commentAnchorRanges: meta.commentAnchorRanges,
+      commentAnchorPlacements: meta.commentAnchorPlacements,
+    };
+    COMMENT_ANCHORS_BY_LAYOUT.set(layout, anchors);
+  }
+  return anchors;
 }

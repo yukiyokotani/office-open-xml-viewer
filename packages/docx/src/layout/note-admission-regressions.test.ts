@@ -20,6 +20,10 @@ import * as bodyPagination from './body-pagination.js';
 import { NoteRecoveryProgress } from './note-recovery-progress.js';
 import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
+/** The retained glyph advances of text clusters (overlay geometry, not
+ * placement) are left out, so the digests pin the placement bytes. */
+const withoutGlyphAdvances = (key: string, value: unknown) => key === 'glyphAdvancePt' ? undefined : value;
+
 type Kind = 'footnote' | 'endnote';
 const context = {
   font: '10px serif', letterSpacing: '0px', fontKerning: 'auto',
@@ -155,22 +159,24 @@ function assertLinearRecovery(results: readonly { work: number }[]) {
 // isolated clean origin/v0.89 (cb78d8a60119ae78a3e03b126612dafe2f2d8d8a)
 // source tree with these exact synthetic models and measurement service. This
 // covers IDs, source cuts, fields, ordering and all geometry, not a summary.
+// The table digests were re-recorded when cells gained contentClipBounds
+// (word-cell-content-clip); without that field they equal the v0.89 digests.
 const ordinaryLayouts = [
-  {"kind": "footnote", "continuation": false, "shape": "unequal-tables", "digest": "4fefc479c58b523bb907037b248a52172a3879836517a4542926004a96180806"},
+  {"kind": "footnote", "continuation": false, "shape": "unequal-tables", "digest": "fe4aaf3de5f1a432da16ccbfce2b9d506479376d0d988c9e3a9304e380e5fbff"},
   {"kind": "footnote", "continuation": false, "shape": "paragraph-balance", "digest": "1066b4d932565e4dcd66c3d37fd1afeb6968ecb3818172f5aa3e1cb3ac752ecd"},
-  {"kind": "footnote", "continuation": false, "shape": "fitting-table", "digest": "6299910a1ea7dd2c1895da21471592e7022bc86971de6c8670e99c54d6f05109"},
-  {"kind": "footnote", "continuation": true, "shape": "unequal-tables", "digest": "4fefc479c58b523bb907037b248a52172a3879836517a4542926004a96180806"},
+  {"kind": "footnote", "continuation": false, "shape": "fitting-table", "digest": "de7391029385a705633f89c1dc5034cf19fc1029fd67d0bf5526f0e96d240423"},
+  {"kind": "footnote", "continuation": true, "shape": "unequal-tables", "digest": "fe4aaf3de5f1a432da16ccbfce2b9d506479376d0d988c9e3a9304e380e5fbff"},
   {"kind": "footnote", "continuation": true, "shape": "paragraph-balance", "digest": "1066b4d932565e4dcd66c3d37fd1afeb6968ecb3818172f5aa3e1cb3ac752ecd"},
-  {"kind": "footnote", "continuation": true, "shape": "fitting-table", "digest": "6299910a1ea7dd2c1895da21471592e7022bc86971de6c8670e99c54d6f05109"},
+  {"kind": "footnote", "continuation": true, "shape": "fitting-table", "digest": "de7391029385a705633f89c1dc5034cf19fc1029fd67d0bf5526f0e96d240423"},
   {"kind": "footnote", "continuation": true, "shape": "text-continuation", "digest": "7d20682eb418137707eebde5a71146602ae65ceee30c6921caaf2578ae379341"},
-  {"kind": "endnote", "continuation": false, "shape": "unequal-tables", "digest": "8b4911e12ccda128c4c2f3d41540e30c4f9efa80f6fc50771e2a6e10547f2c89"},
+  {"kind": "endnote", "continuation": false, "shape": "unequal-tables", "digest": "5c01310d382e6713ed97260017fd8395a5384d3a61a9ce21754e4b9d1c25a1bb"},
   {"kind": "endnote", "continuation": false, "shape": "paragraph-balance", "digest": "a35e290ffdc3624825268111ea1b5ef5527e57b9c233fd675894ccabe1262aab"},
-  {"kind": "endnote", "continuation": false, "shape": "fitting-table", "digest": "4bf15267e202da14e518c5c4c8a0a8b2dcf2b3003ba417660efda8dbe0700146"},
+  {"kind": "endnote", "continuation": false, "shape": "fitting-table", "digest": "5d11548814635d39c3e8d0e808d6dbc5a69b40cbb561c9fda60f1c7491d1a4a1"},
   {"kind": "endnote", "continuation": false, "shape": "text-continuation", "digest": "934a6aa5d2f953d51fd253b82a9e94057dc6062f549c887c2bfeed49ee80c8c3"},
   {"kind": "endnote", "continuation": false, "shape": "three-heads", "digest": "c927ddc7a87d54ebbdf1ae499d68bc6e558df1f36f355a056ec74966507826ab"},
-  {"kind": "endnote", "continuation": true, "shape": "unequal-tables", "digest": "8b4911e12ccda128c4c2f3d41540e30c4f9efa80f6fc50771e2a6e10547f2c89"},
+  {"kind": "endnote", "continuation": true, "shape": "unequal-tables", "digest": "5c01310d382e6713ed97260017fd8395a5384d3a61a9ce21754e4b9d1c25a1bb"},
   {"kind": "endnote", "continuation": true, "shape": "paragraph-balance", "digest": "a35e290ffdc3624825268111ea1b5ef5527e57b9c233fd675894ccabe1262aab"},
-  {"kind": "endnote", "continuation": true, "shape": "fitting-table", "digest": "4bf15267e202da14e518c5c4c8a0a8b2dcf2b3003ba417660efda8dbe0700146"},
+  {"kind": "endnote", "continuation": true, "shape": "fitting-table", "digest": "5d11548814635d39c3e8d0e808d6dbc5a69b40cbb561c9fda60f1c7491d1a4a1"},
   {"kind": "endnote", "continuation": true, "shape": "text-continuation", "digest": "934a6aa5d2f953d51fd253b82a9e94057dc6062f549c887c2bfeed49ee80c8c3"},
   {"kind": "endnote", "continuation": true, "shape": "three-heads", "digest": "c927ddc7a87d54ebbdf1ae499d68bc6e558df1f36f355a056ec74966507826ab"},
 ] as const;
@@ -837,7 +843,7 @@ describe('reviewed note admission regressions', () => {
     expectConserved(layout, shape === 'three-heads'
       ? { '7': 'head-7;tail-7;', '8': 'head-8;tail-8;', '9': 'head-9;tail-9;' } : { '7': expected }, kind);
     expect(layout.pages.length).toBeLessThanOrEqual(2);
-    expect(createHash('sha256').update(JSON.stringify(layout)).digest('hex')).toBe(digest);
+    expect(createHash('sha256').update(JSON.stringify(layout, withoutGlyphAdvances)).digest('hex')).toBe(digest);
   });
 
   it.each(['footnote', 'endnote'] as const)('bounds overflow balancing for a twelve-paragraph %s', kind => {

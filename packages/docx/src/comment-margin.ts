@@ -1,3 +1,5 @@
+import { clippedBoxBounds, OverlayClipFrames } from './run-clip.js';
+import { overlayBoxes, type OverlayBox } from './overlay-geometry.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -18,7 +20,7 @@ import type {
   ReadOnlyCommentThreadGeometry,
 } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
 import { relativeElementRect } from '@silurus/ooxml-core/internal/dom-geometry';
-import { resolveCommentAnchorRuns, type CommentAnchorRange } from './comments.js';
+import { commentAnchorPlacement, resolveCommentAnchorRunsOnPage, type CommentAnchorRange } from './comments.js';
 import { sourceKey } from './layout/source-key.js';
 import type { DocxTextRunInfo } from './renderer.js';
 import type { DocComment } from './types.js';
@@ -31,19 +33,32 @@ interface CommentThread {
 export interface DocxCommentMarginModel {
   readonly comments: readonly DocComment[];
   readonly anchors: readonly CommentAnchorRange[];
+  /** The page the margin is built for. A range decided for the whole
+   * document (CommentAnchorRange.cardOwner) carries its card only on the
+   * page it was placed on (CommentAnchorPlacement.cardPageIndex), and an
+   * anchor shown at one end of a run that crosses a page break is shown on
+   * the page that holds that end; without a page index every page that
+   * shows the range does both. */
+  readonly pageIndex?: number;
 }
 
 interface ResolvedPageCommentAnchor {
   readonly anchor: Readonly<CommentAnchorRange>;
   readonly runs: readonly Readonly<DocxTextRunInfo>[];
+  /** What the page shows of the anchor (overlay-geometry.ts): never empty. */
+  readonly boxes: readonly OverlayBox[];
 }
 
 /** Resolve only anchors whose authored, reference, or final-state fallback
  * source occurs in this page's projected runs. A mounted page must not pay the
- * `anchors × runs` join cost for comments belonging to every other page. */
+ * `anchors × runs` join cost for comments belonging to every other page. An
+ * anchor whose content the page hides whole (clipped away) has nothing to
+ * show on it and is not resolved, as in the comment API: it gets no tint, no
+ * marker and no card. */
 export function resolvePageCommentAnchors(
   anchors: readonly Readonly<CommentAnchorRange>[],
   runs: readonly Readonly<DocxTextRunInfo>[],
+  pageIndex?: number,
 ): readonly ResolvedPageCommentAnchor[] {
   const pageSources = new Set<string>();
   for (const run of runs) {
@@ -57,8 +72,10 @@ export function resolvePageCommentAnchors(
       (anchor.geometryFallback !== undefined &&
         pageSources.has(sourceKey(anchor.geometryFallback.source)));
     if (!mayResolve) continue;
-    const resolved = resolveCommentAnchorRuns(anchor, runs);
-    if (resolved.length > 0) pageAnchors.push({ anchor, runs: resolved });
+    const resolved = resolveCommentAnchorRunsOnPage(anchor, runs, pageIndex);
+    if (resolved.length === 0) continue;
+    const boxes = overlayBoxes(resolved);
+    if (boxes.length > 0) pageAnchors.push({ anchor, runs: resolved, boxes });
   }
   return pageAnchors;
 }
@@ -116,60 +133,26 @@ function toMessage(comment: DocComment, occurrenceKey: string, index: number): R
 
 function createTint(
   layer: HTMLDivElement,
-  run: Readonly<DocxTextRunInfo>,
-  cssWidth: number,
-  cssHeight: number,
+  box: OverlayBox,
   active: boolean,
   accent: string,
+  clipFrames: OverlayClipFrames,
 ): HTMLDivElement {
+  // A clipped box also lies in containers of its clips, which cut it like
+  // the glyphs at any angle.
+  const frame = clipFrames.place(box);
   const tint = layer.ownerDocument.createElement('div');
   tint.style.cssText =
     `--ooxml-comment-author-accent:${accent};` +
-    `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-    `width:${overlayPercent(run.w, cssWidth)};height:${overlayPercent(run.h, cssHeight)};`;
+    frame.position(0, 0) +
+    `width:${frame.width(box.width)};height:${frame.height(box.height)};`;
   tint.dataset.ooxmlCommentHighlight = '';
   tint.dataset.active = String(active);
-  if (run.transform) {
-    tint.style.transform = run.transform;
+  if (frame.orientation) {
+    tint.style.transform = frame.orientation;
   }
-  layer.appendChild(tint);
+  frame.parent.appendChild(tint);
   return tint;
-}
-
-function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo {
-  const bounds = run.highlightBounds;
-  return {
-    ...run,
-    x: bounds?.x ?? run.x,
-    y: bounds?.y ?? run.y,
-    w: bounds?.width ?? run.w,
-    h: bounds?.height ?? run.h,
-  };
-}
-
-/** Fill the whitespace between consecutive anchor runs on one rendered line.
- * Exact line geometry and transform equality are the boundary: this never uses
- * a proximity threshold and never joins different baselines or transforms. */
-function mergeSameLineRuns(
-  runs: readonly Readonly<DocxTextRunInfo>[],
-): Readonly<DocxTextRunInfo>[] {
-  const merged: DocxTextRunInfo[] = [];
-  for (const run of runs) {
-    const previous = merged.at(-1);
-    if (
-      previous &&
-      previous.y === run.y &&
-      previous.h === run.h &&
-      previous.transform === run.transform
-    ) {
-      const left = Math.min(previous.x, run.x);
-      const right = Math.max(previous.x + previous.w, run.x + run.w);
-      merged[merged.length - 1] = { ...previous, x: left, w: right - left };
-      continue;
-    }
-    merged.push({ ...run });
-  }
-  return merged;
 }
 
 /** Build one page's range tint and authored-order margin cards. A thread card is
@@ -200,49 +183,89 @@ export function buildDocxCommentMargin(
     readOnlyCommentAuthorAccent(thread.root.author),
   ]));
   const visibleThreadIds = new Set(threads.map((thread) => thread.root.id));
-  const firstAnchor = new Map<string, CommentAnchorRange>();
-  for (const anchor of model.anchors) {
-    if (visibleThreadIds.has(anchor.commentId) && !firstAnchor.has(anchor.commentId)) {
-      firstAnchor.set(anchor.commentId, anchor);
-    }
-  }
-  const resolvedPageAnchors = resolvePageCommentAnchors(model.anchors, runs);
+  const resolvedPageAnchors = resolvePageCommentAnchors(model.anchors, runs, model.pageIndex);
   const resolvedAnchorSet = new Set(resolvedPageAnchors.map(({ anchor }) => anchor));
+  const pageSources = new Set<string>();
+  for (const run of runs) {
+    if (run.source) pageSources.add(sourceKey(run.source));
+  }
+  const cardAnchor = new Map<string, CommentAnchorRange>();
+  const cardElsewhere = new Set<string>();
+  // A range decided for the whole document (CommentAnchorRange.cardOwner)
+  // carries its thread's card on its first page that shows it, and no
+  // other page draws the card; nothing is decided per page.
+  for (const anchor of model.anchors) {
+    if (!anchor.cardOwner || !visibleThreadIds.has(anchor.commentId)) continue;
+    const cardPageIndex = commentAnchorPlacement(anchor)?.cardPageIndex;
+    if (model.pageIndex === undefined || cardPageIndex === undefined
+      || cardPageIndex === model.pageIndex) cardAnchor.set(anchor.commentId, anchor);
+    else cardElsewhere.add(anchor.commentId);
+  }
+  for (const anchor of model.anchors) {
+    const id = anchor.commentId;
+    if (!visibleThreadIds.has(id) || cardAnchor.has(id) || cardElsewhere.has(id)) continue;
+    if (resolvedAnchorSet.has(anchor)) {
+      cardAnchor.set(id, anchor);
+      continue;
+    }
+    // An anchor whose content is on this page with nothing visible is passed
+    // over; one whose content is on another page comes first, and the
+    // thread's card stands with it there.
+    const mayBeHere = pageSources.has(sourceKey(anchor.source))
+      || pageSources.has(sourceKey(anchor.reference.source))
+      || (anchor.geometryFallback !== undefined && pageSources.has(sourceKey(anchor.geometryFallback.source)));
+    if (!mayBeHere || resolveCommentAnchorRunsOnPage(anchor, runs, model.pageIndex).length === 0) cardElsewhere.add(id);
+  }
   const anchorRects = new Map<string, ReadOnlyCommentRect[]>();
   const markerAnchorById = new Map<string, Readonly<{
     rect: ReadOnlyCommentRect;
     direction?: 'ltr' | 'rtl';
   }>>();
   const surface = tintLayer.parentElement;
-  for (const { anchor, runs: anchorRuns } of resolvedPageAnchors) {
+  const clipFrames = new OverlayClipFrames(tintLayer, cssWidth, cssHeight);
+  for (const { anchor, runs: anchorRuns, boxes } of resolvedPageAnchors) {
     if (!visibleThreadIds.has(anchor.commentId)) continue;
     const active = activeId === anchor.commentId;
-    for (const run of mergeSameLineRuns(anchorRuns.map(wordHighlightRun))) {
+    // The glyphs of the anchored runs inside their clips, joined only where
+    // they touch (overlay-geometry.ts), as the comment API reports them.
+    for (const box of boxes) {
       const tint = createTint(
         tintLayer,
-        run,
-        cssWidth,
-        cssHeight,
+        box,
         active,
         accentById.get(anchor.commentId) ?? readOnlyCommentAuthorAccent(undefined),
+        clipFrames,
       );
-      const rect = run.transform && surface
-        ? relativeElementRect(tint, surface)
-        : Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
+      const plain = Object.freeze({ x: box.x, y: box.y, width: box.width, height: box.height });
+      // A clipped box anchors its marker to its visible part.
+      const visible = box.clips ? clippedBoxBounds(box, box.clips) : undefined;
+      const rect = visible
+        ? Object.freeze(visible)
+        : box.transform && surface
+          ? relativeElementRect(tint, surface)
+          : plain;
       const list = anchorRects.get(anchor.commentId) ?? [];
       if (!anchorRects.has(anchor.commentId)) anchorRects.set(anchor.commentId, list);
-      const resolvedRect = rect ?? Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
+      const resolvedRect = rect ?? plain;
       list.push(resolvedRect);
       if (!markerAnchorById.has(anchor.commentId)) {
+        const direction = anchorRuns[0]?.direction;
         markerAnchorById.set(anchor.commentId, Object.freeze({
           rect: resolvedRect,
-          ...(run.direction ? { direction: run.direction } : {}),
+          ...(direction ? { direction } : {}),
         }));
       }
     }
   }
+  // A thread's card and marker stand at its first occurrence a reader can
+  // see: the range decided for the whole document where there is one.
+  // Without that decision (one range, or ranges not collected from a layout)
+  // it is, on this page, the first anchor with something to show, unless an
+  // earlier anchor belongs to another page, where the card stands: an
+  // earlier anchor that is on this page with nothing visible (clipped away)
+  // is passed over.
   const cardThreads = threads.flatMap((thread): ReadOnlyCommentThread[] => {
-    const anchor = firstAnchor.get(thread.root.id);
+    const anchor = cardAnchor.get(thread.root.id);
     if (!anchor || !resolvedAnchorSet.has(anchor)) return [];
     return [{
       occurrenceKey: thread.root.id,

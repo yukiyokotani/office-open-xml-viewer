@@ -218,15 +218,23 @@ function lineFrameMatrix(
   return { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * line.bounds.yPt + line.bounds.heightPt };
 }
 
+/** WORD_CELL_CONTENT_CLIP: paints the placements `[start, end)` of a line,
+ * and its bar-tab rules when `barTabs` is set. */
+type LinePlacementRun = Readonly<{ start: number; end: number; barTabs: boolean }>;
+
 function paintLineContents(
   line: ParagraphLayout['lines'][number],
   context: CanvasPaintContext,
+  run?: LinePlacementRun,
 ): void {
   const { ctx } = context;
-  for (const rule of line.barTabRules ?? []) {
-    paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+  if (run?.barTabs ?? true) {
+    for (const rule of line.barTabRules ?? []) {
+      paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+    }
   }
-  for (const placement of line.placements) {
+  const placements = run ? line.placements.slice(run.start, run.end) : line.placements;
+  for (const placement of placements) {
     if (placement.kind === 'resource') {
       if (!context.resources) {
         throw new Error(`Missing retained resource painter for ${placement.resourceKey}`);
@@ -389,8 +397,33 @@ function paintLineContents(
   }
 }
 
-function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintContext): void {
+/** WORD_CELL_CONTENT_CLIP: a cell paragraph has content outside the cell's
+ * content clip (VML pictures, or anchored drawings this paint owns). Without
+ * it the whole paragraph is painted under the clip. */
+export function paragraphEscapesCellClip(node: ParagraphLayout, omitAnchoredDrawings: boolean | undefined): boolean {
+  return (!omitAnchoredDrawings && node.drawings.some((drawing) => drawing.anchorLayer))
+    || node.lines.some((line) => line.placements.some((placement) =>
+      (placement.kind === 'resource' || placement.kind === 'drawing') && placement.escapesCellClip === true));
+}
+
+function paintParagraphContents(node: ParagraphLayout, clipContext: CanvasPaintContext): void {
+  // WORD_CELL_CONTENT_CLIP: a cell paragraph with escaping content is painted
+  // in its own order, each item under the cell clip or outside it. The clip
+  // never reaches the stories the paragraph owns.
+  const cellClip = clipContext.cellContentClip;
+  const context: CanvasPaintContext = cellClip ? { ...clipContext, cellContentClip: undefined } : clipContext;
   const { ctx } = context;
+  const clipped = (paint: () => void): void => {
+    if (!cellClip) {
+      paint();
+      return;
+    }
+    canvasPaintFrame(ctx, () => {
+      ctx.beginPath();
+      ctx.rect(cellClip.xPt, cellClip.yPt, cellClip.widthPt, cellClip.heightPt);
+      ctx.clip();
+    })(paint)();
+  };
   const ownedTextBoxIds = new Set(node.drawings.flatMap((drawing) => drawing.textBoxIds ?? []));
   const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void =>
     paintParagraphDrawingLayout(node, drawing, context);
@@ -401,30 +434,33 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
   if (!context.omitAnchoredDrawings) {
     for (const drawing of behind) paintDrawingWithTextBoxes(drawing);
   }
-  for (const retained of node.lineNumbers ?? []) {
-    for (const operation of retained.paintOps) {
-      ctx.fillStyle = operation.color;
-      ctx.font = operation.font;
-      ctx.textAlign = operation.textAlign;
-      ctx.textBaseline = 'alphabetic';
-      fillRetainedText(context, operation.font, operation.text, operation.origin.xPt, operation.origin.yPt);
+  // Each clipped group opens a Canvas frame only when it paints something.
+  if ((node.lineNumbers?.length ?? 0) > 0 || node.shading) clipped(() => {
+    for (const retained of node.lineNumbers ?? []) {
+      for (const operation of retained.paintOps) {
+        ctx.fillStyle = operation.color;
+        ctx.font = operation.font;
+        ctx.textAlign = operation.textAlign;
+        ctx.textBaseline = 'alphabetic';
+        fillRetainedText(context, operation.font, operation.text, operation.origin.xPt, operation.origin.yPt);
+      }
     }
-  }
-  if (node.shading) {
-    ctx.fillStyle = node.shading.color;
-    const boxes = node.lines.some(line => line.wrapBounds || line.wrapFragments)
-      ? node.lines.flatMap(line => line.wrapFragments ?? [line.wrapBounds ?? {
-          xPt: node.inkBounds.xPt, yPt: line.bounds.yPt,
-          widthPt: node.inkBounds.widthPt, heightPt: line.bounds.heightPt,
-        }])
-      : [node.paragraphMark?.wrapBounds ?? node.inkBounds];
-    for (const box of boxes) ctx.fillRect(box.xPt, box.yPt, box.widthPt, box.heightPt);
-  }
-  for (const line of node.lines) {
+    if (node.shading) {
+      ctx.fillStyle = node.shading.color;
+      const boxes = node.lines.some(line => line.wrapBounds || line.wrapFragments)
+        ? node.lines.flatMap(line => line.wrapFragments ?? [line.wrapBounds ?? {
+            xPt: node.inkBounds.xPt, yPt: line.bounds.yPt,
+            widthPt: node.inkBounds.widthPt, heightPt: line.bounds.heightPt,
+          }])
+        : [node.paragraphMark?.wrapBounds ?? node.inkBounds];
+      for (const box of boxes) ctx.fillRect(box.xPt, box.yPt, box.widthPt, box.heightPt);
+    }
+  });
+  const paintLine = (line: ParagraphLayout['lines'][number], run?: LinePlacementRun): void => {
     const lineFrame = lineFrameMatrix(node, line, context);
     if (!lineFrame) {
-      paintLineContents(line, context);
-      continue;
+      paintLineContents(line, context, run);
+      return;
     }
     const lineContext: CanvasPaintContext = {
       ...context,
@@ -432,16 +468,79 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
       pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
     };
     canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
-      () => paintLineContents(line, lineContext),
+      () => paintLineContents(line, lineContext, run),
     )();
+  };
+  if (!cellClip) {
+    for (const line of node.lines) paintLine(line);
+  } else {
+    // Maximal runs of placements on the same side of the clip, in paint
+    // order; consecutive clipped runs, across lines too, share one frame.
+    const segments: Array<Readonly<{ line: ParagraphLayout['lines'][number]; run: LinePlacementRun; escapes: boolean }>> = [];
+    for (const line of node.lines) {
+      // Bar-tab rules are line ink under the clip, never escaping content.
+      if ((line.barTabRules?.length ?? 0) > 0) {
+        segments.push({ line, run: { start: 0, end: 0, barTabs: true }, escapes: false });
+      }
+      const escapes = line.placements.map((placement) => placement.kind === 'resource' && placement.escapesCellClip === true);
+      for (let start = 0; start < escapes.length;) {
+        let end = start + 1;
+        while (end < escapes.length && escapes[end] === escapes[start]) end++;
+        segments.push({ line, run: { start, end, barTabs: false }, escapes: escapes[start] === true });
+        start = end;
+      }
+    }
+    for (let start = 0; start < segments.length;) {
+      let end = start + 1;
+      while (end < segments.length && segments[end]!.escapes === segments[start]!.escapes) end++;
+      const group = segments.slice(start, end);
+      if (group[0]!.escapes) group.forEach(({ line, run }) => paintLine(line, run));
+      else clipped(() => group.forEach(({ line, run }) => paintLine(line, run)));
+      start = end;
+    }
   }
   // Keep authored paragraph-border geometry in retained layout, while matching
   // Word's raster treatment of subpixel rules with at least one device pixel
   // of coverage. Text decorations and run borders retain their own widths.
-  const paragraphBorderMinimumCssWidthPx = oneDevicePixelCssWidth(context);
-  for (const border of node.borders) {
-    paintStrokeSegment(border, context, paragraphBorderMinimumCssWidthPx);
+  if (node.borders.length > 0) clipped(() => {
+    const paragraphBorderMinimumCssWidthPx = oneDevicePixelCssWidth(context);
+    for (const border of node.borders) {
+      paintStrokeSegment(border, context, paragraphBorderMinimumCssWidthPx);
+    }
+  });
+  // Placeholders of escaping VML pictures are drawings of their line.
+  const escapingDrawingIds = new Set(cellClip ? node.lines.flatMap((line) => line.placements.flatMap(
+    (placement) => placement.kind === 'drawing' && placement.escapesCellClip ? [placement.drawingId] : [],
+  )) : []);
+  paintInlineParagraphDrawings(node, context, (paint, drawing) => {
+    if (escapingDrawingIds.has(drawing.id)) paint();
+    else clipped(paint);
+  });
+  if (!context.omitAnchoredDrawings) {
+    const front = node.drawings
+      .filter((drawing) => drawing.anchorLayer && !drawing.anchorLayer.behindDoc)
+      .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
+        || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
+    for (const drawing of front) paintDrawingWithTextBoxes(drawing);
   }
+  if (node.textBoxes.some((textBox) => !ownedTextBoxIds.has(textBox.id))) clipped(() => {
+    for (const textBox of node.textBoxes) {
+      if (!ownedTextBoxIds.has(textBox.id)) {
+        // Page materialization owns only anchors in the retained page root.
+        // A free-standing text-box story is a local stacking context, so its
+        // descendant anchors must not inherit the root's suppression flag.
+        paintTextBoxLayout(textBox, { ...context, omitAnchoredDrawings: false });
+      }
+    }
+  });
+}
+
+function paintInlineParagraphDrawings(
+  node: ParagraphLayout,
+  context: CanvasPaintContext,
+  around: (paint: () => void, drawing: import('../layout/types.js').DrawingLayout) => void,
+): void {
+  const { ctx } = context;
   // An inline drawing (shape, group, placeholder, preview) is line content:
   // it and the stories it owns paint in its owning line's frame.
   const inlineDrawingLines = new Map<string, ParagraphLayout['lines'][number]>();
@@ -455,33 +554,20 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
   for (const drawing of node.drawings.filter((item) => !item.anchorLayer)) {
     const line = inlineDrawingLines.get(drawing.id);
     const lineFrame = line ? lineFrameMatrix(node, line, context) : null;
-    if (!lineFrame) {
-      paintDrawingWithTextBoxes(drawing);
-      continue;
-    }
-    const lineContext: CanvasPaintContext = {
-      ...context,
-      lineFramed: true,
-      pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
-    };
-    canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
-      () => paintParagraphDrawingLayout(node, drawing, lineContext),
-    )();
-  }
-  const front = node.drawings
-    .filter((drawing) => drawing.anchorLayer && !drawing.anchorLayer.behindDoc)
-    .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
-      || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
-  if (!context.omitAnchoredDrawings) {
-    for (const drawing of front) paintDrawingWithTextBoxes(drawing);
-  }
-  for (const textBox of node.textBoxes) {
-    if (!ownedTextBoxIds.has(textBox.id)) {
-      // Page materialization owns only anchors in the retained page root.
-      // A free-standing text-box story is a local stacking context, so its
-      // descendant anchors must not inherit the root's suppression flag.
-      paintTextBoxLayout(textBox, { ...context, omitAnchoredDrawings: false });
-    }
+    around(() => {
+      if (!lineFrame) {
+        paintParagraphDrawingLayout(node, drawing, context);
+        return;
+      }
+      const lineContext: CanvasPaintContext = {
+        ...context,
+        lineFramed: true,
+        pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
+      };
+      canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
+        () => paintParagraphDrawingLayout(node, drawing, lineContext),
+      )();
+    }, drawing);
   }
 }
 

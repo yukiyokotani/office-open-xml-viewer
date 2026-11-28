@@ -1,11 +1,15 @@
 import { sourceOwnedTextPlacements, type SourceOwnedTextGeometry } from './text-source-ownership.js';
 import {
   composeAffine,
+  inverseMapAffinePoint,
+  mapAffinePoint,
   quarterTurnAffine,
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
+import type { ClusterBox } from './visual-cluster-geometry.js';
 import { lineFrameTransform } from './line-frame.js';
+import { resourcePlacementOutline } from './resource-outline.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -25,9 +29,28 @@ import type {
   UprightResourceOrientation,
 } from './types.js';
 
+/** Inline content of a line that is not text (a tab, an inline picture,
+ * chart, equation or drawing): the box it occupies, addressed by its source
+ * run like the text around it. */
+export interface InlineContentGeometry {
+  readonly inlineContent: 'tab' | 'object';
+  readonly bounds: LayoutRect;
+  readonly sourceRunIndex: number;
+  readonly pointToPage: Matrix2DData;
+  readonly clips: readonly ElementClipGeometry[];
+  readonly source: ParagraphLayout['source'];
+  readonly paragraphId?: string;
+}
+
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
+  /** Where each cluster of the run is painted, from `placement.bounds.xPt`,
+   * by offset in its text (visual-cluster-geometry.ts). */
+  readonly clusterBoxes: readonly ClusterBox[];
   readonly pointToPage: Matrix2DData;
+  /** Every ancestor paint clip of the run, outermost first, in its retained
+   * local space (turned clips included): overlays clip with them. */
+  readonly clips: readonly ElementClipGeometry[];
   /** Canonical structural source of the owning paragraph. */
   readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
@@ -38,6 +61,9 @@ export interface TextRunGeometry {
 export interface ElementClipGeometry {
   readonly bounds: LayoutRect;
   readonly pointToPage: Matrix2DData;
+  /** A clip that is a union of rectangles (a VML text box's textboxrect
+   * regions), in the space of `bounds`, which is their bounding box. */
+  readonly rects?: readonly LayoutRect[];
 }
 
 /** Retained DrawingML occurrence projected into physical page points. */
@@ -80,8 +106,10 @@ interface ProjectionContext {
   readonly drawingPaintOrder: ReadonlyMap<string, number>;
   readonly emittedTextBoxes: Set<string>;
   readonly emittedDrawings: Set<string>;
-  readonly runs: TextRunGeometry[];
+  readonly runs: (TextRunGeometry | InlineContentGeometry)[];
   readonly sourceRuns: Map<string, Set<number>>;
+  /** The runs of `sourceRuns` that hold text (no tab or inline object). */
+  readonly sourceTextRuns: Map<string, Set<number>>;
   readonly completedParagraphSources: Set<string>;
   readonly drawings: DrawingGeometry[];
   readonly inlineResources: InlineResourceGeometry[];
@@ -100,6 +128,10 @@ interface NodeProjection {
   /** Projected inside a line's retained frame; nested stories do not apply
    * their own (paint/types.ts CanvasPaintContext.lineFramed). */
   readonly lineFramed?: true;
+  /** WORD_CELL_CONTENT_CLIP: the clip of the cell owning this paragraph. It
+   * applies to the paragraph's text and inline content, not to its VML
+   * pictures, anchored drawings or nested tables, as paint applies it. */
+  readonly cellContentClip?: ElementClipGeometry;
 }
 
 const IDENTITY_AFFINE = Object.freeze({
@@ -269,7 +301,48 @@ function projectionForEntry(
 function withClip(
   projection: NodeProjection,
   bounds: LayoutRect | undefined,
+  rects?: readonly LayoutRect[],
 ): NodeProjection {
+  if (rects) {
+    // A union clip keeps only its rectangles with area; with none left it
+    // clips everything, as the Canvas clip does.
+    const regions = rects.filter((rect) => rect.widthPt > 0 && rect.heightPt > 0);
+    if (regions.length === 0) {
+      return {
+        ...projection,
+        clips: Object.freeze([
+          ...projection.clips,
+          Object.freeze({
+            bounds: Object.freeze({ xPt: bounds?.xPt ?? 0, yPt: bounds?.yPt ?? 0, widthPt: 0, heightPt: 0 }),
+            pointToPage: projection.pointToPage,
+            rects: Object.freeze([]),
+          }),
+        ]),
+      };
+    }
+    rects = regions;
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const rect of rects) {
+      left = Math.min(left, rect.xPt);
+      top = Math.min(top, rect.yPt);
+      right = Math.max(right, rect.xPt + rect.widthPt);
+      bottom = Math.max(bottom, rect.yPt + rect.heightPt);
+    }
+    return {
+      ...projection,
+      clips: Object.freeze([
+        ...projection.clips,
+        Object.freeze({
+          bounds: Object.freeze({ xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top }),
+          pointToPage: projection.pointToPage,
+          rects: Object.freeze([...rects]),
+        }),
+      ]),
+    };
+  }
   if (!bounds) return projection;
   return {
     ...projection,
@@ -328,7 +401,9 @@ function visitTextBox(
     layoutTranslationPt: { xPt: 0, yPt: 0 },
     textBoxVerticalMode: textBox.verticalMode ?? projection.textBoxVerticalMode,
   };
-  const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
+  // As paint clips the story: to the authored text rectangles when the box
+  // has them, otherwise to its clip bounds.
+  const textBoxProjection = withClip(transformedProjection, textBox.clipBounds, textBox.clipRects);
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
@@ -409,12 +484,96 @@ function lineProjectionPointToPage(
   return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
+/** The box a tab or inline object is painted in on its line, in the line's
+ * coordinates: its bounds, or for a picture or drawing the part its line clip
+ * leaves. A turned picture is its visible outline cut by the clips it is
+ * painted under (`clips`, with the line's `pointToPage`), then bounded: the
+ * bounding box of the whole outline could reach into a clip the picture
+ * itself never enters. An object of which nothing is left keeps its place
+ * with a box without height: it still owns its source run, so a reader that
+ * marks that run finds it, with nothing to mark. Null for a tab without a
+ * box. */
+function inlineContentBounds(
+  placement: Extract<ParagraphLayout['lines'][number]['placements'][number], { kind: 'tab' | 'resource' | 'drawing' }>,
+  pointToPage: Matrix2DData,
+  clips: readonly ElementClipGeometry[],
+): LayoutRect | null {
+  if (placement.kind === 'tab') return placement.bounds ?? null;
+  const hidden = { ...placement.bounds, heightPt: 0 };
+  if (placement.kind === 'resource') {
+    if (!placement.lineClip && !placement.rotationDeg) return placement.bounds;
+    let pieces: PointPt[][] = [[...resourcePlacementOutline(placement)]];
+    if (placement.rotationDeg) {
+      for (const clip of clips) {
+        pieces = pieces.flatMap((piece) => {
+          // The piece in the clip's own space, cut by each of its rectangles.
+          const local = piece.map((point) => inverseMapAffinePoint(clip.pointToPage, mapAffinePoint(pointToPage, point)));
+          if (local.some((point) => point === null)) return [piece];
+          return (clip.rects ?? [clip.bounds]).map((rect) => cutToRect(local as PointPt[], rect)
+            .flatMap((point) => inverseMapAffinePoint(pointToPage, mapAffinePoint(clip.pointToPage, point)) ?? []));
+        }).filter((piece) => piece.length >= 3);
+      }
+    }
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const point of pieces.flat()) {
+      left = Math.min(left, point.xPt);
+      top = Math.min(top, point.yPt);
+      right = Math.max(right, point.xPt);
+      bottom = Math.max(bottom, point.yPt);
+    }
+    return right - left > 1e-9 && bottom - top > 1e-9
+      ? { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top } : hidden;
+  }
+  const clip = placement.lineClip;
+  if (!clip) return placement.bounds;
+  const top = Math.max(placement.bounds.yPt, placement.bounds.yPt + clip.topPt);
+  const bottom = Math.min(placement.bounds.yPt + placement.bounds.heightPt, placement.bounds.yPt + clip.bottomPt);
+  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : hidden;
+}
+
+/** A convex polygon cut to an axis-aligned rectangle of its own space
+ * (Sutherland-Hodgman); empty when nothing is inside. */
+function cutToRect(polygon: readonly PointPt[], rect: LayoutRect): PointPt[] {
+  const edges: readonly (readonly ['xPt' | 'yPt', number, 1 | -1])[] = [
+    ['xPt', rect.xPt, 1], ['xPt', rect.xPt + rect.widthPt, -1], ['yPt', rect.yPt, 1], ['yPt', rect.yPt + rect.heightPt, -1],
+  ];
+  let points = [...polygon];
+  for (const [axis, edge, side] of edges) {
+    const kept: PointPt[] = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const current = points[index]!;
+      const previous = points[(index + points.length - 1) % points.length]!;
+      const currentIn = side * (current[axis] - edge) >= 0;
+      const previousIn = side * (previous[axis] - edge) >= 0;
+      if (currentIn !== previousIn) {
+        const t = (edge - previous[axis]) / (current[axis] - previous[axis]);
+        kept.push({ xPt: previous.xPt + t * (current.xPt - previous.xPt), yPt: previous.yPt + t * (current.yPt - previous.yPt) });
+      }
+      if (currentIn) kept.push(current);
+    }
+    points = kept;
+    if (points.length === 0) break;
+  }
+  return points;
+}
+
 function visitParagraph(
   paragraph: ParagraphLayout,
   projection: NodeProjection,
   context: ProjectionContext,
 ): void {
-  const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  const { cellContentClip, ...unclippedProjection } = withClip(projection, paragraph.clipBounds);
+  const paragraphProjection: NodeProjection = unclippedProjection;
+  // WORD_CELL_CONTENT_CLIP: the projection of content painted under the cell clip.
+  const clippedProjection: NodeProjection = cellContentClip
+    ? { ...paragraphProjection, clips: Object.freeze([...paragraphProjection.clips, cellContentClip]) }
+    : paragraphProjection;
+  const escapingDrawingIds = new Set(cellContentClip ? paragraph.lines.flatMap((line) => line.placements.flatMap(
+    (placement) => placement.kind === 'drawing' && placement.escapesCellClip ? [placement.drawingId] : [],
+  )) : []);
   // An inline drawing is line content: it projects through its owning
   // line's frame, as paint draws it (line-frame.ts).
   const inlineDrawingLines = new Map<string, ParagraphLayout['lines'][number]>();
@@ -427,13 +586,15 @@ function visitParagraph(
   }
   const inlineDrawingProjection = (drawing: DrawingLayout): NodeProjection => {
     const line = drawing.anchorLayer ? undefined : inlineDrawingLines.get(drawing.id);
-    return line && !paragraphProjection.lineFramed && paragraph.lineFrame !== undefined
+    const base = drawing.anchorLayer || escapingDrawingIds.has(drawing.id)
+      ? paragraphProjection : clippedProjection;
+    return line && !base.lineFramed && paragraph.lineFrame !== undefined
       ? {
-          ...paragraphProjection,
+          ...base,
           lineFramed: true,
-          pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection),
+          pointToPage: lineProjectionPointToPage(paragraph, line, base),
         }
-      : paragraphProjection;
+      : base;
   };
   const textBoxesById = new Map(
     paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
@@ -448,6 +609,11 @@ function visitParagraph(
     const inlineTextDrawings = new Map(paragraph.drawings
       .filter((drawing) => !drawing.anchorLayer && (drawing.textBoxIds?.length ?? 0) > 0)
       .map((drawing) => [drawing.id, drawing]));
+    const inlineDrawingRunIndexes = new Map(paragraph.drawings.flatMap((drawing) => {
+      const runIndex = drawing.source.path.at(-1);
+      return !drawing.anchorLayer && runIndex !== undefined && Number.isSafeInteger(runIndex) && runIndex >= 0
+        ? [[drawing.id, runIndex] as const] : [];
+    }));
     for (const line of paragraph.lines) {
       const linePointToPage = lineProjectionPointToPage(paragraph, line, projection);
       for (const retained of line.placements) {
@@ -458,11 +624,41 @@ function visitParagraph(
           const drawing = inlineTextDrawings.get(retained.drawingId);
           if (drawing) visitDrawing(textBoxesById, drawing, inlineDrawingProjection(drawing), context);
         }
+        // A tab or an inline object occupies its run's place on the line:
+        // readers that mark a range of source runs (comments) cover it, and
+        // a paragraph that holds only such content still has geometry.
+        if (retained.kind === 'tab' || retained.kind === 'resource' || retained.kind === 'drawing') {
+          const runIndex = retained.kind === 'drawing'
+            ? inlineDrawingRunIndexes.get(retained.drawingId) : retained.sourceRunIndex;
+          const contentClips = retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips;
+          const bounds = inlineContentBounds(retained, linePointToPage, contentClips);
+          if (runIndex !== undefined && bounds && (retained.kind !== 'resource' || retained.resourceKind !== 'picture-bullet')) {
+            if (context.collectTextRuns) {
+              context.runs.push(Object.freeze({
+                inlineContent: retained.kind === 'tab' ? 'tab' as const : 'object' as const,
+                bounds,
+                sourceRunIndex: runIndex,
+                pointToPage: linePointToPage,
+                clips: contentClips,
+                source: paragraph.source,
+                ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
+              }));
+            }
+            if (context.collectTextRunSources) {
+              const key = sourceKey(paragraph.source);
+              const indices = context.sourceRuns.get(key) ?? new Set<number>();
+              if (!context.sourceRuns.has(key)) context.sourceRuns.set(key, indices);
+              indices.add(runIndex);
+            }
+          }
+        }
         if (retained.kind === 'text') for (const placement of sourceOwnedTextPlacements(retained)) {
           if (context.collectTextRuns) {
             context.runs.push(Object.freeze({
               placement,
               pointToPage: linePointToPage,
+              clips: clippedProjection.clips,
+              clusterBoxes: placement.clusterBoxes,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }
@@ -478,6 +674,9 @@ function visitParagraph(
             const indices = context.sourceRuns.get(key) ?? new Set<number>();
             if (!context.sourceRuns.has(key)) context.sourceRuns.set(key, indices);
             indices.add(placement.sourceRunIndex);
+            const textIndices = context.sourceTextRuns.get(key) ?? new Set<number>();
+            if (!context.sourceTextRuns.has(key)) context.sourceTextRuns.set(key, textIndices);
+            textIndices.add(placement.sourceRunIndex);
           }
         }
       }
@@ -550,14 +749,14 @@ function visitParagraph(
         path: Object.freeze([...paragraph.source.path, entry.runIndex]),
       }),
       pointToPage: entry.pointToPage,
-      clips: paragraphProjection.clips,
+      clips: entry.placement.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
       paintOrderIndex: paragraphProjection.paintOrderIndex,
       sourceOrder: context.drawingSourceOrder++,
     }));
   }
   for (const textBox of paragraph.textBoxes) {
     if (!ownedTextBoxIds.has(textBox.id)) {
-      visitTextBox(textBox, paragraphProjection, context);
+      visitTextBox(textBox, clippedProjection, context);
     }
   }
 }
@@ -588,6 +787,16 @@ function visitTable(
         }
         continue;
       }
+      // WORD_CELL_CONTENT_CLIP: the cell's paragraphs, not its nested tables.
+      const paragraphProjection: NodeProjection = cell.contentClipBounds
+        ? {
+            ...cellProjection,
+            cellContentClip: Object.freeze({
+              bounds: cell.contentClipBounds,
+              pointToPage: cellProjection.pointToPage,
+            }),
+          }
+        : cellProjection;
       for (const block of cell.blocks) {
         const child = block.layout;
         visitNode(child, placedChildProjection(child, {
@@ -595,7 +804,7 @@ function visitTable(
             + (child.kind === 'table' ? child.flowBounds.xPt : 0),
           yPt: cell.flowBounds.yPt + block.offsetPt
             + (child.kind === 'table' ? child.flowBounds.yPt : 0),
-        }, cellProjection), context);
+        }, child.kind === 'paragraph' ? paragraphProjection : cellProjection), context);
       }
     }
   }
@@ -693,6 +902,7 @@ function pageGeometryIndex(
     emittedDrawings: new Set(),
     runs: [],
     sourceRuns: new Map(),
+    sourceTextRuns: new Map(),
     completedParagraphSources: new Set(),
     drawings: [],
     inlineResources: [],
@@ -734,15 +944,25 @@ function pageGeometryIndex(
   return context;
 }
 
+/** The text runs of a page; with `'line-content'`, also the tabs and inline
+ * objects between them, in the order their lines hold them. */
+export function textRunGeometryForPage(layout: DocumentLayout, pageIndex: number): readonly TextRunGeometry[];
 export function textRunGeometryForPage(
   layout: DocumentLayout,
   pageIndex: number,
-): readonly TextRunGeometry[] {
-  return Object.freeze(pageGeometryIndex(layout, pageIndex, {
+  content: 'line-content',
+): readonly (TextRunGeometry | InlineContentGeometry)[];
+export function textRunGeometryForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+  content?: 'line-content',
+): readonly (TextRunGeometry | InlineContentGeometry)[] {
+  const runs = pageGeometryIndex(layout, pageIndex, {
     collectTextRuns: true,
     collectTextRunSources: false,
     collectDrawings: false,
-  }).runs);
+  }).runs;
+  return Object.freeze(content === 'line-content' ? runs : runs.filter((geometry) => 'placement' in geometry));
 }
 
 /** Lightweight index of text placements that actually survived final-state
@@ -769,8 +989,26 @@ export function textRunSourceIndexForDocument(
 
 export interface ReviewProjectionIndex {
   readonly renderedRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
+  /** The runs of `renderedRunIndex` that hold laid-out text: without the
+   * tabs and inline objects, which a range of runs covers but which are no
+   * text to stand in for content that is not laid out (a deletion). */
+  readonly textRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
   readonly completedSourceKeys: ReadonlySet<string>;
+  /** The pages, in order, that hold laid-out runs of each paragraph source. */
+  readonly sourcePages: ReadonlyMap<string, readonly number[]>;
+  /** The runs that a paragraph crossing pages holds on more than one of
+   * them, by paragraph source then run index. `continued` lists the pages
+   * whose fragment of the run follows an earlier one (the run starts on an
+   * earlier page), `continues` those whose fragment is followed by a later
+   * one (the run ends on a later page). A paragraph repeated whole on
+   * several pages (a header) splits nothing. */
+  readonly splitRuns: SplitRunIndex;
 }
+
+export type SplitRunIndex = ReadonlyMap<string, ReadonlyMap<number, Readonly<{
+  continued: readonly number[];
+  continues: readonly number[];
+}>>>;
 
 /** Build every index needed by comment/revision projection in one canonical
  * geometry traversal. Progressive publications call this only when review data
@@ -779,7 +1017,13 @@ export function reviewProjectionIndexForDocument(
   layout: DocumentLayout,
 ): ReviewProjectionIndex {
   const renderedRunIndex = new Map<string, Set<number>>();
+  const textRunIndex = new Map<string, Set<number>>();
   const completedSourceKeys = new Set<string>();
+  const sourcePages = new Map<string, number[]>();
+  const splitRuns = new Map<string, Map<number, { continued: number[]; continues: number[] }>>();
+  // Paragraphs whose last fragment so far continues: run index -> the last
+  // page that holds a fragment of it.
+  const continuing = new Map<string, Map<number, number>>();
   for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
     const page = pageGeometryIndex(layout, pageIndex, {
       collectTextRuns: false,
@@ -791,10 +1035,58 @@ export function reviewProjectionIndexForDocument(
       const indices = renderedRunIndex.get(key) ?? new Set<number>();
       if (!renderedRunIndex.has(key)) renderedRunIndex.set(key, indices);
       for (const index of pageIndices) indices.add(index);
+      const pages = sourcePages.get(key);
+      if (pages) pages.push(pageIndex);
+      else sourcePages.set(key, [pageIndex]);
+      const earlier = continuing.get(key);
+      if (earlier) {
+        for (const index of pageIndices) {
+          const previousPage = earlier.get(index);
+          if (previousPage === undefined) continue;
+          const bySource = splitRuns.get(key) ?? new Map<number, { continued: number[]; continues: number[] }>();
+          if (!splitRuns.has(key)) splitRuns.set(key, bySource);
+          const split = bySource.get(index) ?? { continued: [], continues: [] };
+          if (!bySource.has(index)) bySource.set(index, split);
+          split.continued.push(pageIndex);
+          split.continues.push(previousPage);
+        }
+      }
+      if (!page.completedParagraphSources.has(key)) {
+        const held = earlier ?? new Map<number, number>();
+        if (!earlier) continuing.set(key, held);
+        for (const index of pageIndices) held.set(index, pageIndex);
+      }
     }
-    for (const key of page.completedParagraphSources) completedSourceKeys.add(key);
+    for (const [key, pageIndices] of page.sourceTextRuns) {
+      const indices = textRunIndex.get(key) ?? new Set<number>();
+      if (!textRunIndex.has(key)) textRunIndex.set(key, indices);
+      for (const index of pageIndices) indices.add(index);
+    }
+    for (const key of page.completedParagraphSources) {
+      completedSourceKeys.add(key);
+      continuing.delete(key);
+    }
   }
-  return Object.freeze({ renderedRunIndex, completedSourceKeys });
+  // The unit of completion in the body is the top-level block. A paragraph
+  // inside a table has ended in a prefix only when its whole table has: the
+  // paragraph of one cell ends while the row goes on in another, and the
+  // pages of the row are not settled until then. A table has ended when the
+  // body has moved on to a later top-level block.
+  let lastBodyBlock = -1;
+  const bodyBlock = (key: string): { nested: boolean; index: number } | undefined => {
+    if (!key.startsWith('body:')) return undefined;
+    const path = key.slice(key.lastIndexOf(':') + 1).split('.');
+    return { nested: path.length > 1, index: Number(path[0]) };
+  };
+  for (const key of [...sourcePages.keys(), ...completedSourceKeys]) {
+    const block = bodyBlock(key);
+    if (block && block.index > lastBodyBlock) lastBodyBlock = block.index;
+  }
+  for (const key of [...completedSourceKeys]) {
+    const block = bodyBlock(key);
+    if (block?.nested && block.index >= lastBodyBlock) completedSourceKeys.delete(key);
+  }
+  return Object.freeze({ renderedRunIndex, textRunIndex, completedSourceKeys, sourcePages, splitRuns });
 }
 
 /** Index selectable drawings and inline image/chart placements in page paint order. */

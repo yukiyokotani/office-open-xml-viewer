@@ -32,18 +32,69 @@ export interface SelectedTextRunsForPageOptions {
 }
 
 function projectTextRun(
-  geometry: TextRunGeometry,
+  // A text run, or a tab or inline object of its line (text-index.ts).
+  geometry: TextRunGeometry | ReturnType<typeof textRunGeometryForPage>[number],
   pointToCss: Matrix2DData,
   textAdvances: TextAdvanceLookup | undefined,
+  displayScale: Matrix2DData,
 ): DocxTextRunInfo {
+  const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
+  const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
+  const transform = cssTransformFor(pointToCss);
+  // Every paint clip, placed like highlightBounds with its own orientation.
+  const clips = Object.freeze(geometry.clips.map((paintClip) => {
+    const clipToCss = composeAffine(displayScale, paintClip.pointToPage);
+    const clipCorner = mapAffinePoint(clipToCss, paintClip.bounds);
+    const clipTransform = cssTransformFor(clipToCss);
+    const clipInline = Math.hypot(clipToCss.a, clipToCss.b);
+    const clipBlock = Math.hypot(clipToCss.c, clipToCss.d);
+    return Object.freeze({
+      x: clipCorner.xPt,
+      y: clipCorner.yPt,
+      width: paintClip.bounds.widthPt * clipInline,
+      height: paintClip.bounds.heightPt * clipBlock,
+      ...(clipTransform ? { transform: clipTransform } : {}),
+      // A union clip's rectangles, as offsets along its axes from its corner.
+      ...(paintClip.rects ? {
+        rects: Object.freeze(paintClip.rects.map((rect) => Object.freeze({
+          x: (rect.xPt - paintClip.bounds.xPt) * clipInline,
+          y: (rect.yPt - paintClip.bounds.yPt) * clipBlock,
+          width: rect.widthPt * clipInline,
+          height: rect.heightPt * clipBlock,
+        }))),
+      } : {}),
+    });
+  }));
+  if (!('placement' in geometry)) {
+    // A tab or inline object as a run without text: the box it occupies on
+    // its line, for readers that mark a range of source runs.
+    const corner = mapAffinePoint(pointToCss, geometry.bounds);
+    const height = geometry.bounds.heightPt * blockScale;
+    return {
+      source: {
+        story: geometry.source.story,
+        storyInstance: geometry.source.storyInstance,
+        path: [...geometry.source.path],
+      },
+      ...(geometry.paragraphId !== undefined ? { paragraphId: geometry.paragraphId } : {}),
+      sourceRunIndex: geometry.sourceRunIndex,
+      inlineContent: geometry.inlineContent,
+      text: '',
+      x: corner.xPt,
+      y: corner.yPt,
+      w: geometry.bounds.widthPt * inlineScale,
+      h: height,
+      fontSize: height,
+      font: `normal 400 ${height}px sans-serif`,
+      ...(transform ? { transform } : {}),
+      ...(clips.length > 0 ? { clips } : {}),
+    };
+  }
   const { placement } = geometry;
   const origin = mapAffinePoint(pointToCss, placement.bounds);
   const highlightOrigin = placement.highlightBounds
     ? mapAffinePoint(pointToCss, placement.highlightBounds)
     : undefined;
-  const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
-  const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
-  const transform = cssTransformFor(pointToCss);
   const letterSpacingPt = placement.letterSpacingPt;
   const font = canvasFontString(
     placement.fontRoute,
@@ -100,9 +151,27 @@ function projectTextRun(
     ...(letterSpacingPt !== 0
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),
+    ...(placement.optionalHyphenGlyph ? {} : {
+      clusterBoxes: geometry.clusterBoxes.map((box) => ({
+        start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
+        ...(box.trackingExcluded ? { trackingExcluded: true as const } : {}),
+        // The glyph box, where it is not the advance box.
+        ...(Math.abs(box.glyphXPt - box.xPt) > 1e-9 || Math.abs(box.glyphWidthPt - box.widthPt) > 1e-9
+          ? { glyphX: box.glyphXPt * inlineScale, glyphWidth: box.glyphWidthPt * inlineScale } : {}),
+        ...(box.crossPt !== undefined && box.crossWidthPt !== undefined
+          ? { y: box.crossPt * blockScale, height: box.crossWidthPt * blockScale } : {}),
+        // The glyph's interval across the run, where it is neither the
+        // advance box's nor the run's font box.
+        ...(box.glyphCrossPt !== undefined && box.glyphCrossWidthPt !== undefined
+          && (box.crossPt === undefined || Math.abs(box.glyphCrossPt - box.crossPt) > 1e-9
+            || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
+          ? { glyphY: box.glyphCrossPt * blockScale, glyphHeight: box.glyphCrossWidthPt * blockScale } : {}),
+      })),
+    }),
     ...(transform ? { transform } : {}),
     ...(placement.hyperlink ? { hyperlink: placement.hyperlink } : {}),
     ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),
+    ...(clips.length > 0 ? { clips } : {}),
   };
 }
 
@@ -115,11 +184,12 @@ export function textRunsForPage(
     throw new RangeError(`Text projection scale must be positive: ${options.scale}`);
   }
   const displayScale = scaleAffine(options.scale);
-  return textRunGeometryForPage(layout, pageIndex).map((geometry) => (
+  return textRunGeometryForPage(layout, pageIndex, 'line-content').map((geometry) => (
     projectTextRun(
       geometry,
       composeAffine(displayScale, geometry.pointToPage),
       options.textAdvances,
+      displayScale,
     )
   ));
 }

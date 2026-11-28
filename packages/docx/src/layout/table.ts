@@ -9,6 +9,7 @@ import {
   wordAlignedTableOriginPt,
   wordCollapsedBorderRowTrackFootprintPt,
   wordExactRowFloorPt,
+  wordCellContentClipBounds,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
   wordVerticalMergeInteriorBorderPt,
@@ -1496,9 +1497,14 @@ function rotatedCellLayout(
         : -Math.min(0, flow.inkTopPt);
   const transform = verticalCellTransform(verticalText.mode, physicalContent);
   // Rotated lines can exceed the physical cell on either axis; clip them to
-  // the cell like an exact row so they never paint over neighbours.
-  const clipBounds = exactOwnedSpan
+  // the cell so they never paint over neighbours. An exact row bounds the
+  // block axis; the cell edges bound the inline axis, as for any cell
+  // (WORD_CELL_CONTENT_CLIP: Word cuts a tbRl cell at its edges).
+  const exactClip = exactOwnedSpan
     ? wordExactRowVerticalClipBounds({ ...cellFlowBounds, heightPt: exactClipHeightPt }, placement.availableBounds)
+    : undefined;
+  const clipBounds = exactClip
+    ? { ...exactClip, xPt: cellFlowBounds.xPt, widthPt: cellFlowBounds.widthPt }
     : cellFlowBounds;
   return {
     kind: 'table-cell',
@@ -1757,6 +1763,13 @@ function materializeTableRow(
           placement.availableBounds,
         )
       : undefined;
+    // WORD_CELL_CONTENT_CLIP
+    const contentClipBounds = cell.verticalMerge === 'continue' ? undefined : wordCellContentClipBounds({
+      cell: cellFlowBounds,
+      topInsetPt: margins.topPt,
+      bottomInsetPt: margins.bottomPt,
+      ...(clipBounds ? { exactVerticalClip: clipBounds } : {}),
+    });
     const blocks = cell.verticalMerge === 'continue'
       ? []
       : flow.blocks.map((block) => ({
@@ -1778,6 +1791,7 @@ function materializeTableRow(
       inkBounds: cellInkBounds,
       ...(clipBounds ? { clipBounds } : {}),
       contentBounds,
+      ...(contentClipBounds ? { contentClipBounds } : {}),
       advancePt: cellHeightPt,
       verticalMerge: cell.verticalMerge,
       vAlign: cell.vAlign,

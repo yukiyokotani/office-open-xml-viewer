@@ -29,7 +29,9 @@ export function documentRequiresDomVerticalGlyphLayout(
         && DOM_VERTICAL_PAGE_DIRECTIONS.has(record.textDirection)
       ) return true;
     }
-    pending.push(...Object.values(value));
+    // A loop, not a spread: a value can hold huge arrays (VML text
+    // rectangles), whose spread would overflow the call stack.
+    for (const child of Object.values(value)) pending.push(child);
   }
   return false;
 }
