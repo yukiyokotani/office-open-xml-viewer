@@ -24,7 +24,7 @@ const SCHEMA_VERSION = 2;
  * and refuses a final symlink, and the descriptor is checked with fstat before
  * any read, so a path that turned into a named pipe or device after an earlier
  * check cannot block the worker or be read. */
-function readRegularFile(path) {
+export function readRegularFile(path) {
   const fd = openSync(
     path,
     constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),

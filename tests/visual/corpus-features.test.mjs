@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -126,6 +127,43 @@ test('fast tier selection fails closed on a stale or incomplete manifest', () =>
     assert.throws(() => load(['pptx/deck.pptx', 'pptx/new.pptx']), /new\.pptx is not in the manifest/);
     writeFileSync(join(root, 'pptx/deck.pptx'), xlsx());
     assert.throws(() => load(['pptx/deck.pptx']), /deck\.pptx changed since selection/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fast tier loader refuses a named pipe as manifest or specimen without blocking', (t) => {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-fast-tier-fifo-'));
+  const module = new URL('./corpus-features.mjs', import.meta.url).href;
+  const load = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { loadFastTierSelection } from ${JSON.stringify(module)};
+    try {
+      loadFastTierSelection({
+        format: 'pptx', files: ['pptx/deck.pptx'],
+        manifestPath: ${JSON.stringify(join(root, 'manifest.json'))}, directory: ${JSON.stringify(root)},
+      });
+      console.log('accepted');
+    } catch (error) { console.log(error.message); }
+  `], { encoding: 'utf8', timeout: 15000 });
+  try {
+    mkdirSync(join(root, 'pptx'));
+    try {
+      execFileSync('mkfifo', [join(root, 'manifest.json')]);
+    } catch {
+      t.skip('mkfifo unavailable');
+      return;
+    }
+    let result = load();
+    assert.equal(result.error, undefined, 'must not block on a manifest pipe');
+    assert.match(result.stdout, /missing pptx fast-tier selection manifest/);
+    // A valid manifest, but the specimen is a pipe.
+    rmSync(join(root, 'manifest.json'));
+    const manifest = buildFastTierManifest('pptx', [{ name: 'pptx/deck.pptx', bytes: pptx() }]);
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify(manifest));
+    execFileSync('mkfifo', [join(root, 'pptx/deck.pptx')]);
+    result = load();
+    assert.equal(result.error, undefined, 'must not block on a specimen pipe');
+    assert.match(result.stdout, /not a regular file/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
