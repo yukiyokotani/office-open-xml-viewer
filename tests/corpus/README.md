@@ -127,7 +127,8 @@ private data, so anyone can run it:
 
 ```bash
 target=main    # the branch the PR targets; it must already have `pnpm vrt:corpus`
-base=$(git merge-base HEAD "origin/$target")
+git fetch origin "$target"
+base=$(git rev-parse "origin/$target")                               # the target's current head
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"            # previous renderer
 # Specimens this branch adds or rewrites, so both renderers draw the same bytes.
 git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.docx' \

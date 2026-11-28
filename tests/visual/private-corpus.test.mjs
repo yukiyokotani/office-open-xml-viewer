@@ -411,6 +411,20 @@ test('the renderer is served only the input bytes its manifest records', () => {
   }
 });
 
+test('an item manifest requires its input to be prepared in this process', () => {
+  const fixture = selfVrtFixture();
+  try {
+    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
+      assert.throws(
+        () => verifySelfVrtItemManifest({ ...DEMO, stem: 'demo/unprepared', itemCount: 1, snapshot: true }),
+        /was not prepared/,
+      );
+    });
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
 test('a verified baseline checkout detects a changed slide and accepts an unchanged one', () => {
   const fixture = selfVrtFixture();
   try {
@@ -546,6 +560,30 @@ function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1
     return differences;
   });
 }
+
+test('images captured for an input are refused after the input is replaced', () => {
+  const fixture = fastFixture();
+  try {
+    const baseEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
+    const compareEnv = { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision };
+    assert.deepEqual(fastRun(fixture.base, baseEnv, { snapshot: true }), []);
+    assert.deepEqual(fastRun(fixture.candidate, compareEnv, { snapshot: false }), []);
+    for (const checkout of [fixture.base, fixture.candidate]) {
+      writeFileSync(join(checkout, 'packages/pptx/public/private/pptx/deck.pptx'), 'replaced deck');
+    }
+    // Snapshot preparation runs again for the replaced input, but its images are
+    // not recaptured or re-verified; the comparison must not accept them.
+    inPackage(fixture.base, baseEnv, () => {
+      prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a' });
+    });
+    assert.throws(
+      () => fastRun(fixture.candidate, compareEnv, { snapshot: false }),
+      /previous-renderer manifest mismatch/,
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
 
 test('fast tier compares exactly the selected items under the same selection', () => {
   const fixture = fastFixture();

@@ -119,7 +119,7 @@
     try {
       await loadFixtureFonts(fixtureFontStylesheets, ['nunito sans']);
       if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['noto sans', 'noto sans jp', 'noto sans arabic', 'noto sans hebrew']);
-      const resp = await fetch(`/${pptxName}.pptx`);
+      const resp = await fetch(`/${pptxName.split('/').map(encodeURIComponent).join('/')}.pptx`);
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();
       await viewer.load(buf);

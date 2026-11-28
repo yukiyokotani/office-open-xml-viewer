@@ -607,6 +607,9 @@ export function verifySelfVrtItemManifest({
     || (position > 0 && index <= indices[position - 1]))) {
     throw new Error(`invalid ${itemKind} selection for ${stem}: ${JSON.stringify(indices)} of ${itemCount}`);
   }
+  const inputName = `${stem}.${format}`;
+  const inputDigest = preparedInputs.get(`${corpus}\0${inputName}`);
+  if (!inputDigest) throw new Error(`self-VRT input ${inputName} was not prepared for the ${corpus} corpus`);
   const location = baselineLocation({ snapshot });
   const directory = join(location.directory, `${outputPrefix}${stem}`);
   const path = join(directory, 'manifest.json');
@@ -616,6 +619,7 @@ export function verifySelfVrtItemManifest({
     format,
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
+    input: { name: inputName, sha256: inputDigest },
     itemKind,
     itemCount,
   };

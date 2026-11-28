@@ -221,12 +221,21 @@ type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 
 // Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
 // (selfVrtInputBody), not whatever the dev server finds on disk later.
-async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<void> {
-  const inputPath = `/${selfVrtInputPath({ corpus, file })}`;
+// The route matches the raw encoded path the fixture requests (each segment
+// through encodeURIComponent), so a name such as `A%20B` cannot be confused
+// with a sibling `A B`. The returned function reports how many times the route
+// served the input; a test asserts it after the document loads.
+async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<() => number> {
+  const inputPath = '/' + selfVrtInputPath({ corpus, file }).split('/').map(encodeURIComponent).join('/');
+  let served = 0;
   await page.route(
-    (url) => decodeURIComponent(url.pathname) === inputPath,
-    (route) => route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) }),
+    (url) => url.pathname === inputPath,
+    (route) => {
+      served += 1;
+      return route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) });
+    },
   );
+  return () => served;
 }
 
 // `query` holds the fixture parameters after the page index: the demo and
@@ -249,7 +258,7 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.docx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'page' });
-        await serveSelfVrtInput(page, corpus, file);
+        const inputServed = await serveSelfVrtInput(page, corpus, file);
         const openPage = async (pageIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
@@ -268,6 +277,7 @@ function describeSelfRegression(
         };
 
         await openPage(0);
+        expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
         const pageCount = Number(await page.evaluate(() => document.body.dataset.pageCount));
         expect(pageCount, `${stem} must report its complete page count`).toBeGreaterThan(0);
         const differences: string[] = [];

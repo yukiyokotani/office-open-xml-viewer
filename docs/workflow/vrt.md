@@ -59,7 +59,8 @@ reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run:
 
 ```bash
-base=$(git rev-parse origin/main)   # the PR's base branch; origin/v0.x for a backport
+git fetch origin main
+base=$(git rev-parse origin/main)   # the base branch's current head (origin/v0.x for a backport), not a merge-base
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm

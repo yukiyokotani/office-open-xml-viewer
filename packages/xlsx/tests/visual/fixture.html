@@ -75,7 +75,7 @@
 
   try {
     if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['noto sans', 'noto sans jp', 'noto sans arabic', 'noto sans hebrew']);
-    const wb = await XlsxWorkbook.load('/' + file, { threeD, regionMap, tiff, chartEx });
+    const wb = await XlsxWorkbook.load('/' + file.split('/').map(encodeURIComponent).join('/'), { threeD, regionMap, tiff, chartEx });
     document.body.dataset.sheetCount = String(wb.sheetCount);
     const idx = Math.max(0, Math.min(sheet, wb.sheetNames.length - 1));
     await wb.renderViewport(canvas, idx, { row, col, rows, cols }, { width, height, dpr: 1 });

@@ -236,12 +236,21 @@ type FastTierSelection = {
 
 // Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
 // (selfVrtInputBody), not whatever the dev server finds on disk later.
-async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus | 'demo-scroll', file: string): Promise<void> {
-  const inputPath = `/${selfVrtInputPath({ corpus, file })}`;
+// The route matches the raw encoded path the fixture requests (each segment
+// through encodeURIComponent), so a name such as `A%20B` cannot be confused
+// with a sibling `A B`. The returned function reports how many times the route
+// served the input; a test asserts it after the document loads.
+async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus | 'demo-scroll', file: string): Promise<() => number> {
+  const inputPath = '/' + selfVrtInputPath({ corpus, file }).split('/').map(encodeURIComponent).join('/');
+  let served = 0;
   await page.route(
-    (url) => decodeURIComponent(url.pathname) === inputPath,
-    (route) => route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) }),
+    (url) => url.pathname === inputPath,
+    (route) => {
+      served += 1;
+      return route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) });
+    },
   );
+  return () => served;
 }
 
 // `query` holds extra fixture parameters (the public specimens load their
@@ -267,7 +276,7 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.pptx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'slide' });
-        await serveSelfVrtInput(page, corpus, file);
+        const inputServed = await serveSelfVrtInput(page, corpus, file);
         const openSlide = async (slideIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`
@@ -286,6 +295,7 @@ function describeSelfRegression(
 
         const firstSlide = selected?.units[0] ?? 0;
         await openSlide(firstSlide);
+        expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
         const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
         expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
         if (selected && selected.unitCount !== slideCount) {
@@ -368,7 +378,7 @@ test.describe('demo corpus scroll viewer self regression', () => {
       test.setTimeout(600_000);
       const stem = file.slice(0, -'.pptx'.length);
       if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'slide' });
-      await serveSelfVrtInput(page, corpus, file);
+      const inputServed = await serveSelfVrtInput(page, corpus, file);
       await page.goto(
         `/tests/visual/fixture.html?viewer=scroll&pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`,
       );
@@ -380,6 +390,7 @@ test.describe('demo corpus scroll viewer self regression', () => {
       if (status === 'error') {
         throw new Error(`${stem}: ${await page.evaluate(() => document.body.dataset.errorMessage ?? '')}`);
       }
+      expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
       const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
       expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
       const differences: string[] = [];
