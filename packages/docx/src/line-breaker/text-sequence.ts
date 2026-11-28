@@ -148,7 +148,10 @@ function languageKey(run: SequenceRun): string {
   if (western === undefined && run.langEastAsia === undefined && run.langBidi === undefined
     && run.langScriptClass === undefined) return '';
   return JSON.stringify([western ?? null, run.langEastAsia ?? null, run.langBidi ?? null,
-    run.langScriptClass ?? null,
+    // The class language by its effective tag (canvasLanguageTag), so
+    // equivalent spellings (ar-SA, AR-sa) are one state; an explicit empty
+    // class names none and stays '' (it outranks the other axes).
+    run.langScriptClass === undefined ? null : canvasLanguageTag(run.langScriptClass) ?? '',
     // The element-presence automatic axes (ParagraphTextFacts), only when set.
     ...(run.langEastAsiaAutomatic || run.langBidiAutomatic
       ? [run.langEastAsiaAutomatic === true, run.langBidiAutomatic === true] : [])]);

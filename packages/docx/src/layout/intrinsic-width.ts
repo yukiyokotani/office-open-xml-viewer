@@ -162,7 +162,7 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
         || request.canvasEastAsiaLanguage !== undefined
         ? [['lang', (request.complexScript ? undefined : canvasLanguageTag(request.language)) ?? null,
           request.complexScriptLanguage ?? null,
-          ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : []),
+          ...(request.scriptClassLanguage !== undefined ? [canvasLanguageTag(request.scriptClassLanguage) ?? ''] : []),
           // The element-presence East Asian Canvas axis (canvasLanguageAxes).
           ...(request.canvasEastAsiaLanguage !== undefined ? [['ea', request.canvasEastAsiaLanguage]] : [])]] : []),
     ] : null,

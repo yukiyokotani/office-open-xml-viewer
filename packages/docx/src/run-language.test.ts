@@ -688,6 +688,19 @@ describe('Canvas lang at measure and paint', () => {
     expect(await drawn('fr-fr')).toEqual(same);
   });
 
+  it('keeps Arabic joining across script-class tags that differ only in spelling', async () => {
+    const drawn = async (secondClass: string) => {
+      const { canvas, draws } = recordingCanvas();
+      await renderDocumentToCanvas(documentOf([
+        run('\u0633\u0644', { lang: 'ar-sa', langBidi: 'ar-sa', langScriptClass: 'ar-SA' }),
+        run('\u0627\u0645', { lang: 'ar-sa', langBidi: 'ar-sa', langScriptClass: secondClass }),
+      ]), canvas, 0, { dpr: 1, width: 600 });
+      return draws.map(draw => draw.text);
+    };
+    expect(await drawn('ar-SA')).toEqual(['\u0633\u0644\u0627\u0645']);
+    expect(await drawn('AR-sa')).toEqual(['\u0633\u0644\u0627\u0645']);
+  });
+
   it('measures overlay slices in the run language', () => {
     const calls: Array<[string, string | undefined]> = [];
     const measureForFont = (font: string, lang?: string) => {
