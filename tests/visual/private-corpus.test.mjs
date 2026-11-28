@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -856,6 +857,12 @@ test('the baseline worktree command creates a new worktree at the base and overw
     rmSync(join(candidate, 'packages/xlsx/public/corpus/new.xlsx'));
     put('packages/xlsx/public/corpus/new.xlsx', 'new');
 
+    // An unrelated worktree whose directory was moved away keeps its (stale)
+    // registration through a failed run: rollback touches only its own path.
+    git(candidate, 'worktree', 'add', '--quiet', '--detach', join(scratch, 'unrelated'), revision);
+    renameSync(join(scratch, 'unrelated'), join(scratch, 'unrelated-moved'));
+    assert.equal(worktrees(), 3);
+
     // A failing checkout (here a post-checkout hook) leaves nothing registered
     // or on disk, so the command can be run again for the same path.
     const hook = join(candidate, '.git/hooks/post-checkout');
@@ -863,16 +870,16 @@ test('the baseline worktree command creates a new worktree at the base and overw
     writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     assert.throws(() => create('hooked'));
     assert.equal(existsSync(join(scratch, 'hooked')), false);
-    assert.equal(worktrees(), 2);
+    assert.equal(worktrees(), 3);
     rmSync(hook);
     assert.equal(create('hooked').copied.length, 2);
-    assert.equal(worktrees(), 3);
+    assert.equal(worktrees(), 4);
 
     // A rename is a deletion and an addition: no worktree is created.
     git(candidate, 'mv', `${corpus}/old.pptx`, `${corpus}/renamed.pptx`);
     assert.throws(() => create('renamed'), /deletes or renames: D packages\/pptx\/public\/corpus\/old\.pptx$/);
     assert.equal(existsSync(join(scratch, 'renamed')), false);
-    assert.equal(worktrees(), 3);
+    assert.equal(worktrees(), 4);
     git(candidate, 'mv', `${corpus}/renamed.pptx`, `${corpus}/old.pptx`);
 
     // The command line, invoked through a symlink to the script.

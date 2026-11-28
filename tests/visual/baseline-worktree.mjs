@@ -10,8 +10,8 @@
 // specimen the candidate deletes or renames cannot be compared and stops the
 // command before the worktree is created.
 import { execFileSync } from 'node:child_process';
-import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isCorpusInputPath, readRegularFile, writeRegularFile } from './checked-read.mjs';
 
@@ -77,7 +77,11 @@ export function createBaselineWorktree({ source, destination, base }) {
   const copies = changes.map(([, path]) => ({ path, data: readRegularFile(join(from, path)) }));
   const registered = () => git(from, 'worktree', 'list', '--porcelain', '-z').split('\0')
     .filter((field) => field.startsWith('worktree ')).map((field) => field.slice('worktree '.length));
-  const before = registered();
+  // Git records the canonical path; the parent may not exist yet.
+  const canonical = () => {
+    const parent = dirname(destination);
+    return join(exists(parent) ? realpathSync(parent) : parent, basename(destination));
+  };
   let worktree;
   try {
     git(from, 'worktree', 'add', '--quiet', '--detach', destination, revision);
@@ -92,12 +96,15 @@ export function createBaselineWorktree({ source, destination, base }) {
       writeRegularFile(join(worktree, path), data);
     }
   } catch (error) {
-    // Undo only what this call registered (a failing checkout hook leaves a
-    // registered worktree behind), so that the command can be run again.
-    for (const added of registered().filter((path) => !before.includes(path))) {
-      git(from, 'worktree', 'remove', '--force', added);
+    // Undo only the destination this call created (the path did not exist
+    // before; a failing checkout hook leaves it registered), so that the
+    // command can be run again. Other registrations are never touched: no
+    // repository-wide prune.
+    if (registered().includes(canonical())) {
+      git(from, 'worktree', 'remove', '--force', destination);
+    } else if (exists(destination)) {
+      rmSync(destination, { recursive: true, force: true });
     }
-    git(from, 'worktree', 'prune');
     throw error;
   }
   return { worktree, copied: copies.map(({ path }) => path) };
