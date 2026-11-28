@@ -56,7 +56,17 @@ revision. Snapshot mode rejects a dirty tracked checkout and writes a manifest
 binding the baseline to `VRT_BASELINE_REVISION`, the SHA-256 of each input and
 the exact page/sheet/slide set. The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
-Use distinct ports so a candidate server can never satisfy the baseline run:
+Use distinct ports so a candidate server can never satisfy the baseline run.
+
+The default commands include the public specimen corpus. Before the snapshot,
+copy the specimens the candidate adds or rewrites into the baseline worktree,
+as described under "Visual regression" in
+[tests/corpus/README.md](../../tests/corpus/README.md#visual-regression). Set
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison run
+when there are any such specimens; the snapshot records the copies, and the
+comparison fails if one is missing or differs. Set `VRT_ALLOW_HARNESS_CHANGES=1`
+for both runs when the baseline revision predates the harness changes (see
+[Harness bootstrap](#harness-bootstrap)).
 
 ```bash
 git fetch origin main

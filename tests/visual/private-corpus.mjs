@@ -207,6 +207,43 @@ function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
   }
 }
 
+/** Changed public specimens that VRT_ALLOW_CORPUS_INPUT_CHANGES=1 admits. */
+function allowedCorpusInputs({ tracked, untracked }) {
+  return process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
+    ? [...new Set([...tracked, ...untracked])].filter((path) => CORPUS_INPUT_PATH.test(path)).sort()
+    : [];
+}
+
+/** Specimen copies a snapshot run admitted under the allowance, with their
+ * SHA-256, for the corpus manifest. */
+function snapshotCorpusInputs(root) {
+  const paths = allowedCorpusInputs(checkoutState(root));
+  return paths.map((path) => ({ path, sha256: copyDigest(join(root, path)) }));
+}
+
+// Copies the comparison's corpus manifest recorded, per baseline checkout. The
+// baseline is re-checked against them before every item it reads, so a copy
+// deleted or edited after the snapshot cannot pass.
+const recordedCopies = new Map();
+
+function assertRecordedCopies({ root, candidate, label }) {
+  const recorded = recordedCopies.get(root);
+  if (!recorded) return;
+  const present = allowedCorpusInputs(checkoutState(root));
+  if (JSON.stringify(present) !== JSON.stringify(recorded.map((copy) => copy.path))) {
+    throw new Error(
+      `${label} corpus input copies differ from the snapshot's record: `
+      + `expected ${JSON.stringify(recorded.map((copy) => copy.path))}, found ${JSON.stringify(present)}`,
+    );
+  }
+  assertCandidateCorpusInputs({ root, candidate, paths: present, label });
+  for (const { path, sha256: expected } of recorded) {
+    if (copyDigest(join(root, path)) !== expected) {
+      throw new Error(`${label} corpus input ${path} changed since its snapshot recorded it`);
+    }
+  }
+}
+
 /** Fail unless `root` is a checkout at exactly `revision` whose renderer is
  * unmodified: no tracked change and no untracked file outside dependencies and
  * the local private corpus. With VRT_ALLOW_HARNESS_CHANGES=1, only the
@@ -217,9 +254,7 @@ function assertRendererCheckout({ root, revision, label, candidate = root }) {
   if (head !== revision) {
     throw new Error(`${label} checkout mismatch: expected ${revision}, found ${head} at ${root}`);
   }
-  const corpusInputs = process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
-    ? [...new Set([...tracked, ...untracked])].filter((path) => CORPUS_INPUT_PATH.test(path))
-    : [];
+  const corpusInputs = allowedCorpusInputs({ tracked, untracked });
   assertCandidateCorpusInputs({ root, candidate, paths: corpusInputs, label });
   const changed = [...new Set([...tracked, ...untracked])].filter((path) => !corpusInputs.includes(path));
   if (changed.length === 0) return;
@@ -411,6 +446,7 @@ function baselineLocation({ snapshot = false } = {}) {
     throw new Error('VRT_BASELINE_CHECKOUT must name the previous-renderer checkout, not this one');
   }
   const real = verifyBaselineCheckout({ checkout, revision: requiredBaselineRevision() });
+  assertRecordedCopies({ root: real, candidate, label: 'self-VRT baseline' });
   return { checkout: real, directory: join(real, packagePath, 'tests/visual/baseline'), candidate };
 }
 
@@ -519,6 +555,9 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
       ? `${corpus} self-VRT requires a selection digest`
       : `${corpus} self-VRT does not take a selection digest`);
   }
+  // Each corpus manifest is read afresh; a record from an earlier prepare must
+  // not stand in for it.
+  recordedCopies.clear();
   const location = baselineLocation({ snapshot });
   const root = join(location.directory, corpusConfig(corpus).manifestDirectory);
   const path = join(root, 'manifest.json');
@@ -531,10 +570,27 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
     files: corpusFiles(corpus, files),
   };
   if (snapshot) {
+    const copies = snapshotCorpusInputs(location.checkout);
     mkdirSync(root, { recursive: true });
-    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeFileSync(
+      path,
+      `${JSON.stringify(copies.length > 0 ? { ...manifest, corpusInputCopies: copies } : manifest, null, 2)}\n`,
+    );
   } else {
-    assertExactManifest(readBaselineJson(location, path), manifest, path);
+    const { corpusInputCopies = [], ...header } = readBaselineJson(location, path);
+    assertExactManifest(header, manifest, path);
+    if (!Array.isArray(corpusInputCopies)
+      || corpusInputCopies.some((copy) => typeof copy?.path !== 'string' || typeof copy?.sha256 !== 'string')) {
+      throw new Error(`invalid corpus input copy record in ${path}`);
+    }
+    if (corpusInputCopies.length > 0 && process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES !== '1') {
+      throw new Error(
+        `${path} records specimen copies admitted by VRT_ALLOW_CORPUS_INPUT_CHANGES=1; `
+        + 'set it for the comparison run too',
+      );
+    }
+    recordedCopies.set(location.checkout, corpusInputCopies);
+    assertRecordedCopies({ root: location.checkout, candidate: location.candidate, label: 'self-VRT baseline' });
   }
 }
 

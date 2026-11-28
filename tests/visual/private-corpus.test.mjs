@@ -627,3 +627,85 @@ test('fast tier and full corpora refuse each other\'s selection arguments', () =
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });
+
+test('allowance copies recorded at snapshot time must stay present and identical', () => {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-allow-'));
+  const base = join(scratch, 'base');
+  const candidate = join(scratch, 'candidate');
+  const rel = 'packages/xlsx/public/corpus';
+  const specimen = 'xlsx-999-new.xlsx';
+  try {
+    mkdirSync(join(base, rel), { recursive: true });
+    git(base, 'init', '-q');
+    git(base, 'config', 'user.email', 'vrt@example.invalid');
+    git(base, 'config', 'user.name', 'vrt');
+    writeFileSync(join(base, rel, '.gitkeep'), '');
+    writeFileSync(join(base, '.gitignore'), 'packages/*/tests/visual/baseline/\n');
+    git(base, 'add', '-f', '.');
+    git(base, 'commit', '-q', '-m', 'renderer');
+    const revision = git(base, 'rev-parse', 'HEAD');
+    git(scratch, 'clone', '-q', base, candidate);
+    writeFileSync(join(candidate, rel, specimen), 'new');
+    writeFileSync(join(base, rel, specimen), 'new');
+    const files = [`corpus/${specimen}`];
+    const spec = { corpus: 'corpus', format: 'xlsx', files };
+    const inXlsx = (checkout, env, run) => {
+      const previous = process.cwd();
+      process.chdir(join(checkout, 'packages/xlsx'));
+      try {
+        return withEnv({ VRT_ALLOW_HARNESS_CHANGES: undefined, ...env }, run);
+      } finally {
+        process.chdir(previous);
+      }
+    };
+    const compare = (flag) => inXlsx(candidate, {
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: flag,
+      VRT_BASELINE_CHECKOUT: base,
+      VRT_BASELINE_REVISION: revision,
+    }, () => {
+      prepareSelfVrtCorpus({ ...spec, snapshot: false });
+      selfVrtBaselineRoot();
+    });
+    inXlsx(base, {
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
+      VRT_BASELINE_CHECKOUT: undefined,
+      VRT_BASELINE_REVISION: revision,
+    }, () => prepareSelfVrtCorpus({ ...spec, snapshot: true }));
+    const record = JSON.parse(readFileSync(
+      join(base, 'packages/xlsx/tests/visual/baseline/public-corpus/manifest.json'),
+      'utf8',
+    ));
+    assert.deepEqual(record.corpusInputCopies.map((copy) => copy.path), [`${rel}/${specimen}`]);
+
+    compare('1');
+    // The comparison needs the allowance the snapshot used.
+    assert.throws(() => compare(undefined), /clean renderer checkout/);
+
+    // A copy deleted after the snapshot is caught, with the flag set or unset.
+    rmSync(join(base, rel, specimen));
+    assert.throws(() => compare('1'), /copies differ from the snapshot's record/);
+    assert.throws(() => compare(undefined), /set it for the comparison run too/);
+
+    // A modified copy is caught.
+    writeFileSync(join(base, rel, specimen), 'edited');
+    assert.throws(() => compare('1'), /differs from the candidate/);
+    // Even when the candidate's file was edited along with it.
+    writeFileSync(join(candidate, rel, specimen), 'edited');
+    assert.throws(() => compare('1'), /changed since its snapshot recorded it|SHA-256|manifest mismatch/);
+
+    // Deleted mid-run, after the corpus manifest was verified.
+    writeFileSync(join(candidate, rel, specimen), 'new');
+    writeFileSync(join(base, rel, specimen), 'new');
+    inXlsx(candidate, {
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
+      VRT_BASELINE_CHECKOUT: base,
+      VRT_BASELINE_REVISION: revision,
+    }, () => {
+      prepareSelfVrtCorpus({ ...spec, snapshot: false });
+      rmSync(join(base, rel, specimen));
+      assert.throws(() => selfVrtBaselineRoot(), /copies differ from the snapshot's record/);
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

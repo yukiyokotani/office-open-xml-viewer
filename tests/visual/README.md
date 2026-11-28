@@ -31,8 +31,11 @@ git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.doc
 
 Only a `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
 qualifies. It must be a regular file reached without a symlink, and during the
-comparison each copy must still equal the candidate's file; the manifest's
-SHA-256 binding checks the inputs as well. Any other file, a deleted input and
+comparison each copy must still equal the candidate's file. The snapshot records the
+copies (path and SHA-256) in the corpus manifest; the comparison fails when a
+recorded copy is missing or differs from the record or the candidate, or when
+the flag is not set for it. The manifest's SHA-256 binding checks the inputs
+as well. Any other file, a deleted input and
 any renderer change still fail. The specs serve the fixture the input bytes
 the corpus manifest recorded (`selfVrtInputBody`), so a specimen replaced
 during capture fails instead of lending its image to another input. When the
