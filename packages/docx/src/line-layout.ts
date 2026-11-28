@@ -115,6 +115,7 @@ export function layoutLines(
     probeHeights: readonly number[] | null;
     decimalOrder?: LineOrderResolver;
     probeFloors?: readonly number[] | null;
+    probeLeadings?: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
   }>,
 ): LayoutLine[] {
@@ -131,6 +132,7 @@ export function layoutLines(
       probeHeights: readonly number[] | null,
       preparedFloatWrap?: PreparedFloatWrap,
       probeFloors: readonly number[] | null = null,
+      probeLeadings: readonly number[] | null = null,
     ): LayoutLine[] => (layoutLines as unknown as (
       ...args: unknown[]
     ) => LayoutLine[])(
@@ -159,7 +161,7 @@ export function layoutLines(
       cjkClosingMarkHang,
       bidiOrdering,
       lineEdgeRules,
-      { probeHeights, probeFloors, preparedFloatWrap, decimalOrder },
+      { probeHeights, probeFloors, probeLeadings, preparedFloatWrap, decimalOrder },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
     // text-body edge; floats of the same story (e.g. a §17.3.1.11 frame host)
@@ -171,7 +173,8 @@ export function layoutLines(
       ? undefined
       : prepareFloatWrap(wrapCtx.floats);
     const lines = convergeLineWrap(
-      (probeHeights, probeFloors) => runPass(probeHeights, preparedFloatWrap, probeFloors),
+      (probeHeights, probeFloors, probeLeadings) => runPass(probeHeights, preparedFloatWrap, probeFloors,
+        probeLeadings),
       (line) => wrapCtx.lineBoxH(
         line.ascent,
         line.descent,
@@ -184,6 +187,7 @@ export function layoutLines(
         line.latinGridCountSingle,
       ),
       wrapCtx.resolveLineAdvances,
+      wrapCtx.probeTrailingLeading,
     );
     const advances = wrapCtx.resolveLineAdvances?.(lines);
     return lines.map((line, index) => ({

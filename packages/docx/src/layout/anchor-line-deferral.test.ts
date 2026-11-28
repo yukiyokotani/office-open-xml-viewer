@@ -14,6 +14,7 @@ import { layoutDocumentProgressively, type ProgressiveLayoutPreview } from './pr
 import {
   anchorLineDeferralApplies,
   createAnchorLineDeferralProof,
+  hostFloatBottomMarginPlan,
   serializeAnchorInput,
   type PageAnchorInputEvent,
 } from './anchor-line-deferral.js';
@@ -52,13 +53,19 @@ const PNG = Uint8Array.from(Buffer.from(
 const encoder = new TextEncoder();
 
 type Anchor = Readonly<{
-  wrap?: 'topAndBottom' | 'square';
+  wrap?: 'topAndBottom' | 'square' | 'tight';
   relativeFrom?: 'margin' | 'page' | 'paragraph';
   xPt?: number;
   yPt?: number;
   widthPt?: number;
   heightPt?: number;
   allowOverlap?: boolean;
+  distBPt?: number;
+  /** §20.4.2.6 effectExtent top and bottom (pt). */
+  effectTPt?: number;
+  effectBPt?: number;
+  /** Line after which this anchor's run sits (default `anchorAfterLine`). */
+  line?: number;
 }>;
 
 type Paragraph = Readonly<{
@@ -69,6 +76,8 @@ type Paragraph = Readonly<{
   keepNext?: boolean;
   keepLines?: boolean;
   widowControl?: boolean;
+  /** An automatic single line (§17.3.1.33) instead of the exact 24pt line. */
+  auto?: boolean;
 }>;
 
 function anchorXml(id: number, anchor: Anchor): string {
@@ -79,15 +88,19 @@ function anchorXml(id: number, anchor: Anchor): string {
   const xPt = anchor.xPt ?? (horizontal === 'page' ? 72 : 0);
   const wrap = anchor.wrap === 'square'
     ? '<wp:wrapSquare wrapText="bothSides"/>'
-    : '<wp:wrapTopAndBottom/>';
+    : anchor.wrap === 'tight'
+      ? '<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/>'
+        + '<wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/>'
+        + '<wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>'
+      : '<wp:wrapTopAndBottom/>';
   return '<w:r><w:drawing>'
-    + '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
+    + `<wp:anchor distT="0" distB="${Math.round((anchor.distBPt ?? 0) * EMU)}" distL="0" distR="0" simplePos="0" `
     + `relativeHeight="${251659264 + id}" behindDoc="0" locked="0" layoutInCell="1" `
     + `allowOverlap="${anchor.allowOverlap === false ? 0 : 1}">`
     + '<wp:simplePos x="0" y="0"/>'
     + `<wp:positionH relativeFrom="${horizontal}"><wp:posOffset>${Math.round(xPt * EMU)}</wp:posOffset></wp:positionH>`
     + `<wp:positionV relativeFrom="${vertical}"><wp:posOffset>${Math.round((anchor.yPt ?? 0) * EMU)}</wp:posOffset></wp:positionV>`
-    + `<wp:extent cx="${width}" cy="${height}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}`
+    + `<wp:extent cx="${width}" cy="${height}"/><wp:effectExtent l="0" t="${Math.round((anchor.effectTPt ?? 0) * EMU)}" r="0" b="${Math.round((anchor.effectBPt ?? 0) * EMU)}"/>${wrap}`
     + `<wp:docPr id="${id}" name="Anchor ${id}"/>`
     + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
     + `<pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="a${id}.png"/><pic:cNvPicPr/></pic:nvPicPr>`
@@ -101,6 +114,9 @@ function docx(
   paragraphCount: number,
   special: Readonly<Record<number, Paragraph>>,
   columns = 1,
+  compatibilityMode?: number,
+  /** A §17.6.5 lines grid with this pitch (pt). */
+  gridPitchPt?: number,
 ): Uint8Array {
   let nextId = 1;
   const body = Array.from({ length: paragraphCount }, (_, index) => {
@@ -109,17 +125,20 @@ function docx(
     const texts = Array.from({ length: spec.lines ?? 1 }, (_, line) => (
       `<w:r><w:t>${line === 0 ? label : `${label}.${line + 1}`}</w:t></w:r>`
     ));
-    const anchors = (spec.anchors ?? []).map((anchor) => anchorXml(nextId++, anchor)).join('');
     const after = spec.anchorAfterLine ?? 0;
+    const anchors = (spec.anchors ?? []).map((anchor) => [anchor.line ?? after, anchorXml(nextId++, anchor)] as const);
     const runs = texts.flatMap((text, line) => [
       ...(line > 0 ? ['<w:r><w:br/></w:r>'] : []),
       text,
-      ...(line === after ? [anchors] : []),
+      ...anchors.filter(([anchorLine]) => anchorLine === line).map(([, xml]) => xml),
     ]).join('');
     return '<w:p><w:pPr>' + (spec.keepNext ? '<w:keepNext/>' : '')
       + (spec.keepLines ? '<w:keepLines/>' : '')
       + `<w:widowControl w:val="${spec.widowControl ? 1 : 0}"/>`
-      + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
+      // On a grid, automatic single lines snap to one cell each.
+      + (gridPitchPt === undefined && spec.auto !== true
+        ? '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
+        : '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>')
       + `${runs}</w:p>`;
   }).join('');
   const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -132,6 +151,7 @@ function docx(
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
     + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
     + (columns > 1 ? `<w:cols w:num="${columns}" w:space="480"/>` : '<w:cols w:space="720"/>')
+    + (gridPitchPt === undefined ? '' : `<w:docGrid w:type="lines" w:linePitch="${Math.round(gridPitchPt * 20)}"/>`)
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
@@ -139,6 +159,8 @@ function docx(
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + (compatibilityMode === undefined ? ''
+        : '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>')
       + '</Types>')],
     ['_rels/.rels', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -147,8 +169,14 @@ function docx(
     ['word/_rels/document.xml.rels', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + '<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/>'
+      + (compatibilityMode === undefined ? ''
+        : '<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>')
       + '</Relationships>')],
     ['word/document.xml', encoder.encode(document)],
+    ...(compatibilityMode === undefined ? [] : [['word/settings.xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
+      + '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>'
+      + `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${compatibilityMode}"/>`
+      + '</w:compat></w:settings>')] as const]),
     ['word/media/a.png', PNG],
   ]));
 }
@@ -545,5 +573,164 @@ describe('anchor-line deferral proof', () => {
     expect(anchorLineDeferralApplies(proof, ['a'], 1, {
       reads: reads([prescan(0, []), prescan(1, []), table(1)]),
     })).toBe(true);
+  });
+});
+
+describe('WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL', () => {
+  // 27 automatic single lines, one 24pt lines-grid cell each, fill the 648pt
+  // US Letter body (72-720pt); without the grid they are exact 24pt lines. A
+  // 30pt paragraph-relative float anchored in P025 (672-696pt) at +40pt would
+  // end at 742pt, below the body; risen to end at 720pt it would start above
+  // the line's bottom.
+  const paginate = (special: Readonly<Record<number, Paragraph>>, options: Readonly<{
+    mode?: number; grid?: boolean; columns?: number; count?: number;
+  }> = {}) => lines(layout(docx(options.count ?? 27, special, options.columns ?? 1,
+    options.mode ?? 15, options.grid === false ? undefined : 24)));
+  const crossing = (mode: number, yPt: number, wrap: 'square' | 'topAndBottom' | 'tight' = 'square',
+    grid = true) => paginate({
+    25: { anchors: [{ wrap, relativeFrom: 'paragraph', yPt, widthPt: 100, heightPt: 30 }] },
+  }, { mode, grid });
+  it.each(['square', 'topAndBottom', 'tight'] as const)('moves the anchor line of a crossing %s float to the next page in mode 15', (wrap) => {
+    const placed = crossing(15, 40, wrap);
+    expect(placed.get('P025')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P024')?.page).toBe(1);
+  });
+  it('keeps the anchor line when the float ends inside the body', () => {
+    expect(crossing(15, 10).get('P025')?.page).toBe(1);
+  });
+  it('lets the float overhang the margin in mode 14', () => {
+    expect(crossing(14, 40).get('P025')?.page).toBe(1);
+  });
+  it('moves the anchor line of exact lines without a lines grid', () => {
+    expect(crossing(15, 40, 'square', false).get('P025')).toMatchObject({ page: 2, yPt: 72 });
+    expect(crossing(15, 10, 'square', false).get('P025')?.page).toBe(1);
+    expect(crossing(14, 40, 'square', false).get('P025')?.page).toBe(1);
+  });
+  it('compares the box widened by its bottom effect extent with the body bottom', () => {
+    // The drawing ends at 712pt; effectExtent b=10pt takes it to 722pt.
+    const placed = paginate({
+      25: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 20, widthPt: 100, heightPt: 20, effectBPt: 10 }] },
+    });
+    expect(placed.get('P025')).toMatchObject({ page: 2, yPt: 72 });
+  });
+  it('raises a crossing float that stays below its anchor line to end at the body bottom', () => {
+    // P025 is an automatic single line at 672pt without a grid; its float
+    // would span 712-732pt and rises to 700-720pt.
+    const at = (mode: number, heightPt: number) => layout(docx(27, {
+      25: { auto: true, anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 40, widthPt: 100, heightPt }] },
+    }, 1, mode));
+    const risen = at(15, 20);
+    expect(lines(risen).get('P025')).toMatchObject({ page: 1, yPt: 672 });
+    expect(pictures(risen).get(25)).toEqual([{ page: 1, xPt: 72, yPt: 700 }]);
+    expect(pictures(at(14, 20)).get(25)).toEqual([{ page: 1, xPt: 72, yPt: 712 }]);
+    // Risen to 674pt the float would start above the line's bottom: the line moves.
+    const moved = at(15, 46);
+    expect(lines(moved).get('P025')).toMatchObject({ page: 2, yPt: 72 });
+    expect(pictures(moved).get(25)?.map((picture) => picture.page)).toEqual([2]);
+  });
+  it('raises an effect-extent crossing so that the effect extent ends at the body bottom', () => {
+    const result = layout(docx(27, {
+      25: { auto: true, anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 30, widthPt: 100, heightPt: 10, effectBPt: 10 }] },
+    }, 1, 15));
+    expect(pictures(result).get(25)).toEqual([{ page: 1, xPt: 72, yPt: 700 }]);
+  });
+  it('compares the drawing box, not its bottom wrap distance, with the body bottom', () => {
+    // The drawing ends at 712pt; distB=10pt takes its exclusion to 722pt.
+    const placed = paginate({
+      25: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 20, widthPt: 100, heightPt: 20, distBPt: 10 }] },
+    });
+    expect(placed.get('P025')?.page).toBe(1);
+  });
+  it('moves a keepNext predecessor with the deferred anchor paragraph', () => {
+    const placed = paginate({
+      24: { keepNext: true },
+      25: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 40, widthPt: 100, heightPt: 30 }] },
+    });
+    expect(placed.get('P024')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P025')).toMatchObject({ page: 2, yPt: 96 });
+  });
+  it('still defers a later crossing line of a paragraph that starts the page', () => {
+    // Both floats end at 753pt. The first line starts the page and stays;
+    // the second line's float moves it on.
+    const placed = paginate({
+      0: { lines: 3, anchors: [
+        { wrap: 'square', relativeFrom: 'paragraph', yPt: 1, widthPt: 100, heightPt: 680, line: 0 },
+        { wrap: 'square', relativeFrom: 'paragraph', yPt: 1, widthPt: 100, heightPt: 680, line: 1 },
+      ] },
+    }, { count: 2 });
+    expect(placed.get('P000')).toMatchObject({ page: 1, xPt: 72 });
+    expect(placed.get('P000.2')).toMatchObject({ page: 2, yPt: 72 });
+    // The moved line keeps its float as its page's first line; the region ends after it.
+    expect(placed.get('P000.3')).toMatchObject({ page: 3, yPt: 72 });
+  });
+  it('lays the lines left behind out without the deferred float', () => {
+    // The float anchored on P025's second line lies beside its first line.
+    const result = layout(docx(27, {
+      25: { lines: 2, anchorAfterLine: 1,
+        anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 0, widthPt: 100, heightPt: 60 }] },
+    }, 1, 15, 24));
+    const placed = lines(result);
+    expect(placed.get('P025')).toMatchObject({ page: 1, xPt: 72 });
+    expect(placed.get('P025.2')).toMatchObject({ page: 2, yPt: 72 });
+    expect(pictures(result).get(25)?.map((picture) => picture.page)).toEqual([2]);
+  });
+  it('moves the anchor line to the next column of a multi-column section', () => {
+    const at = (mode: number) => paginate({
+      25: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 40, widthPt: 100, heightPt: 30 }] },
+    }, { columns: 2, count: 54, mode });
+    const moved = at(15).get('P025');
+    expect(moved).toMatchObject({ page: 1, yPt: 72 });
+    expect(moved!.xPt).toBeGreaterThan(300);
+    expect(at(14).get('P025')).toMatchObject({ page: 1, yPt: 672, xPt: 72 });
+  });
+  it('ends the region after a page-top line that keeps its crossing float', () => {
+    // The 680pt float on P000's first line ends at 753pt; the line starts the
+    // page, stays without wrapping around it, and the next line moves on.
+    const placed = paginate({
+      0: { lines: 2, anchors: [
+        { wrap: 'square', relativeFrom: 'paragraph', yPt: 1, widthPt: 100, heightPt: 680, line: 0 },
+      ] },
+    }, { count: 2 });
+    expect(placed.get('P000')).toMatchObject({ page: 1, xPt: 72 });
+    expect(placed.get('P000.2')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P001')?.page).toBe(2);
+  });
+  it('ends the page after a one-line page-top paragraph that keeps its crossing float', () => {
+    const at = (mode: number, columns = 1) => paginate({
+      0: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 1, widthPt: 100, heightPt: 680 }] },
+    }, { count: 3, mode, columns });
+    const placed = at(15);
+    expect(placed.get('P000')).toMatchObject({ page: 1, xPt: 72 });
+    expect(placed.get('P001')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P002')).toMatchObject({ page: 2, yPt: 96 });
+    // In two columns the next block still starts the next page, not column 2.
+    expect(at(15, 2).get('P001')).toMatchObject({ page: 2, yPt: 72, xPt: 72 });
+    // Mode 14 keeps the following paragraph beside the overhanging float.
+    expect(at(14).get('P001')).toMatchObject({ page: 1, yPt: 96, xPt: 172 });
+  });
+});
+
+describe('hostFloatBottomMarginPlan', () => {
+  const float = (key: string, topPt: number, bottomPt: number, lineBottomPt: number) =>
+    Object.freeze({ key, topPt, bottomPt, lineBottomPt });
+  it('lifts a crossing float that stays below its anchor line and moves the first line that cannot', () => {
+    const plan = hostFloatBottomMarginPlan([
+      [float('a', 700, 730, 680)],
+      [],
+      [float('b', 712, 760, 690), float('c', 712, 724, 690)],
+      [float('d', 712, 760, 700)],
+    ], 720);
+    expect(plan.lifts).toEqual([['a', 10]]);
+    expect(plan.line).toEqual({ index: 2, keys: ['b', 'c'], fixedKeys: ['b'], lifts: [['c', 4]] });
+  });
+  it('lets a risen float start exactly at its anchor line bottom', () => {
+    expect(hostFloatBottomMarginPlan([[float('a', 700, 730, 690)]], 720).line).toBeUndefined();
+    expect(hostFloatBottomMarginPlan([[float('a', 700, 730, 690.5)]], 720).line?.index).toBe(0);
+  });
+  it('tests the paragraph at an offset and over a line prefix', () => {
+    const byLine = [[], [float('a', 600, 620, 570)]];
+    expect(hostFloatBottomMarginPlan(byLine, 720, 120).lifts).toEqual([['a', 20]]);
+    expect(hostFloatBottomMarginPlan(byLine, 720, 140).line?.index).toBe(1);
+    expect(hostFloatBottomMarginPlan(byLine, 720, 140, 1)).toEqual({ lifts: [] });
   });
 });

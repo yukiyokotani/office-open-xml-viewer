@@ -201,6 +201,32 @@ describe('paragraph page-local reserve selection', () => {
     expect(wordGridLineAdmissionExtentPt(successor, true, 10, 18, 0, 10)).toBe(expectedExtent);
   });
 
+  it('lets a mode-15 float beside the trailing line keep the grid relief', () => {
+    const retained = paragraph();
+    const candidate = {
+      ...retained,
+      lines: [{ ...retained.lines[0], gridAfterLeadingPt: 2 }],
+      exclusions: [{ id: 'float', wrap: 'square' as const,
+        bounds: { xPt: 0, yPt: 0, widthPt: 40, heightPt: 9 }, polygon: [] }],
+    };
+    // word-grid-line-content-fit-admission: the mode-15 flag keeps the relief.
+    expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9)).toBe(10);
+    expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9, 0, 0, true)).toBe(8);
+  });
+
+  it('counts a float starting at the body bottom beside the line cell', () => {
+    const retained = paragraph();
+    const candidate = {
+      ...retained,
+      lines: [{ ...retained.lines[0], gridAfterLeadingPt: 2 }],
+      exclusions: [{ id: 'float', wrap: 'square' as const,
+        bounds: { xPt: 0, yPt: 9, widthPt: 40, heightPt: 20 }, polygon: [] }],
+    };
+    // Body bottom 9pt, cell 0-10pt: the band is the whole cell
+    // (word-grid-line-content-fit-admission).
+    expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9)).toBe(10);
+  });
+
   it.each(['paragraph', 'line', 'text', 'glyph'] as const)(
     'charges the full cell for an unknown %s paint capability', owner => {
       const retained = verticalEdgeParagraph('horizontal-tb', 8, undefined, 2);

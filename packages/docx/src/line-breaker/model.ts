@@ -656,6 +656,9 @@ export interface LayoutLine {
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 export interface WrapLayoutCtx {
   hasExclusions?: boolean;
+  /** Trailing grid leading a line's exclusion probe leaves out
+   * (WORD_GRID_LINE_CONTENT_FIT_ADMISSION, compatibility mode 15). */
+  probeTrailingLeading?: (line: LayoutLine, advancePx: number) => number;
   /** Preserve the pre-15 allocation of an anchor-only line when a float
    * narrows or displaces it (WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy). */
   preservePre15AnchorLine?: boolean;

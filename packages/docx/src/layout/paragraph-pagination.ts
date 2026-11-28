@@ -61,6 +61,7 @@ function completingParagraphAdmissionExtentPt(
   availableBlockExtentPt: number,
   unreservedBodyBottomPt: number | undefined,
   reservePt: number,
+  besideFloatKeepsGridRelief: boolean,
 ): number {
   const withoutSpaceAfterPt = wordFinalParagraphAdmissionExtentPt({
     advancePt: fragment.advancePt,
@@ -69,6 +70,7 @@ function completingParagraphAdmissionExtentPt(
   });
   const logicalLineBoxExtentPt = libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
     fragment, wholeParagraphHasPlacements, withoutSpaceAfterPt, unreservedBodyBottomPt, reservePt,
+    0, besideFloatKeepsGridRelief,
   ));
   return wordVerticalRlFinalLineAdmissionExtentPt({
     paragraph: fragment,
@@ -107,6 +109,8 @@ export function selectParagraphFragment(
      * a proven anchor-line deferral (anchor-line-deferral.ts) ends the page
      * just above that line. Keep and widow rules then act as for overflow. */
     lineEndLimit?: number;
+    /** DocxCompatProfile.gridEdgeBesideFloatKeepsRelief. */
+    besideFloatKeepsGridRelief?: boolean;
   }>,
   additionalReserveFor?: (fragment: ParagraphLayout) => number,
   uniformRubyAdvancePt?: number,
@@ -157,10 +161,11 @@ export function selectParagraphFragment(
       ? completingParagraphAdmissionExtentPt(
         fragment, wholeParagraphHasPlacements, authoredSpaceAfterPt,
         policy.writingMode ?? 'horizontal-tb', availableBlockExtentPt,
-        policy.unreservedBodyBottomPt, reservePt,
+        policy.unreservedBodyBottomPt, reservePt, policy.besideFloatKeepsGridRelief === true,
       )
       : libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
         fragment, wholeParagraphHasPlacements, fragment.advancePt, policy.unreservedBodyBottomPt, reservePt,
+        0, policy.besideFloatKeepsGridRelief === true,
       ))
   );
   if (fragmentation.kind === 'indivisible') {

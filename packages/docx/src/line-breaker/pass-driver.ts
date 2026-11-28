@@ -119,6 +119,8 @@ export interface LineBreakerPassInput {
     decimalOrder?: LineOrderResolver;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */
     probeFloors?: readonly number[] | null;
+    /** Per-physical-line trailing grid leading left out of the probe. */
+    probeLeadings?: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
   }>;
 }
@@ -416,6 +418,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     reservePrefixWork: createPrefixWorkBudget(),
     probeHeights,
     probeFloors,
+    probeLeadings: passContext.probeLeadings ?? null,
     preparedFloatWrap,
     breakerState,
     sameLatinSpaceFace,

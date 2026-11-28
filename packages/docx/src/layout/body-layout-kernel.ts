@@ -6,6 +6,7 @@ import type {
 } from './paragraph-pagination.js';
 import type { TableFragmentCursor } from './table-pagination.js';
 import type { BodyAdjacentTableGroupInput, BodyParagraphSourceInput } from './body-layout-input.js';
+import type { HostFloatAnchor } from './anchor-line-deferral.js';
 import type {
   BodyFlowRegistryDeltaPt,
   BodyFlowRegistrySnapshotPt,
@@ -62,6 +63,12 @@ export interface BodyParagraphAcquisitionInput {
   readonly availableInlineExtentPt: number;
   readonly suppressSpaceBefore: boolean;
   readonly continuation: ParagraphFragmentCursor;
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: host-float keys (HostFloatAnchor)
+   * whose anchor line moves on; acquired without their text wrap. */
+  readonly deferredHostAnchorKeys?: readonly string[];
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: host-float keys and the points
+   * by which those floats rise to end at the body bottom. */
+  readonly hostAnchorLiftsPt?: readonly (readonly [string, number])[];
 }
 
 export interface AdjacentTableGroupCursor {
@@ -119,6 +126,9 @@ export interface AcquiredParagraphBlock {
   readonly markMultipleLeadingPt?: number;
   /** Grid-only leading below a mark's own natural/authored box. */
   readonly markGridAfterLeadingPt?: number;
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: host-owned wrapping floats by
+   * anchor line; present only where the rule applies and a float exists. */
+  readonly hostFloatsByLine?: readonly (readonly HostFloatAnchor[])[];
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body';
@@ -272,6 +282,9 @@ export interface FollowingBodyBlockMeasurement {
   /** Paragraph only: page-owned drawing occurrence keys anchored on each
    * measured line, so keepNext can honour an anchor-line deferral. */
   readonly pageOwnedAnchorKeysByLine?: readonly (readonly string[])[];
+  /** Paragraph only: host-owned wrapping floats by line, measured at the
+   * lookahead location (see AcquiredParagraphBlock.hostFloatsByLine). */
+  readonly hostFloatsByLine?: readonly (readonly HostFloatAnchor[])[];
 }
 
 /** First-placement geometry of a carried paragraph-relative drawing. */

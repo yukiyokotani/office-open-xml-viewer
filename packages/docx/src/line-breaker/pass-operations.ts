@@ -167,6 +167,7 @@ export interface PassOperationState extends LineBreakerPassInput {
   ) => boolean;
   readonly probeHeights: readonly number[] | null;
   readonly probeFloors: readonly number[] | null;
+  readonly probeLeadings: readonly number[] | null;
   readonly preparedFloatWrap?: PreparedFloatWrap;
 }
 
@@ -389,6 +390,19 @@ function resetPhysicalLineMetrics({ breakerState }: PassOperationState): void {
 function physicalProbeHeight(probeHeights: readonly number[] | null, index: number): number | undefined {
   if (!probeHeights || probeHeights.length === 0) return undefined;
   return probeHeights[index] ?? probeHeights[probeHeights.length - 1];
+}
+
+/** The exclusion band a physical line's window is solved against: its probe
+ * floor less any trailing grid leading the mode-15 rule leaves out
+ * (WORD_GRID_LINE_CONTENT_FIT_ADMISSION). */
+function windowProbeHeight(
+  { probeFloors, probeLeadings }: Pick<PassOperationState, 'probeFloors' | 'probeLeadings'>,
+  index: number,
+): number | undefined {
+  const probe = physicalProbeHeight(probeFloors, index);
+  if (probe === undefined || !probeLeadings) return probe;
+  const leading = probeLeadings[index] ?? 0;
+  return leading > 0 && leading < probe ? probe - leading : probe;
 }
 
 function openPhysicalLine(operationState: PassOperationState): void {
@@ -674,7 +688,7 @@ function placeLineWindow(
   let accepted: GapWindow & { narrowed: boolean; solverBandX: number; solverXOffset: number } | null = null;
   const cursor = transaction.cursor;
   if (cursor) {
-    const probeH = physicalProbeHeight(probeFloors, breakerState.physicalLineIndex);
+    const probeH = windowProbeHeight(operationState, breakerState.physicalLineIndex);
     const left = baseRtl ? lineBandX : cursor.right;
     const right = baseRtl ? cursor.left : lineBandX + lineBandWidth;
     if (probeH !== undefined && right > left) {
@@ -701,7 +715,7 @@ function placeLineWindow(
     }
   }
   if (!accepted) {
-    const probeH = physicalProbeHeight(probeFloors, breakerState.physicalLineIndex);
+    const probeH = windowProbeHeight(operationState, breakerState.physicalLineIndex);
     if (probeH === undefined) {
       breakerState.lineXOffset = 0;
       breakerState.lineMaxWidth = maxWidth;
@@ -748,7 +762,7 @@ function placeLineWindow(
   // A trailing-indent extension exists only beside an unnarrowed band, and
   // only where no exclusion intersects it on this line (§20.4.2.17–.19).
   const extension = marginExtensionWidth(operationState);
-  const extensionProbeH = physicalProbeHeight(probeFloors, breakerState.physicalLineIndex);
+  const extensionProbeH = windowProbeHeight(operationState, breakerState.physicalLineIndex);
   if (accepted.narrowed || extension <= 0 || baseRtl) {
     breakerState.lineMarginExtension = 0;
   } else if (extensionProbeH === undefined) {

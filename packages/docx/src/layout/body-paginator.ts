@@ -88,6 +88,8 @@ import {
   anchorLineFloor,
   anchorLineFloorKey,
   anchorLineDeferralKey,
+  anchorLineIndexOf,
+  hostFloatBottomMarginPlan,
   anchorLineDeferralsIdentity,
   createAnchorLineDeferralProof,
   pageOwnedAnchorKeysByLine,
@@ -95,6 +97,7 @@ import {
   type AnchorLineDeferralContext,
   type AnchorLineDeferrals,
   type AnchorLineDeferralProof,
+  type HostFloatBottomMarginPlan,
   type PageAnchorInputEvent,
 } from './anchor-line-deferral.js';
 import { paragraphContinuingPrefixAdvancesPt } from './paragraph.js';
@@ -2843,10 +2846,14 @@ function* paginateBodyPassSteps(
       // Space after left inside the last fragment's flow charge, when the
       // region bottom cut part of it (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT).
       let cutSpaceAfterPt = 0;
+      // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: the paragraph's last accepted
+      // line starts its region and keeps a crossing float, so the page ends
+      // after it, before the next block.
+      let hostFloatRegionEndsAfterParagraph = false;
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
-        const acquired = session.measureParagraph({
+        const acquisitionRequest = Object.freeze({
           input: block,
           location,
           availableInlineExtentPt: location.availableBounds.widthPt,
@@ -2884,6 +2891,7 @@ function* paginateBodyPassSteps(
             ),
           continuation: cursor,
         });
+        let acquired = session.measureParagraph(acquisitionRequest);
         if (acquired.placement) {
           const notes = footnoteAdmission(
             acquired.layout,
@@ -2970,6 +2978,10 @@ function* paginateBodyPassSteps(
           && (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
           && state.footnoteReservePt === 0
           ? physicalBodyBottomPt : undefined;
+        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL is measured at the physical
+        // body bottom, in single- and multi-column regions.
+        const hostFloatDeferralRegion = compat.hostFloatBottomMarginDeferral
+          && unreservedBodyBottomPt !== undefined;
         if (cursor.boundary === null && block.keepNext && state.flow.pageHasContent) {
           let keepSetExtentPt = acquired.blockExtentPt;
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
@@ -3008,6 +3020,13 @@ function* paginateBodyPassSteps(
             if (keptLines?.some((keys) => anchorLineDeferred(keys))) {
               keepSetBlockedByDeferral = true;
             }
+            // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL at the successor's
+            // projected position: its kept lines start below the set so far.
+            if (hostFloatDeferralRegion && following.hostFloatsByLine
+              && hostFloatBottomMarginPlan(following.hostFloatsByLine, unreservedBodyBottomPt!,
+                keepSetExtentPt, continues ? undefined : 1).line !== undefined) {
+              keepSetBlockedByDeferral = true;
+            }
             keepSetExtentPt += continues
               ? following.fullExtentPt
               : following.leadContentExtentPt;
@@ -3040,7 +3059,8 @@ function* paginateBodyPassSteps(
           const terminalAdmissionPt = terminalGridParagraph
             ? wordGridLineAdmissionExtentPt(terminalGridParagraph,
               terminalWholeParagraphHasPlacements, terminalLeadExtentPt,
-              unreservedBodyBottomPt, keepSetReservePt, keepSetExtentPt - terminalLeadExtentPt)
+              unreservedBodyBottomPt, keepSetReservePt, keepSetExtentPt - terminalLeadExtentPt,
+              compat.gridEdgeBesideFloatKeepsRelief)
             : terminalLeadExtentPt;
           const keepSetAdmissionPt = keepSetExtentPt
             - (terminalLeadExtentPt - terminalAdmissionPt) + keepSetReservePt;
@@ -3129,6 +3149,78 @@ function* paginateBodyPassSteps(
             continue;
           }
         }
+        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: a host-owned wrapping float
+        // whose box would cross the unreserved body bottom rises to end there
+        // when it then stays below its anchor line; otherwise its anchor line
+        // moves on, and the lines left behind are acquired again without the
+        // moved floats. A line that starts its region stays, its crossing
+        // floats lose their text wrap, and the page ends after it.
+        let hostFloatLineBreak: number | undefined;
+        let hostFloatKeptAtRegionStart = false;
+        if (hostFloatDeferralRegion && acquired.hostFloatsByLine) {
+          const firstLineMayMove = pageCanGainSpaceByRelocating();
+          const initial = acquired;
+          const moving = new Set<string>();
+          const stuck = new Set<string>();
+          const lifts = new Map<string, number>();
+          const reacquire = () => session.measureParagraph(Object.freeze({
+            ...acquisitionRequest,
+            deferredHostAnchorKeys: Object.freeze([...moving, ...stuck].sort()),
+            hostAnchorLiftsPt: Object.freeze([...lifts].sort(([left], [right]) => left.localeCompare(right))),
+          }));
+          // Each step defers, fixes or lifts at least one more float; the
+          // bound only guards against a wrap that keeps re-crossing.
+          for (let attempt = 0; attempt < HOST_FLOAT_PLAN_ATTEMPTS; attempt += 1) {
+            const anchored = moving.size === 0 ? undefined : anchorLineIndexOf(acquired.layout, moving);
+            if (moving.size > 0 && anchored === undefined) {
+              // The moved floats left this acquisition: nothing is deferred.
+              acquired = initial;
+              moving.clear(); stuck.clear(); lifts.clear();
+              hostFloatLineBreak = undefined;
+              break;
+            }
+            if (anchored === 0 && !firstLineMayMove) {
+              // Without the moved floats their anchors start the region.
+              moving.forEach((key) => stuck.add(key));
+              moving.clear();
+              acquired = reacquire();
+              continue;
+            }
+            const plan: HostFloatBottomMarginPlan = acquired.hostFloatsByLine
+              ? hostFloatBottomMarginPlan(acquired.hostFloatsByLine, unreservedBodyBottomPt!, 0, anchored)
+              : Object.freeze({ lifts: Object.freeze([]) });
+            let changed = false;
+            const lift = (entries: HostFloatBottomMarginPlan['lifts']): void => entries.forEach(([key, liftPt]) => {
+              lifts.set(key, (lifts.get(key) ?? 0) + liftPt);
+              changed = true;
+            });
+            lift(plan.lifts);
+            hostFloatLineBreak = anchored;
+            if (plan.line?.index === 0 && firstLineMayMove) {
+              hostFloatLineBreak = 0;
+              break;
+            }
+            if (plan.line?.index === 0) {
+              plan.line.fixedKeys.forEach((key) => stuck.add(key));
+              lift(plan.line.lifts);
+              changed = true;
+            } else if (plan.line) {
+              plan.line.keys.forEach((key) => moving.add(key));
+              changed = true;
+            }
+            if (!changed) break;
+            acquired = reacquire();
+          }
+          hostFloatKeptAtRegionStart = stuck.size > 0;
+          if (stuck.size > 0 && acquired.layout.lines.length > 1) {
+            hostFloatLineBreak = Math.min(hostFloatLineBreak ?? 1, 1);
+          }
+          // At the step bound the last index may name a line that the final
+          // acquisition no longer has.
+          if (hostFloatLineBreak !== undefined && hostFloatLineBreak >= acquired.layout.lines.length) {
+            hostFloatLineBreak = undefined;
+          }
+        }
         // The empty-mark allowance can apply only to an undecorated inkless
         // mark that starts here without keepNext; any other fragment ignores
         // the reserve, so its whole-note acquisition is not performed (it
@@ -3161,7 +3253,10 @@ function* paginateBodyPassSteps(
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });
         // A proven anchor-line deferral ends this page just above that line.
-        const anchorLineBreak = deferredAnchorLineIndex(acquired.layout);
+        const provenAnchorLineBreak = deferredAnchorLineIndex(acquired.layout);
+        const anchorLineBreak = provenAnchorLineBreak === undefined ? hostFloatLineBreak
+          : hostFloatLineBreak === undefined ? provenAnchorLineBreak
+            : Math.min(provenAnchorLineBreak, hostFloatLineBreak);
         // Same fresh-region rule as framed paragraphs: a page whose band
         // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
         const canRelocateParagraph = pageCanGainSpaceByRelocating();
@@ -3196,6 +3291,7 @@ function* paginateBodyPassSteps(
             ...(unreservedBodyBottomPt === undefined ? {} : { unreservedBodyBottomPt }),
             writingMode: activeRegion(state).writingMode,
             ...(anchorLineBreak === undefined ? {} : { lineEndLimit: anchorLineBreak }),
+            besideFloatKeepsGridRelief: compat.gridEdgeBesideFloatKeepsRelief,
           },
           (fragment) => notePlans
             ? notePlans.reservePt(fragment.lines.length)
@@ -3251,9 +3347,12 @@ function* paginateBodyPassSteps(
           if (acceptedDelta) session.commitFlowRegistryDelta(acceptedDelta);
         }
         cursor = selected.nextCursor;
+        hostFloatRegionEndsAfterParagraph = hostFloatKeptAtRegionStart && cursor === null;
         if (cursor) {
           yield* commitTransition(
-            advanceColumnOrPage(state.flow, 'overflow'),
+            hostFloatKeptAtRegionStart
+              ? advanceToPage(state.flow, state.flow.section, 'overflow')
+              : advanceColumnOrPage(state.flow, 'overflow'),
             entryIndex,
           );
         }
@@ -3264,6 +3363,15 @@ function* paginateBodyPassSteps(
         previousParagraph = cutSpaceAfterPt > 0
           ? Object.freeze({ ...block, spaceAfterPt: Math.max(0, block.spaceAfterPt - cutSpaceAfterPt) })
           : block;
+      }
+      if (hostFloatRegionEndsAfterParagraph) {
+        let nextIndex = entryIndex + 1;
+        while (input.sequence[nextIndex]?.kind === 'consume-source') nextIndex += 1;
+        const next = input.sequence[nextIndex];
+        // An authored break or a new section ends the region anyway.
+        if (next?.kind === 'body-block' || next?.kind === 'adjacent-table-group') {
+          yield* commitTransition(advanceToPage(state.flow, state.flow.section, 'overflow'), entryIndex + 1);
+        }
       }
     } else {
       previousParagraph = null;
@@ -6159,3 +6267,6 @@ export function paginateBody(
 ): DocumentLayout {
   return drainPagination(paginateBodySteps(input, services, options));
 }
+
+/** Re-acquisitions one host-float bottom-margin plan may take. */
+const HOST_FLOAT_PLAN_ATTEMPTS = 16;

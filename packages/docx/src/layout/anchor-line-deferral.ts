@@ -1,5 +1,6 @@
 import type { PageAnchorPrescanInput } from './body-layout-kernel.js';
 import type { ParagraphLayout } from './types.js';
+import { WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL } from './anchor-compatibility.js';
 
 /**
  * Anchor-line deferral for page-owned drawings (issue #1615), governed by the
@@ -222,3 +223,110 @@ export function pageOwnedAnchorKeysByLine(layout: ParagraphLayout): readonly (re
     return [anchor.acquisitionOccurrenceId ?? anchor.occurrenceId];
   }));
 }
+
+/** One host-owned (paragraph- or line-relative) wrapping float anchored on a
+ * line: its acquisition key, the top and bottom of its drawing box widened by
+ * the authored §20.4.2.6 effect extent, and the bottom of its anchor line box
+ * (the whole cell of a §17.6.5 grid line). */
+export type HostFloatAnchor = Readonly<{ key: string; topPt: number; bottomPt: number; lineBottomPt: number }>;
+
+/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: for each line of `layout`, the
+ * host-owned square, topAndBottom, tight or through floats anchored on it.
+ * The box is the drawing extent (§20.4.2.7) widened by its effect extent
+ * (§20.4.2.6), not its wrap exclusion: wrap distances (§20.4.2.3 distB) are
+ * left out. */
+export function hostWrappingFloatsByLine(layout: ParagraphLayout): readonly (readonly HostFloatAnchor[])[] {
+  void WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL;
+  if (layout.drawings.length === 0 || layout.exclusions.length === 0) return layout.lines.map(() => []);
+  const wrapping = new Set(layout.exclusions
+    .filter((exclusion) => exclusion.verticalOwnership === 'host'
+      && (exclusion.wrap === 'square' || exclusion.wrap === 'topAndBottom'
+        || exclusion.wrap === 'tight' || exclusion.wrap === 'through'))
+    .map((exclusion) => exclusion.anchorOccurrenceId)
+    .filter((id): id is string => id !== undefined));
+  const effects = new Map((layout.anchorFrames ?? []).flatMap((frame) => (
+    frame.status === 'resolved' ? [[frame.occurrenceId, frame.geometry.parentEffectExtent] as const] : []
+  )));
+  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
+  return layout.lines.map((line) => line.placements.flatMap((placement): HostFloatAnchor[] => {
+    if (placement.kind !== 'drawing') return [];
+    const drawing = drawings.get(placement.drawingId);
+    const anchor = drawing?.anchorLayer;
+    if (!drawing || !anchor || anchor.verticalOwnership !== 'host') return [];
+    if (!wrapping.has(anchor.occurrenceId)
+      && !(anchor.acquisitionOccurrenceId !== undefined && wrapping.has(anchor.acquisitionOccurrenceId))) return [];
+    const effect = (anchor.acquisitionOccurrenceId === undefined ? undefined : effects.get(anchor.acquisitionOccurrenceId))
+      ?? effects.get(anchor.occurrenceId);
+    return [Object.freeze({
+      key: anchor.acquisitionOccurrenceId ?? anchor.occurrenceId,
+      topPt: drawing.flowBounds.yPt - (effect?.topPt ?? 0),
+      bottomPt: drawing.flowBounds.yPt + drawing.flowBounds.heightPt + (effect?.bottomPt ?? 0),
+      lineBottomPt: line.bounds.yPt + line.bounds.heightPt,
+    })];
+  }));
+}
+
+/** What WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL does with the host floats of
+ * one acquisition: crossing floats that can rise to end at the body bottom
+ * without reaching above their anchor line's bottom are lifted by
+ * `lifts` (pt); the first line with a crossing float that cannot rise moves
+ * on (`line`). Lifts are given only for lines before that line. */
+export type HostFloatBottomMarginPlan = Readonly<{
+  lifts: readonly (readonly [key: string, liftPt: number])[];
+  line?: Readonly<{
+    index: number;
+    /** Every crossing float on the line. */
+    keys: readonly string[];
+    /** Crossing floats on the line that cannot rise. */
+    fixedKeys: readonly string[];
+    /** Lifts of the line's other crossing floats, used when it stays. */
+    lifts: readonly (readonly [key: string, liftPt: number])[];
+  }>;
+}>;
+
+/** {@link HostFloatBottomMarginPlan} once the paragraph is moved down by
+ * `offsetPt`, over its first `lineCount` lines. */
+export function hostFloatBottomMarginPlan(
+  byLine: readonly (readonly HostFloatAnchor[])[],
+  bodyBottomPt: number,
+  offsetPt = 0,
+  lineCount = byLine.length,
+): HostFloatBottomMarginPlan {
+  const lifts: (readonly [string, number])[] = [];
+  for (let index = 0; index < Math.min(lineCount, byLine.length); index += 1) {
+    const crossing = byLine[index]!.filter((float) => float.bottomPt + offsetPt > bodyBottomPt + CROSSING_EPSILON_PT);
+    if (crossing.length === 0) continue;
+    const rises = (float: HostFloatAnchor): boolean =>
+      bodyBottomPt - (float.bottomPt - float.topPt) >= float.lineBottomPt + offsetPt - CROSSING_EPSILON_PT;
+    const lineLifts = crossing.filter(rises)
+      .map((float) => Object.freeze([float.key, float.bottomPt + offsetPt - bodyBottomPt] as const));
+    const fixedKeys = crossing.filter((float) => !rises(float)).map((float) => float.key);
+    if (fixedKeys.length > 0) {
+      return Object.freeze({
+        lifts: Object.freeze(lifts),
+        line: Object.freeze({
+          index,
+          keys: Object.freeze(crossing.map((float) => float.key)),
+          fixedKeys: Object.freeze(fixedKeys),
+          lifts: Object.freeze(lineLifts),
+        }),
+      });
+    }
+    lifts.push(...lineLifts);
+  }
+  return Object.freeze({ lifts: Object.freeze(lifts) });
+}
+
+/** The first line of `layout` that anchors any drawing keyed in `keys`. */
+export function anchorLineIndexOf(layout: ParagraphLayout, keys: ReadonlySet<string>): number | undefined {
+  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
+  const index = layout.lines.findIndex((line) => line.placements.some((placement) => {
+    if (placement.kind !== 'drawing') return false;
+    const anchor = drawings.get(placement.drawingId)?.anchorLayer;
+    return anchor !== undefined && keys.has(anchor.acquisitionOccurrenceId ?? anchor.occurrenceId);
+  }));
+  return index < 0 ? undefined : index;
+}
+
+/** Geometry noise, far below one twip; not a layout tolerance. */
+const CROSSING_EPSILON_PT = 1e-6;
