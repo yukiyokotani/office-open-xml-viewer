@@ -896,6 +896,9 @@ export function finalizeBuiltSegments(
       continue;
     const prev = segs[i - 1];
     if (!('text' in prev) || prev.text.length === 0) continue;
+    // Whitespace on either side of the seam is a wrap boundary; decide it
+    // before expanding the previous segment into code points.
+    if (/\s$/u.test(prev.text) || /^\s/u.test(cur.text)) continue;
     if (uax14SeamJoins(prev.text, cur.text, [...prev.text].at(-1)?.codePointAt(0))) cur.joinPrev = true;
   }
 
