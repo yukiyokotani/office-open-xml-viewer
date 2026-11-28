@@ -7895,6 +7895,12 @@ function renderTableLayout(
       });
     }
   }
+  // Interacting merges resolve by the row they end on, not in reading order:
+  // a synthetic PowerPoint control (24pt minima and leading, zero margins;
+  // an eight-line merge over rows 2-4 beside a five-line merge over rows 2-3,
+  // in either column order, and a staggered pair) exports from PowerPoint for
+  // Mac with rows 24/96/72/24, 24/96/72/24 and 24/24/144/24, where reading
+  // order would give 24/96/144/24 for the first (2026-11-28).
   // Array.prototype.sort is stable: cells ending on the same row keep their
   // reading order.
   const byEndRow = spanCells.filter((c) => !c.earlierRule).sort((a, b) => a.last - b.last);
