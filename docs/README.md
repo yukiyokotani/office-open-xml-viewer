@@ -43,6 +43,8 @@ pages; the skills in `.agents/skills/` only point here.
   — the review procedure for DOCX layout changes.
 - [`workflow/office-reference-export.md`](workflow/office-reference-export.md)
   — Office controls, reference PDFs and driving Office.
+- [`workflow/corpus-specimen.md`](workflow/corpus-specimen.md) — authoring
+  the public specimen corpus in `tests/corpus/`.
 - [`workflow/documentation.md`](workflow/documentation.md) — where knowledge
   is recorded, what this directory may contain, how documents are kept
   current, and the writing style.

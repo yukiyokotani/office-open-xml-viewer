@@ -112,8 +112,9 @@ Noto Sans JP.
 
 The rules every specimen follows (grid, type, font, colour, text, minimal
 XML), the procedure for adding one and the review loop live in the
-`corpus-specimen` skill, `.agents/skills/corpus-specimen/SKILL.md` (shared by Codex; `.claude/skills/corpus-specimen` links to it). Read it
-before adding or changing a case.
+[`docs/workflow/corpus-specimen.md`](../../docs/workflow/corpus-specimen.md)
+(loaded by the `corpus-specimen` skill). Read it before adding or changing a
+case.
 
 ## Visual regression
 

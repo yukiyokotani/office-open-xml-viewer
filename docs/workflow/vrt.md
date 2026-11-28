@@ -103,6 +103,12 @@ fix would invalidate an earlier run.
   (grep the corpus for the feature), and pages that differed before. For a
   change in `packages/core`, scope it to the samples that exercise that module.
 - The full private corpus runs once per release, against the previous tag.
+- The public specimen corpus (`tests/corpus/`) is part of the default `vrt`
+  runs and needs no private files. The fast private tier for PPTX/XLSX
+  ([`tests/visual/README.md`](../../tests/visual/README.md)) renders only a
+  structural-feature cover of the private corpus; it cannot see wrapping,
+  autofit or pagination, so run the full `vrt:private` before a release or
+  when geometry changes.
 - If the PR's base branch moves after the VRT and touches the PR's files,
   merge the base branch and rerun only the VRT, not the review. The base is
   `main`, or the release branch for a backport; never merge `main` into a
