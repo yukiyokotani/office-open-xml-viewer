@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Stroke } from '@silurus/ooxml-core';
-import { renderTable } from './renderer.js';
+import { renderTable, tableLayoutMemoSizeForTest } from './renderer.js';
+import { presentFacesContext } from './test-support/present-faces.js';
 import type { TableCell, TableElement, TableRow, TextBody } from './types';
 
 // DrawingML `<a:tbl>` — end-to-end render: an interior gridline SHARED by two
@@ -16,7 +17,7 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number }> } {
+function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
   const texts: Array<{ text: string; y: number }> = [];
@@ -52,7 +53,13 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
     createPattern() { return null; },
-    measureText: () => ({ width: 0, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics),
+    // Deterministic advances: every character is half the font's px size
+    // wide, so wrapping happens the same way on every host.
+    measureText(text: string) {
+      onMeasure?.();
+      const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
+      return { width: text.length * sizePx * 0.5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+    },
     fillText(text: string, _x: number, y: number) { texts.push({ text, y }); }, strokeText() {},
     font: '10px sans-serif',
     textAlign: 'left' as CanvasTextAlign,
@@ -354,19 +361,16 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     // a:tr@h as a minimum ([MS-OE376] §2.1.1347) and grows the row to its
     // wrapped text, pushing the next row down; the frame extent is not a
     // reason to let the text overflow into the following row.
+    // One unbroken run that must wrap: at 9px per 18px character,
+    // "aaaa bbbb cccc" breaks into three lines in the 60px column, so
+    // 3 * 21.6pt + 3.6pt top and bottom = 72pt.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
         alignment: 'l', marL: 0, marR: 0, indent: 0,
         spaceBefore: null, spaceAfter: null,
         spaceLine: { type: 'pct', val: 100000 },
-        runs: [
-          { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
-          { type: 'break' },
-          { type: 'text', text: 'two', fontSize: 18, fontFamily: 'Arial' },
-          { type: 'break' },
-          { type: 'text', text: 'three', fontSize: 18, fontFamily: 'Arial' },
-        ],
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc', fontSize: 18, fontFamily: 'Arial' }],
         bullet: { type: 'none' }, eaLnBrk: true,
       }],
       defaultFontSize: null, defaultBold: null, defaultItalic: null,
@@ -375,15 +379,116 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     } as unknown as TextBody;
     const t = tableOf([
       [cell({ textBody, borderB: ln() })],
-      [cell({ borderT: ln() })],
+      [cell({ borderT: ln(), borderB: ln() })],
     ], [COL]);
     t.rows[0].height = 60 * EMU;
     t.rows[1].height = 40 * EMU;
     t.height = 100 * EMU;
 
-    const strokes = render(t);
+    const { ctx, strokes, texts } = makeRecordingCtx();
+    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    expect(texts.map((entry) => entry.text.trim())).toEqual(['aaaa', 'bbbb', 'cccc']);
     expect(horizontalAt(strokes, 60)).toHaveLength(0);
     expect(horizontalAt(strokes, 72)).toHaveLength(1);
+    // The next row keeps its 40pt minimum below the grown row.
+    expect(horizontalAt(strokes, 100)).toHaveLength(0);
+    expect(horizontalAt(strokes, 112)).toHaveLength(1);
+  });
+
+  it('keeps a positive row for a warped body, whose paint does not wrap', () => {
+    // a:prstTxWarp textInflate (ECMA-376 §20.1.9.19): paint fits the text
+    // into the warp envelope without wrapping, so the flat wrapped measure
+    // is not its extent. With the minima filling the frame the 24pt row
+    // stays, as before this growth rule.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc dddd eeee', fontSize: 24, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+      textWarp: { preset: 'textInflate' },
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[0].height = 24 * EMU;
+    t.height = 44 * EMU;
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 24)).toHaveLength(1);
+    expect(horizontalAt(strokes, 144)).toHaveLength(0);
+    // textNoShape is no warp: it grows like ordinary text.
+    textBody.textWarp = { preset: 'textNoShape' };
+    expect(horizontalAt(render(t), 24)).toHaveLength(0);
+  });
+
+  it('paints a fontAlgn paragraph by the model its body falls back to', () => {
+    // A 20pt Arial paragraph with fontAlgn="t" resolves in the metric pass,
+    // but the next paragraph's face has no reference metrics, so the whole
+    // body is laid out again with the ordinary model (baseline 0.8 x 24pt
+    // per 24pt line). The discarded pass's alignment offset must not move
+    // the first baseline (it would be 37.2pt).
+    const para = (text: string, fontFamily: string, fontAlgn?: string) => ({
+      alignment: 'l', marL: 0, marR: 0, indent: 0,
+      spaceBefore: null, spaceAfter: null, spaceLine: null,
+      ...(fontAlgn ? { fontAlgn } : {}),
+      runs: [{ type: 'text', text, fontSize: 20, fontFamily }],
+      bullet: { type: 'none' }, eaLnBrk: true,
+    });
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [para('top', 'Arial', 't'), para('next', 'No Reference Metrics Face')],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody })]], [COL]);
+    t.rows[0].height = 100 * EMU;
+    t.height = 100 * EMU;
+    const { ctx, texts } = makeRecordingCtx();
+    // Arial present (its reference metrics apply); the other face is not.
+    renderTable(ctx, t, SCALE, undefined, presentFacesContext({
+      ...textBody, paragraphs: textBody.paragraphs.slice(0, 1),
+    } as TextBody));
+    expect(texts.map((entry) => entry.text)).toEqual(['top', 'next']);
+    expect(texts[0].y).toBeCloseTo(19.2, 5);
+    expect(texts[1].y).toBeCloseTo(43.2, 5);
+  });
+
+  it('keeps only row-sizing layouts, and only until their cell is painted', () => {
+    // Row sizing records each measured paragraph layout for the paint of
+    // that cell (one per cell here); paint drops it. A shrink-to-fit cell
+    // (ODF style:shrink-to-fit) is skipped by row sizing, and the font
+    // scales its paint tries are never retained.
+    const shrinking = {
+      verticalAnchor: 't', shrinkOnOverflow: true,
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc dddd eeee ffff gggg', fontSize: 24, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'norm',
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody: lines(1) }), cell({ textBody: lines(1) }), cell({ textBody: shrinking })],
+      [cell({ textBody: lines(1) }), cell(), cell()],
+    ], [COL, COL, COL]);
+    const sizes: number[] = [];
+    const { ctx, texts } = makeRecordingCtx(() => sizes.push(tableLayoutMemoSizeForTest()));
+    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    expect(texts.some((entry) => entry.text.startsWith('aaaa'))).toBe(true);
+    // Three measured cells, never more; each painted cell gives its layout
+    // up, so the last cell (row 2) paints with only its own still held.
+    expect(Math.max(...sizes)).toBe(3);
+    expect(sizes[sizes.length - 1]).toBe(1);
   });
 
   it('keeps a positive row for rotated cell text, whose measure is the box width', () => {

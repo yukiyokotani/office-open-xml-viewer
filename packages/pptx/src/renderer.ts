@@ -5341,7 +5341,8 @@ export function renderTextBody(
     const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      // Not const: fontAlgn below gives this pass its own copy of the line.
+      let line = lines[i];
       const isFirst = i === 0;
       const isLast  = i === lines.length - 1;
 
@@ -5502,16 +5503,32 @@ export function renderTextBody(
         const unitPx = POWERPOINT_FONT_ALGN_UNIT_PT * PT_TO_EMU * scale;
         alignedLine = powerPointFontAlgnReference(fontAlgn, metricRuns, compatOff, unitPx);
         if (!alignedLine) metricOk = false;
+        // The offsets belong to this metric pass only. They go on a copy of
+        // the line, never on the laid-out segments: a pass the body discards
+        // (metricOk false later) must not leave them on lines that the
+        // ordinary-model pass, or a table's measured-layout reuse
+        // (tableParagraphLayout), paints again.
+        const offsets: number[] = [];
         for (const seg of line.segments) {
           if (!alignedLine) break;
-          if (seg.isTab || !seg.text) continue;
+          if (seg.isTab || !seg.text) {
+            offsets.push(NaN);
+            continue;
+          }
           const offset = seg.lineMetric
             && powerPointFontAlgnOffset(fontAlgn, { sizePx: seg.sizePx, face: seg.lineMetric }, compatOff, unitPx);
           if (offset === undefined) {
             metricOk = false;
             break;
           }
-          seg.fontAlgnOffsetPx = offset;
+          offsets.push(offset);
+        }
+        if (metricOk) {
+          line = {
+            ...line,
+            segments: line.segments.map((seg, k) =>
+              Number.isNaN(offsets[k]) ? seg : { ...seg, fontAlgnOffsetPx: offsets[k] }),
+          };
         }
       }
       if (metric && metricOk && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
@@ -5791,7 +5808,10 @@ export function renderTextBody(
   let entriesInCol = 0;
 
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
+    const { linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
+    // Not const: resolved tab widths go on a copy (the laid-out line may be a
+    // table's measured layout, tableParagraphLayout, and stays unmodified).
+    let line = entry.line;
     // Balanced column advance: when the current column has reached its share
     // of paragraphs, jump to the next one. PowerPoint never breaks a single
     // line across columns and never spills past the last column — anything
@@ -5856,9 +5876,10 @@ export function renderTextBody(
       // the wrap pass) rather than collapsing to a space (issue #1006).
       const defTabSzPx = emuToPx(entry.para.defTabSz ?? 914400, scale);
       const widths = resolveTabWidths(items, stops, leadingIndentPx, limitPx, spaceW, defTabSzPx);
-      for (let i = 0; i < line.segments.length; i++) {
-        if (line.segments[i].isTab) line.segments[i].tabWidthPx = widths[i];
-      }
+      line = {
+        ...line,
+        segments: line.segments.map((seg, i) => seg.isTab ? { ...seg, tabWidthPx: widths[i] } : seg),
+      };
     }
 
     // Measure line width and the metrics of the fonts Canvas actually resolved.
@@ -7730,28 +7751,63 @@ const MEASURED_BY_BOX_WIDTH_VERT: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Paragraph layouts of the table being rendered. renderTable measures every
- * cell to size its rows and then paints the same cells at the same widths;
- * this lets the paint reuse the measured lines instead of breaking every
- * paragraph twice. It lives only for one renderTable call, so a font that
- * loads later is picked up by the next render. A line's segments carry only
- * values derived from the same inputs (fontAlgnOffsetPx is recomputed to the
- * same value), so reuse paints what a fresh layout would.
+ * Paragraph layouts that renderTable's row sizing measured, kept for the paint
+ * of the same cells. Row sizing measures a cell at the width and colour it is
+ * painted with, so paint reuses those lines instead of breaking every
+ * paragraph twice.
+ *
+ * - Only row sizing records (`recording`). Paint, and any cell that row sizing
+ *   skips (shrink-to-fit, earlier-rule rows), lays out afresh and stores
+ *   nothing, so trial layouts (a shrink search at many scales) are never kept.
+ * - A painted cell drops its paragraphs, so the memo holds at most the
+ *   measured-but-not-yet-painted cells, and nothing outlives renderTable; a
+ *   font that loads later is picked up by the next render.
+ * - Recorded lines are frozen. Everything a layout pass or paint derives from
+ *   them (fontAlgn offsets, resolved tab widths) goes on that pass's own copy,
+ *   so a discarded pass cannot change what a later pass paints.
  */
-let tableParagraphLayouts: WeakMap<Paragraph, Map<string, LayoutLine[]>> | null = null;
+interface TableLayoutMemo {
+  layouts: Map<Paragraph, Map<string, readonly LayoutLine[]>>;
+  recording: boolean;
+}
+
+let tableLayoutMemo: TableLayoutMemo | null = null;
+
+function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
+  for (const line of lines) {
+    for (const seg of line.segments) Object.freeze(seg);
+    Object.freeze(line.segments);
+    if (line.metricMarks) {
+      for (const mark of line.metricMarks) Object.freeze(mark);
+      Object.freeze(line.metricMarks);
+    }
+    Object.freeze(line);
+  }
+  return Object.freeze(lines) as LayoutLine[];
+}
 
 function tableParagraphLayout(
   ...args: Parameters<typeof layoutParagraph>
 ): LayoutLine[] {
-  const memo = tableParagraphLayouts;
+  const memo = tableLayoutMemo;
   if (!memo) return layoutParagraph(...args);
   const [ctx, para, ...rest] = args;
   const key = rest.map((value) => typeof value === 'object' ? '' : String(value)).join('|');
-  let byKey = memo.get(para);
-  if (!byKey) memo.set(para, byKey = new Map());
-  let lines = byKey.get(key);
-  if (!lines) byKey.set(key, lines = layoutParagraph(ctx, para, ...rest));
+  const cached = memo.layouts.get(para)?.get(key);
+  if (cached) return cached as LayoutLine[];
+  const lines = layoutParagraph(ctx, para, ...rest);
+  if (!memo.recording) return lines;
+  let byKey = memo.layouts.get(para);
+  if (!byKey) memo.layouts.set(para, byKey = new Map());
+  byKey.set(key, freezeLayout(lines));
   return lines;
+}
+
+/** Number of paragraph layouts tableParagraphLayout holds (tests only). */
+export function tableLayoutMemoSizeForTest(): number {
+  let n = 0;
+  for (const byKey of tableLayoutMemo?.layouts.values() ?? []) n += byKey.size;
+  return n;
 }
 
 export function renderTable(
@@ -7762,12 +7818,13 @@ export function renderTable(
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
 ) {
-  const outer = tableParagraphLayouts;
-  tableParagraphLayouts = new WeakMap();
+  const outer = tableLayoutMemo;
+  const memo: TableLayoutMemo = { layouts: new Map(), recording: false };
+  tableLayoutMemo = memo;
   try {
-    renderTableLayout(ctx, el, scale, slideNumber, rc, onTextRun);
+    renderTableLayout(ctx, el, scale, slideNumber, rc, onTextRun, memo);
   } finally {
-    tableParagraphLayouts = outer;
+    tableLayoutMemo = outer;
   }
 }
 
@@ -7778,6 +7835,7 @@ function renderTableLayout(
   slideNumber: number | undefined,
   rc: RenderContext,
   onTextRun: TextRunCallback | undefined,
+  memo: TableLayoutMemo,
 ) {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
@@ -7824,7 +7882,7 @@ function renderTableLayout(
   // overflowing into the next row is the worse failure, because it breaks
   // the layout.
   //
-  // Two kinds of cell keep the earlier rule, which grew a positive row only
+  // These cells keep the earlier rule, which grew a positive row only
   // when the frame extent exceeded the row sum, measured an omitted-lnSpc
   // line of a positive row by its glyph size, and spread a merged cell's
   // deficit evenly over its rows:
@@ -7837,13 +7895,21 @@ function renderTableLayout(
   //   measured here;
   // - a multi-column body (numCol > 1, ECMA-376 §21.1.2.1.1): measureOnly
   //   stacks every line in one column, while paint flows the lines into the
-  //   columns, so the stacked sum is not the height the cell needs.
+  //   columns, so the stacked sum is not the height the cell needs;
+  // - a warped body (a:prstTxWarp other than textNoShape, ECMA-376
+  //   §20.1.9.19, `hasTextWarp`): measureOnly lays it out as wrapped flat
+  //   text, while paint (renderWarpedText) fits the unwrapped lines into the
+  //   warp envelope, so the flat measure is not its extent either. How
+  //   PowerPoint sizes a row for warped cell text is not measured.
   const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
   const frameHasSlack = el.height > authoredRowsTotalEmu;
   const keepsEarlierRule = (body: TextBody): boolean =>
     el.odfRowHeights === true || MEASURED_BY_BOX_WIDTH_VERT.has(body.vert)
-    || (body.numCol ?? 1) > 1;
+    || (body.numCol ?? 1) > 1
+    || (body.textWarp != null && hasTextWarp(body.textWarp.preset));
 
+  // Row sizing records its layouts for the paint below (tableParagraphLayout).
+  memo.recording = true;
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -7929,6 +7995,7 @@ function renderTableLayout(
       rowHeights[last] += needed - have;
     }
   }
+  memo.recording = false;
 
   // ── Column x-positions ────────────────────────────────────────────────────
   // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
@@ -8137,6 +8204,8 @@ function renderTableLayout(
           tableTextRun,
         );
       } finally {
+        // The cell is painted: its measured layouts are not needed again.
+        for (const para of cell.textBody.paragraphs) memo.layouts.delete(para);
         ctx.restore();
       }
     }
