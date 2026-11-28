@@ -160,6 +160,16 @@ impl Section {
                 header_distance: Some(geom.header_distance),
                 footer_distance: Some(geom.footer_distance),
             })),
+            // [MS-DOC] sprmSBOrientation (SBOrientationOperand): 0x02 is
+            // dmOrientLandscape, 0x01 (the default) dmOrientPortrait.
+            page_orient: Some(
+                if self.properties.orientation == 2 {
+                    "landscape"
+                } else {
+                    "portrait"
+                }
+                .to_string(),
+            ),
         })
     }
 }
@@ -526,6 +536,7 @@ mod tests {
         properties.page_restart = true;
         properties.page_start = 7;
         properties.page_format = "lowerRoman";
+        properties.orientation = 2;
 
         let direct = serde_json::to_value(
             section(properties, Some(720))
@@ -541,7 +552,7 @@ mod tests {
         let mut expected = serde_json::json!({
             "__sectionPlacement": {
                 "docGridCharSpace": -4096.0, "docGridLinePitch": 18.0, "docGridType": "lines",
-                "gutterPt": 12.0, "pageGeometry": geometry,
+                "gutterPt": 12.0, "pageGeometry": geometry, "pageOrient": "landscape",
                 "rtlGutter": false, "sectionBidi": true, "sectionId": "section:0", "vAlign": "both"
             },
             "columns": {"cols": [], "count": 2, "equalWidth": true, "sep": true, "spacePt": 0.0},

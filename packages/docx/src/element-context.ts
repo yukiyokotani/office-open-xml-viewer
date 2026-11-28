@@ -10,6 +10,7 @@ import {
   type ElementGeometry,
 } from './layout/text-index.js';
 import { paintResourceRegistryOf } from './layout/runtime-state.js';
+import { resourcePlacementOutline } from './layout/resource-outline.js';
 import type {
   DeepReadonly,
   DrawingLayout,
@@ -121,16 +122,20 @@ function geometryBounds(geometry: ElementGeometry): LayoutRect {
 }
 
 function mappedBounds(geometry: ElementGeometry): DocxElementContext['bounds'] {
+  // An inline resource reports its visible (turned, line-clipped) outline.
+  const outline = 'drawing' in geometry ? undefined : resourcePlacementOutline(geometry.placement);
   const bounds = geometryBounds(geometry);
-  const corners = [
-    mapAffinePoint(geometry.pointToPage, bounds),
-    mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt }),
-    mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt, yPt: bounds.yPt + bounds.heightPt }),
-    mapAffinePoint(geometry.pointToPage, {
-      xPt: bounds.xPt + bounds.widthPt,
-      yPt: bounds.yPt + bounds.heightPt,
-    }),
-  ];
+  const corners = outline && outline.length > 0
+    ? outline.map((point) => mapAffinePoint(geometry.pointToPage, point))
+    : [
+        mapAffinePoint(geometry.pointToPage, bounds),
+        mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt }),
+        mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt, yPt: bounds.yPt + bounds.heightPt }),
+        mapAffinePoint(geometry.pointToPage, {
+          xPt: bounds.xPt + bounds.widthPt,
+          yPt: bounds.yPt + bounds.heightPt,
+        }),
+      ];
   const left = Math.min(...corners.map((corner) => corner.xPt));
   const top = Math.min(...corners.map((corner) => corner.yPt));
   const right = Math.max(...corners.map((corner) => corner.xPt));
@@ -156,6 +161,17 @@ function pointInPolygon(point: PointPt, vertices: readonly PointPt[]): boolean {
   return inside;
 }
 
+/** Boundary points count as inside, as for the rectangle test. */
+function onOutline(point: PointPt, vertices: readonly PointPt[]): boolean {
+  return vertices.some((a, index) => {
+    const b = vertices[(index + 1) % vertices.length]!;
+    const cross = (b.xPt - a.xPt) * (point.yPt - a.yPt) - (b.yPt - a.yPt) * (point.xPt - a.xPt);
+    return Math.abs(cross) <= 1e-9 * Math.max(1, Math.hypot(b.xPt - a.xPt, b.yPt - a.yPt))
+      && point.xPt >= Math.min(a.xPt, b.xPt) - 1e-9 && point.xPt <= Math.max(a.xPt, b.xPt) + 1e-9
+      && point.yPt >= Math.min(a.yPt, b.yPt) - 1e-9 && point.yPt <= Math.max(a.yPt, b.yPt) + 1e-9;
+  });
+}
+
 function containsDrawing(drawing: DrawingLayout, local: PointPt): boolean {
   if (!contains(drawing.inkBounds, local)) return false;
   if (!drawing.clip) return true;
@@ -173,9 +189,9 @@ function containsElement(
     const clipPoint = inverseMapAffinePoint(clip.pointToPage, pagePoint);
     if (!clipPoint || !contains(clip.bounds, clipPoint)) return false;
   }
-  return 'drawing' in geometry
-    ? containsDrawing(geometry.drawing, local)
-    : contains(geometry.placement.bounds, local);
+  if ('drawing' in geometry) return containsDrawing(geometry.drawing, local);
+  const outline = resourcePlacementOutline(geometry.placement);
+  return outline.length > 2 && (pointInPolygon(local, outline) || onOutline(local, outline));
 }
 
 function resourceCommand(

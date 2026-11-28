@@ -1204,6 +1204,9 @@ impl<'a> Reader<'a> {
             page_borders_authored: Some(section.page_borders.is_some()),
             page_borders: section.page_borders.clone(),
             page_geometry: None,
+            // Only two-page imposition (a DOCX settings feature this importer
+            // never emits) reads the sheet orientation.
+            page_orient: None,
         };
         Ok((section, headers, footers, stories.title_page, placement))
     }
@@ -1236,6 +1239,7 @@ impl<'a> Reader<'a> {
                         alpha: None,
                         duotone: None,
                         blip_effects: Vec::new(),
+                        dpi: None,
                         vml: None,
                     });
                 }

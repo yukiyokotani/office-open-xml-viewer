@@ -21,6 +21,15 @@ export const WORD_PAGE_ANCHOR_LINE_DEFERRAL = defineCompatibilityRule({
   description: 'ECMA-376 does not say where a page-owned drawing goes when its own wrap exclusion pushes its anchor line off the page. Word tests anchor lines in flow order on each page: with the page-owned anchors already accepted on page N whose lines precede line L, plus the anchors on L, Word lays out N again; if L stays on N (any column of the region) those anchors are accepted and the earlier lines wrap around them. Otherwise page N keeps its layout without them, L starts a later page as if the page ended just above L (keepNext and widow control act as for an overflow; a mid-paragraph anchor line splits its paragraph), and the anchors go to the page where L lands. Counterexamples in the same controls: a line that still fits keeps its picture on N, and the first line of a page stays even when its picture pushes it past the body bottom. Unmeasured: a deferral whose line would otherwise fall in an earlier column of a multi-column page moves to the next page, not the next column.',
 });
 
+export const LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY = defineCompatibilityRule({
+  id: 'library-anchor-line-cycle-recovery',
+  evidence: {
+    kind: 'library-policy',
+    reference: 'packages/docx/src/layout/anchor-line-deferral.test.ts#settles a deferral that keepNext extends to an earlier anchor paragraph',
+  },
+  description: 'Library policy, no Office measurement, applied in every compatibility mode and column layout: word-page-anchor-line-deferral tests anchor lines in flow order with the anchors accepted before each, but the layout solver does not record acceptance, so where a test also pushes earlier accepted lines, or a deferral moves a keepNext (§17.3.1.15), keepLines (§17.3.1.14) or widow-control (§17.3.1.44) group with its drawings, those contextual tests can alternate between two layouts for ever. Only such an otherwise-fatal cycle is recovered, so every layout that converges is unchanged. First, later anchor lines on a page are deferred before earlier ones by context-checked proofs; if the run still cycles, the last oscillating drawing in source order gets a floor at the latest page it reached in the cycle, so its anchor line starts no earlier page unless it would start that page, and a persisting cycle floors the next one. Recovery shares one bounded pass budget per run, beyond which layout still fails closed. This recovers convergence where the contextual tests cycle; it is not a fidelity claim, and multi-column layouts are unmeasured. The warning channel is reserved for caller opt-outs, so it reports nothing.',
+});
+
 export const WORD_PAGE_ANCHOR_REGION_REGISTRATION = defineCompatibilityRule({
   id: 'word-page-anchor-region-registration',
   evidence: {
@@ -42,13 +51,110 @@ export const WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK = defineCompatibilityRule({
   description: 'Word 2010 accepts only positive wp14:pctWidth and wp14:pctHeight values under [MS-ODRAWXML] notes 125/126. Preserve an authored zero as acquisition evidence while resolving the object from wp:extent. Classification: Microsoft-note derived ([MS-ODRAWXML] notes 125/126). [MS-ODRAWXML] is not in the Microsoft evidence catalog yet, so the evidence stays a regression test.',
 });
 
+/** Evidence: Windows Word 16.0.20527 PDF exports of 40 synthetic controls
+ * (A4 portrait, margins top 90 / right 36 / bottom 60 / left 50 pt; 200 x 60
+ * pt objects with effectExtent l 1.5 / t 9 / r 9.75 / b 1.5 pt, or 40 x 20 pt
+ * objects with l 12 / t 18 / r 3 / b 6 pt for percentages). Edges read from
+ * the PDF vector paths and image placements, all within 0.05 pt of the rule:
+ * - align: margin- and page-relative left/top, right/bottom and center;
+ *   inside/outside on odd and even pages with and without mirrorMargins (the
+ *   mirrored even page swaps the margins, the alignment keeps its parity);
+ *   a tbRl section (the same physical margins as a horizontal section);
+ *   effectExtent l -6 / t -3 / r -9 / b -12 and l -6 / t 9 / r 9.75 / b -3;
+ *   wrapSquare and wrapTopAndBottom, whose text wraps at the widened box plus
+ *   the wrap distances; pictures and wpg groups; an object without effects
+ *   (the authored values apply);
+ * - page-relative vertical inside/outside: the widened box starts half the
+ *   header distance below the page top or ends half the footer distance above
+ *   the page bottom (header/footer 36/36 and 50/25 pt, docGrid pitch 15 and
+ *   18 pt and none, zero and non-zero effect extents); page-relative top and
+ *   bottom and margin-relative inside/outside take no inset;
+ * - header 50 / footer 25 pt: the page band on even pages (the
+ *   inset follows the edge parity selects) with and without mirrorMargins,
+ *   and in a tbRl section; vertical inside/outside against topMargin and
+ *   insideMargin (the top band on an odd page), bottomMargin and outsideMargin
+ *   (the bottom band) and line take no inset; against paragraph both hold the
+ *   paragraph top; -10 % of the margin and 25/50 % in a tbRl section follow
+ *   the percentage rule;
+ * - pctPos: 0 places the bare extent; 1, 25, 50 and 75 % of the margin and
+ *   25 and 50 % of the page add the left/top effect extent to the percentage
+ *   position, also for negative effect extents;
+ * - posOffset 0 places the bare extent. */
+export const WORD_ALIGN_INCLUDES_EFFECT_EXTENT = defineCompatibilityRule({
+  id: 'word-align-includes-effect-extent',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'anchor-align-effect-extent',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.6 defines wp:effectExtent as the extra extent added to each edge of a drawing object to compensate for its effects; §20.4.3.1 wp:align and the wp14 percentage offsets do not say which box they place. Word aligns the extent widened by the authored, signed effect extent: leading alignment (left, top, and inside/outside where page parity makes them leading) puts the extent at the reference start plus the left/top effect extent, trailing alignment puts the extent end at the reference end minus the right/bottom effect extent, and center centres the widened box. For a page-relative vertical inside/outside alignment the reference band is the page shortened by half the header distance at the top and half the footer distance at the bottom. A paragraph-relative vertical inside or outside alignment holds the paragraph top. A non-zero wp14 pctPosHOffset/pctPosVOffset places the extent at the percentage position plus the left/top effect extent; a zero percentage and posOffset place the bare extent. Measured for shapes, pictures and groups, margin- and page-relative references, odd and even pages with and without mirrorMargins, horizontal and tbRl sections, negative and mixed-sign effect extents, and square and topAndBottom wrapping. Also measured: unequal header and footer distances on even pages, the page band in a tbRl section, vertical inside/outside against the margin bands and line (no inset), and a negative percentage.',
+});
+
+/** Origin of the extent on one axis when its effect-widened box is aligned
+ * (governed by {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordAlignedAnchorOriginPt(
+  placement: 'leading' | 'center' | 'trailing',
+  baseStartPt: number,
+  baseEndPt: number,
+  sizePt: number,
+  leadingEffectPt: number,
+  trailingEffectPt: number,
+): number {
+  if (placement === 'leading') return baseStartPt + leadingEffectPt;
+  if (placement === 'trailing') return baseEndPt - trailingEffectPt - sizePt;
+  const boxPt = leadingEffectPt + sizePt + trailingEffectPt;
+  return baseStartPt + (baseEndPt - baseStartPt - boxPt) / 2 + leadingEffectPt;
+}
+
+/** Origin of the extent on one axis for a wp14 percentage offset (governed by
+ * {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordPercentAnchorOriginPt(
+  baseStartPt: number,
+  baseLengthPt: number,
+  fraction: number,
+  leadingEffectPt: number,
+): number {
+  if (fraction === 0) return baseStartPt;
+  return baseStartPt + baseLengthPt * fraction + leadingEffectPt;
+}
+
+/** Paragraph-relative vertical inside and outside both hold the top edge
+ * (governed by {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordParagraphInsideOutsideLeads(
+  axis: 'horizontal' | 'vertical',
+  relativeFrom: string,
+  value: string,
+): boolean {
+  return axis === 'vertical' && relativeFrom === 'paragraph'
+    && (value === 'inside' || value === 'outside');
+}
+
+/** Insets of the page band that page-relative vertical inside/outside align
+ * against (governed by {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordPageBandAlignInsetsPt(
+  distances: Readonly<{ headerPt: number; footerPt: number }>,
+): { leadingPt: number; trailingPt: number } {
+  return { leadingPt: distances.headerPt / 2, trailingPt: distances.footerPt / 2 };
+}
+
 export const WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER = defineCompatibilityRule({
   id: 'word-vertical-section-physical-drawing-layer',
   evidence: {
     kind: 'regression-test',
     reference: 'packages/docx/src/anchor-vertical-physical.test.ts#lands an upright-section anchor at the recorded physical centroid',
   },
-  description: 'Resolve anchored drawings in an upright vertical section against the physical page frame independently of the rotated text-flow coordinate space. Evidence (observed Office behaviour): Word output adjudicated in issue #988 (batch 3, item 2) and PR #999; origin PR #770.',
+  description: 'Resolve anchored drawings in an upright vertical section against the physical page frame independently of the rotated text-flow coordinate space. Evidence (observed Office behaviour): Word output adjudicated in issue #988 (batch 3, item 2) and PR #999; origin PR #770. The page and margin references are the physical page box and its authored w:pgMar margins (context.ts uprightPhysicalPageFrames, the exact inverse of the logical section mapping for every vertical direction): in a Word 16 (Windows) PDF of an A4 tbRl section with 54 pt left/right and 72 pt top/bottom margins, margin-relative drawings (align left with a posOffset positionV; posOffset positionH and positionV) resolved from the physical margin origin x = 54, y = 72 (regression test packages/docx/src/anchor-vertical-margin-frame.test.ts). Column, character, paragraph and line references are covered by word-vertical-section-flow-anchor-frames.',
+});
+
+export const WORD_VERTICAL_SECTION_FLOW_ANCHOR_FRAMES = defineCompatibilityRule({
+  id: 'word-vertical-section-flow-anchor-frames',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/anchor-vertical-margin-frame.test.ts#places tbLrV flow anchors where Word does',
+  },
+  description: 'Physical reference frames of the flow-owned anchor references in a vertical section (paragraph.ts verticalSectionReferenceFrames), measured in Word 16 (Windows) PDFs of synthetic A4 controls with T90/R36/B60/L50 pt margins and an 18 pt line grid, in tbRl, btLr and tbLrV: positionH column starts at the physical image of the anchor paragraph block-start edge (the right edge of its first line strip in tbRl/btLr, independent of the anchor line or column band) with positive offsets moving right, and align left/center/right place the object within that edge and the physical right edge of the column box; positionH character holds the object against the physical left edge of the anchor line, its right edge there when lines progress leftward (tbRl/btLr, offsets 0/+30/-30, any anchor position along the line) and its left edge there when they progress rightward (tbLrV, offset 0); positionV paragraph starts at the column physical top (offsets 0/+20/-10, independent of the anchor position); positionV line starts at the start of the character before the anchor, or the line start when none precedes it (10.5 and 21 pt text, offsets 0/+20). btLr matches tbRl. Unmeasured: align against character, paragraph and line, tbLrV column alignment, tbRlV, bottomToTop section flows, indented or spaced paragraphs, and layoutInCell anchors of vertical cells, which use the physical image of the cell box.',
 });
 
 export const WORD_PAGE_LEVEL_FLOAT_PRESCAN = defineCompatibilityRule({

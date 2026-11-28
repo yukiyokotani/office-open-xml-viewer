@@ -310,11 +310,17 @@ function buildRegions(
         heightPt: input.blockEndPt - input.blockStartPt,
       };
       const physicalBounds = transformRect(coordinateSpace.logicalToPhysical, logicalBounds);
+      // Adjacent sections share one boundary reconstructed through different
+      // arithmetic (start + extent vs the next start), so an overlap within
+      // floating-point precision is a shared edge, not an overlap.
+      const before = (endPt: number, startPt: number): boolean =>
+        startPt < endPt
+        && endPt - startPt > Number.EPSILON * Math.max(1, Math.abs(endPt), Math.abs(startPt)) * 4;
       if (occupiedPhysicalDomains.some((prior) => (
-        physicalBounds.xPt < prior.xPt + prior.widthPt
-        && prior.xPt < physicalBounds.xPt + physicalBounds.widthPt
-        && physicalBounds.yPt < prior.yPt + prior.heightPt
-        && prior.yPt < physicalBounds.yPt + physicalBounds.heightPt
+        before(prior.xPt + prior.widthPt, physicalBounds.xPt)
+        && before(physicalBounds.xPt + physicalBounds.widthPt, prior.xPt)
+        && before(prior.yPt + prior.heightPt, physicalBounds.yPt)
+        && before(physicalBounds.yPt + physicalBounds.heightPt, prior.yPt)
       ))) {
         throw new RangeError('Section flow domains on one page must be physically disjoint');
       }

@@ -599,9 +599,10 @@ describe('LayoutSourceStore', () => {
     const rule = source.blocks.resolve(roles.separator.paragraph.source);
     const notice = source.blocks.resolve(roles.continuationNotice.paragraph.source);
     if (rule.type !== 'paragraph' || notice.type !== 'paragraph') throw new Error('Expected reserved paragraphs');
-    // Paragraph base is 9pt; the 14pt rule control does not define the em.
-    expect([rule.spaceBefore, rule.spaceAfter]).toEqual(fixed ? [5, 7] : [9, 7]);
-    expect([notice.spaceBefore, notice.spaceAfter]).toEqual(fixed ? [5, 7] : [9, 9]);
+    // Automatic sides take the 14pt HTML amount; neither the 9pt paragraph
+    // base nor the rule control changes it.
+    expect([rule.spaceBefore, rule.spaceAfter]).toEqual(fixed ? [5, 7] : [14, 7]);
+    expect([notice.spaceBefore, notice.spaceAfter]).toEqual(fixed ? [5, 7] : [14, 14]);
     expect(document).toEqual(original);
     expect(Object.isFrozen(rule)).toBe(true);
     const streamed = layoutSourceModelAdapterFromOwnedModel(structuredClone(document), structuredClone(document)).source;
@@ -610,7 +611,7 @@ describe('LayoutSourceStore', () => {
     document.settings.doNotUseHtmlParagraphAutoSpacing = !fixed;
     wrapper.paragraph.spaceBefore = 90;
     expect(source.blocks.resolve(roles.separator.paragraph.source)).toBe(rule);
-    expect([rule.spaceBefore, rule.spaceAfter]).toEqual(fixed ? [5, 7] : [9, 7]);
+    expect([rule.spaceBefore, rule.spaceAfter]).toEqual(fixed ? [5, 7] : [14, 7]);
   });
 
   it.each(['rule-control', 'rule-mark', 'notice-mark'] as const)(

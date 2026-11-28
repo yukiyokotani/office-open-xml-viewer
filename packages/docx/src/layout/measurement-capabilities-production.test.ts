@@ -106,9 +106,9 @@ describe('production measurement capability composition', () => {
       });
 
       expect(verticalGlyphMeasurementServiceOf(dom).fingerprint)
-        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v3');
       expect(verticalGlyphMeasurementServiceOf(worker).fingerprint)
-        .toBe('vertical-glyph-measurement:no-dom-vert-probe-v1');
+        .toBe('vertical-glyph-measurement:no-dom-vert-probe-v2');
       expect(dom.text.fingerprint).toBe(worker.text.fingerprint);
       expect(dom.verticalGlyphFingerprint).not.toBe(worker.verticalGlyphFingerprint);
     } finally {
@@ -143,7 +143,7 @@ describe('production measurement capability composition', () => {
       });
 
       expect(verticalGlyphMeasurementServiceOf(services).fingerprint)
-        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v3');
     } finally {
       if (canvasDescriptor) {
         Object.defineProperty(globalThis, 'HTMLCanvasElement', canvasDescriptor);
@@ -191,7 +191,7 @@ describe('production measurement capability composition', () => {
       const services = createLayoutServices(model);
 
       expect(verticalGlyphMeasurementServiceOf(services).fingerprint)
-        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v3');
       expect(domContexts).toBe(1);
       expect(offscreenContexts).toBe(0);
     } finally {

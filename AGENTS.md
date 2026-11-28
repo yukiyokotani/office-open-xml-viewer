@@ -1,559 +1,93 @@
 # Agent Instructions
 
-This file is the single source of agent instructions for this repository. It
-applies to every AI coding agent and to every tool.
-
-Instruction files:
-
-- `AGENTS.md` (this file) — all repository-wide rules. Tools that follow the
-  `AGENTS.md` convention load it directly.
-- `packages/<name>/AGENTS.md` — facts specific to one package. They add to this
-  file and do not repeat it.
-- `.claude/CLAUDE.md` (imports `../AGENTS.md`) and `packages/<name>/CLAUDE.md`
-  (imports `AGENTS.md`) — one-line files for Claude Code. They hold no rules.
-
-Add or change rules only in an `AGENTS.md`. Do not add tool-specific rule
-files.
+This file is the entry point for every AI coding agent and tool working in
+this repository. It is a map, not the rulebook: it states the few invariants
+that always apply and tells you where to read next. The knowledge itself lives
+in `docs/`, which is the system of record.
 
 ## Project
 
 `office-open-xml-viewer` renders OOXML documents (`docx`, `xlsx`, `pptx`) to
-browser Canvas. The implementation is a Rust/WASM parser layer plus TypeScript
-Canvas renderers and viewers.
-
-Important directories:
-
-- `packages/core/` — shared rendering primitives and shared TypeScript helpers.
-- `packages/ooxml-common/` — shared Rust parsing/model helpers.
-- `packages/docx/` — DOCX parser, renderer, viewer, and tests.
-- `packages/xlsx/` — XLSX parser, renderer, viewer, and tests.
-- `packages/pptx/` — PPTX parser, renderer, viewer, and tests.
-- `site/` — public site.
-- `.storybook/` — unified Storybook config.
-
-## Standard Development Flow
-
-Use this flow for ordinary bug fixes and feature work:
-
-1. Start from `main` and run `git pull --ff-only`.
-2. If the checkout is dirty, preserve unrelated work before switching or pulling.
-   Prefer `git stash push -u -m <clear-message>` for work that appears to belong
-   to another session.
-3. Create a feature branch named `<agent>/<topic>`, for example
-   `codex/<topic>` or `claude/<topic>`.
-4. When creating or entering a Git worktree, make the root checkout's
-   ignored `spec/` directory available from that worktree as a local symlink.
-   For a worktree under `.claude/worktrees/<name>`, run:
-
-   ```bash
-   ln -s ../../../spec spec
-   ```
-
-   If the worktree lives elsewhere, create `spec` as a symlink to the main local
-   checkout's `spec/` directory. Do not copy or commit the specification files.
-5. Work with TDD for bug fixes:
-   - explore the failing sample or behavior,
-   - add a focused failing test,
-   - make it pass,
-   - refactor only where it reduces real complexity.
-6. Verify with the narrowest meaningful tests first, then broader checks when the
-   touched surface warrants it.
-7. Commit only the intended source/docs/test files. Do not commit private samples
-   or generated local artifacts.
-8. Push the feature branch, create a PR, wait for checks when practical, and merge
-   with a merge commit. Do not squash.
-
-## Worktrees and Parallel Sessions
-
-Several agent sessions may work on this repository at the same time, each in
-its own Git worktree.
-
-- Before editing, make sure `spec` exists in the worktree (step 4 of the
-  Standard Development Flow) and read the `AGENTS.md` of each package you will
-  edit.
-- A task scoped to one format edits that format's package. Reading other
-  packages is fine. Edit `packages/core`, `packages/ooxml-common`, or another
-  format only for a coherent fix described in Cross-Package Integration, or
-  when the user asks for a cross-package change.
-- Treat unexpected dirty files as work that belongs to the user or to another
-  session. Do not revert or overwrite unrelated changes; preserve them as in
-  step 2 of the Standard Development Flow.
-
-## Git and PR Rules
-
-- Never push directly to `main`.
-- Use PRs for integration into `main`.
-- Do not squash merge. Use `gh pr merge <number> --merge` unless the user
-  explicitly asks for another non-squash strategy.
-- Before `git push`, set `git config http.postBuffer 524288000` if large pushes
-  are expected.
-- Commit messages should match the repository style:
-  - subject: `fix(scope): ...`, `test(scope): ...`, `refactor(scope): ...`, etc.
-  - body: explain the root cause, the fix, and verification.
-  - include specification sections or observed Office behavior when relevant.
-- PR titles, PR descriptions, commit messages, and public docs must be safe for
-  an OSS repository:
-  - do not include local absolute paths, usernames, home directories, machine
-    names, or other personal environment details;
-  - do not quote or summarize the concrete contents of private or copyrighted
-    samples;
-  - describe private-sample-driven work in terms of the implementation problem,
-    the OOXML/Office behavior mismatch, the general class of affected documents,
-    and the verification command or local-only comparison that was performed;
-  - keep local-only sample filenames and visual details out of public PR text
-    unless the user explicitly approves publishing that information.
-- Agent-authored commits should include a matching co-author trailer. Include
-  the actual model used for that task; do not hard-code a model name across
-  tasks. Examples:
-  - Codex: `Co-Authored-By: Codex <model-name> <noreply@openai.com>`
-  - Claude: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
-- If one agent directs or delegates work to another, include a trailer for
-  each agent in the resulting commit, with the model each one used for that
-  task.
-
-## Verification
-
-Prefer focused verification tied to the change. Common commands:
-
-```bash
-pnpm test
-pnpm typecheck
-pnpm build:wasm
-pnpm storybook
-pnpm build-storybook
-```
-
-For a narrow DOCX renderer fix, a good verification set is:
-
-```bash
-./node_modules/.bin/vitest run \
-  packages/docx/src/cell-border-conflict.test.ts \
-  packages/docx/src/cell-border-conflict-render.test.ts \
-  packages/docx/src/column-widths.test.ts
-
-./node_modules/.bin/tsc --build --pretty false
-git diff --check
-```
-
-If a check fails because ignored/generated WASM is stale, rebuild WASM before
-assuming the source change is broken.
-
-Before running parser-backed integration tests, Storybook, or VRT, rebuild
-generated WASM (`pnpm build:wasm` or the per-package command) whenever parser
-(Rust) source has changed or `packages/*/src/wasm/` may be stale — stale
-generated WASM can both hide real parser defects and fabricate failures.
-
-### Test value and consolidation
-
-For every test, answer: **What realistic defect would go undetected if this
-test were deleted?** Compare that protection with execution cost, flakiness,
-fixture complexity, and the maintenance burden of legitimate refactoring.
-
-- Do not retain or add tests merely as a precaution, to preserve a test count,
-  or to maintain a coverage percentage. TDD means a focused regression for the
-  actual defect; it does not require keeping every exploratory case.
-- Delete implementation copies, tests that only verify their own mocks or
-  fixtures, and assertions that merely restate type-system or dependency
-  guarantees. Exercise production behavior with an independent expectation.
-- Consolidate overlapping tests under the narrowest meaningful production
-  boundary. Keep a distinct case only when it catches a distinct plausible
-  failure: for example precedence, a real boundary, ownership, or a race.
-- Avoid asserting private fields, helper call order, source text, or exact
-  internal object shape when an observable contract can express the guarantee.
-  Do not replace behavior tests with snapshots of implementation details.
-- Reduce exploratory parameter matrices to representative cases and meaningful
-  boundaries. Parameterizing the same redundant matrix does not reduce its
-  execution cost or improve its value.
-- Shared-helper coverage does not prove each format is wired correctly. Keep
-  focused DOCX/XLSX/PPTX integration cases where their production paths differ;
-  do not repeat the helper's entire input matrix in every format.
-- In a test audit, identify the exact cases to remove or merge, the remaining
-  test that supplies any claimed replacement, and the realistic protection
-  lost. Distinguish unconditional deletion from removal that first requires a
-  replacement. Do not report a static review as measured runtime savings.
-
-## OOXML Implementation Policy
-
-Be specification-first.
-
-- Before implementing OOXML behavior, consult the relevant documents under the
-  local `spec/` symlink. Prefer ECMA-376 / ISO-29500 for normative behavior, and
-  Microsoft extension notes such as `[MS-DOCX]`, `[MS-XLSX]`, `[MS-PPTX]`, and
-  `[MS-ODRAWXML]` when Office-specific behavior or extensions are involved.
-- Record the relevant specification section, schema element, or observed Office
-  behavior beside the implementing source when it materially explains the
-  implementation. A commit body alone is not a durable substitute.
-- Prefer ECMA-376 / ISO-29500 behavior over sample-specific tuning.
-- Do not add heuristics only to improve one VRT/sample number, such as arbitrary
-  thresholds, empirical scaling constants, or special-casing a sample path.
-- A user report like "this line is too long" or "this object is missing" is a hint
-  that an OOXML rule is missing or mis-modeled. Identify the related section and
-  implement the rule for the whole class of documents.
-- When behavior differs from Word/Excel/PowerPoint, first check whether the parser
-  discarded necessary information during parsing, inheritance, or style merging.
-  If information is missing, extend the parser/model instead of guessing in the
-  renderer.
-- If Office behavior is not fully specified and requires reverse engineering,
-  explain that explicitly and ask for user approval before adding a compatibility
-  heuristic.
-- If a temporary heuristic is unavoidable, mark it clearly in code with the
-  missing spec/implementation work and track it for removal.
-
-### Source is the durable specification
-
-Express every settled library behavior in production source. Put necessary
-decision rationale, tradeoffs, evidence boundaries, and intentionally unsupported
-behavior in concise comments next to the responsible implementation. Distinguish
-normative specification rules from observed Office behavior and library policy.
-For an observed rule, record the tested input classes and boundary/counterexample
-results needed to explain its scope, without private sample contents or paths.
-
-- Code and these adjacent comments must remain understandable without local
-  experiment files, handoff notes, chat history, PR descriptions, or a separate
-  design document. Tests verify the contract; they must not be its only record.
-- When an investigation settles a rule, incorporate it and its essential
-  rationale into the responsible source before declaring the work complete or
-  deleting the evidence. Do not copy an entire experiment log into comments.
-- Parameter sweeps, generated Office samples/PDFs/images, probe scripts, logs,
-  comparison builds, and scratch notes are temporary investigation artifacts.
-  Create them in a task-owned temporary directory outside the checkout by
-  default. Remove owned artifacts once their conclusions are captured in source
-  and focused regression coverage. Do not accumulate permanent `output/` or
-  `outputs/` directories as an alternative specification store.
-- Unresolved observations are not established compatibility rules. Record any
-  implemented limitation beside its gate; preserve only the evidence still
-  needed by an active investigation, with an owner and a cleanup point.
-- Before cleanup, inspect contents, tracked status, symlinks, and active-task
-  ownership. Do not delete another task's ongoing evidence, original private
-  samples, specification documents, or maintained VRT references. Never follow
-  scratch-directory symlinks into dependencies or other worktrees for deletion.
-
-## Cross-Package Integration
-
-DOCX, XLSX, and PPTX share many ECMA-376 concepts: DrawingML images, `srcRect`,
-text runs, paragraph properties, themes, fills, effects, and shape presets.
-
-- Treat one package's bug as a signal to inspect the sibling packages.
-- If the concept is shared, fix the shared layer (`packages/ooxml-common` or
-  `packages/core`) where possible.
-- Do not duplicate pure parsing predicates or common type definitions across
-  packages unless the format truly diverges.
-- Avoid false abstraction. Renderer logic that is tightly coupled to a package's
-  layout model may stay local.
-- Cross-package fixes may touch `core` / `ooxml-common` and multiple packages in
-  one PR when that is the coherent unit of work.
-
-## Mandatory Adversarial Review
-
-Before declaring an OOXML feature or bug fix complete, perform an adversarial
-review of the final diff. This review is required even when focused tests and VRT
-already pass. Record the conclusion and any material evidence in the task handoff
-or PR description; do not silently waive an unresolved item.
-
-- **Specification fidelity:** Verify the implementation against the applicable
-  ECMA-376 / ISO-29500 rule and Microsoft extension notes. Distinguish normative
-  behavior, documented Office extensions, and implementation policy such as
-  resource governance. Do not claim specification support from sample output
-  alone.
-- **No unexplained heuristics:** Search for sample-specific branches, magic
-  thresholds, empirical scale factors, path/name checks, and renderer guesses.
-  Remove them or justify them under the OOXML Implementation Policy. A passing
-  VRT is not evidence that a heuristic is correct.
-- **Bounded inference for implicit behavior:** When Word, Excel, or PowerPoint
-  behavior is not fully specified, base the inference on sufficiently varied,
-  Office-produced tests that exercise boundaries and counterexamples—not one
-  private sample. State the observed behavior, the tested range, and the limits
-  of the compatibility claim. Keep the implementation scope no broader than the
-  evidence supports, and obtain user approval before adding a compatibility
-  heuristic.
-- **Performance and resource safety:** Review asymptotic work, allocation size,
-  decoded and retained memory, cache ownership/eviction, concurrency, worker
-  transfer cost, repeated parsing or decoding, hot paths, and failure cleanup.
-  Reject unbounded fan-out or whole-document work when visible/page-local work is
-  sufficient. Add budget, concurrency, cache, or stress tests where the risk is
-  material.
-- **Module boundaries and single responsibility:** Confirm that shared OOXML
-  concepts and pure rendering/resource primitives live in `ooxml-common` or
-  `core`, while DOCX, XLSX, and PPTX keep only format-specific parsing, layout,
-  orchestration, and painting. Check for duplicated policy, false abstractions,
-  package cycles, and classes/functions that mix unrelated responsibilities.
-- **Cross-format wiring:** For every shared capability, explicitly inspect DOCX,
-  XLSX, and PPTX integration points. Verify the relevant parser/model, public
-  options, viewer, renderer, cache/loader, worker protocol, error propagation,
-  documentation, and tests for each applicable format. If one format is
-  intentionally excluded, document the format-level reason.
-- **Regression evidence:** Run focused behavioral tests plus the broadest
-  proportionate cross-package checks. For renderer changes, use the previous
-  renderer as the self-VRT oracle and keep Office-reference fidelity evaluation
-  separate. Investigate every unexplained difference; do not weaken comparison
-  thresholds merely to make the review pass.
-- **DOCX architecture:** After major DOCX layout, pagination, measurement,
-  paint, parser-model, worker, or compatibility changes, and before declaring
-  Issue #1037-style architecture work complete, also follow
-  `docs/docx-architecture-audit.md`.
-
-## Private Samples and Storybook
-
-Private Office samples and local-only sample stories are gitignored and must not
-be committed.
-
-Typical local-only paths:
-
-- `packages/docx/public/private/docx/`
-- `packages/xlsx/public/private/xlsx/`
-- `packages/pptx/public/private/pptx/`
-- `packages/legacy-office/public/private/{doc,xls,ppt}/` (DOC/XLS/PPT samples
-  and the paired OOXML controls)
-- `packages/opendocument/public/private/{odt,ods,odp}/` (LibreOffice-converted
-  ODF corpus and its PDFs)
-- `packages/*/src/*privateDemo.stories.ts`
-
-Generated build output such as `packages/*/src/wasm/` is also git-ignored and
-must not be committed; rebuild it instead of copying it between worktrees. VRT
-screenshots and diffs also stay local unless the user explicitly asks to commit
-them.
-
-When using a worktree, copy local private stories/samples from the
-main local checkout if needed. Avoid copying `.DS_Store`, temporary Office lock
-files, screenshots, VRT diffs, or private reference images unless the user
-explicitly asks.
-
-Before using Storybook for parser-backed samples, rebuild WASM from the current
-worktree source:
-
-```bash
-pnpm build:wasm
-```
-
-or per package:
-
-```bash
-pnpm --filter @silurus/ooxml-docx wasm
-pnpm --filter @silurus/ooxml-xlsx wasm
-pnpm --filter @silurus/ooxml-pptx wasm
-```
-
-Storybook is unified at the repository root. Static prefixes are:
-
-- `packages/docx/public/` → `/docx/`
-- `packages/xlsx/public/` → `/xlsx/`
-- `packages/pptx/public/` → `/pptx/`
-
-Use those prefixes when fetching sample files.
-
-In sandboxed agent environments, Storybook's port detection may fail with
-`EPERM` while probing `0.0.0.0`. Running Storybook outside the sandbox for local
-verification is acceptable when the user asks to view it.
-
-## Visual Regression Tests
-
-VRT is local-only because private samples are not redistributable.
-
-The public specimen corpus (`tests/corpus/`, see its README) is the
-exception: anyone can run its self-regression offline, and it is part of the
-default `vrt` runs. When issue work exposes an unimplemented or broken
-feature, hand a minimal self-authored pattern to it (`corpus-specimen` skill,
-`.agents/skills/`).
-
-Regression detection must compare the changed renderer with images produced by
-the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
-images as the regression oracle. Keep Office-reference fidelity evaluation as a
-separate run.
-
-### Self-VRT (previous-renderer regression)
-
-There are two self-VRT corpora per package. Both render every file completely
-and compare exact decoded pixels with the previous renderer's images:
-
-- **demo**: every file under `packages/<fmt>/public/demo/` (tracked). Captured
-  by `pnpm vrt:snapshot` and checked by `pnpm vrt`.
-- **private**: every file under `packages/<fmt>/public/private/<fmt>/`
-  (gitignored). Captured by `pnpm vrt:private:snapshot` and checked by
-  `pnpm vrt:private`.
-
-`pnpm vrt` also runs the package's other visual specs (worker parity, overlays,
-acceptance checks). Specs that need a private sample load it from
-`public/private/<fmt>/` and skip when it is absent.
-
-Baselines are produced from a clean, detached worktree at the previous-renderer
-revision, normally the full SHA of the latest `origin/main`. Snapshot mode
-rejects a dirty tracked checkout and writes a manifest binding the baseline to
-`VRT_BASELINE_REVISION`, the SHA-256 of each input and the exact
-page/sheet/slide set. The candidate run verifies that manifest and reads the
-images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`. Use distinct
-ports so a candidate server can never satisfy the baseline run:
-
-```bash
-base=$(git rev-parse origin/main)
-git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
-cd /tmp/ooxml-vrt-baseline
-pnpm install --frozen-lockfile && pnpm build:wasm
-VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:snapshot
-VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:private:snapshot
-
-cd <candidate-worktree>
-pnpm build:wasm
-VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt
-VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:private
-```
-
-The root scripts run every package without stopping at the first failing one,
-and still exit non-zero if any package failed. Filter a single package with
-`pnpm --filter @silurus/ooxml-<fmt> vrt` (and the matching snapshot script).
-
-A comparison run requires `VRT_BASELINE_CHECKOUT` and fails closed unless it
-names the root of a Git checkout whose HEAD is exactly `VRT_BASELINE_REVISION`
-and whose renderer is unmodified: no tracked change, and no untracked file
-outside dependencies and the private corpus. The checkout is re-verified
-before every item is read, so a baseline that changes mid-run fails. Snapshot
-manifests record the checkout's real path and each image's SHA-256; the
-comparison requires both to match, and rejects any symlink below the baseline
-checkout, so copied, replaced or redirected images are never accepted. The
-harness runs Git with every `GIT_*` variable removed. A missing or mismatched
-baseline fails the run; it is not a successful regression check. Remove the
-baseline worktree when done.
-
-For the one-time bootstrap of a harness change against a baseline revision that
-predates it, copy only the allowlisted VRT harness files listed in
-`tests/visual/private-corpus.mjs` into the baseline worktree and set
-`VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run;
-renderer/parser changes remain forbidden (`tests/visual/README.md` lists the
-exceptions).
-
-### Fidelity scores
-
-`pnpm vrt:fidelity` compares each tracked demo file with its committed images
-under `packages/<fmt>/tests/visual/references/demo/` and applies the fidelity
-ratchet: a page, sheet or slide fails when its match-% drops more than
-`RATCHET_DROP_PCT` below the score recorded in `scores.json` beside the images.
-The demo references are adopted renderer outputs, not Office exports, so the
-ratchet detects drift from the adopted generation. Office PDFs remain the
-fidelity ground truth.
-
-Run `pnpm vrt:fidelity` alongside the self-VRT for every renderer change, so
-`main` always passes its own ratchet. Record scores only from a clean checkout
-of committed renderer code: the latest `origin/main` to resynchronize, or the
-head of a renderer PR whose score drop has been adjudicated against the Office
-PDF (recorded in that same PR). Never record from uncommitted work:
-
-```bash
-UPDATE_SCORES=1 pnpm vrt:fidelity
-```
-
-This rewrites only `scores.json`, never the reference images. Commit the
-re-recorded scores as their own change that names the source revision. Never
-loosen `RATCHET_DROP_PCT` or `FAIL_ABOVE_PCT` to make a run pass.
-
-A fast private tier for PPTX/XLSX (`tests/visual/README.md`) renders only a
-structural-feature cover of the private corpus. It cannot see wrapping,
-autofit or pagination, so run the full `vrt:private` before a release or when
-geometry changes.
-
-Only update references when the user explicitly asks:
-
-```bash
-UPDATE_REFS=1 pnpm vrt:fidelity
-```
-
-Do not automatically update files under `packages/*/tests/visual/references/`.
-
-An exact private self-VRT difference is a detected regression candidate, even
-when every changed document carries the setting being implemented. Enumerate
-every changed page, sheet, or slide and adjudicate each one against an
-Office-produced reference. A manual review counts only when it explicitly
-compares the candidate and previous renderers with that Office output, or when
-the user explicitly adjudicates the difference. Never approve a group of
-differences solely because the affected files share a feature flag or OOXML
-element. If neither an Office reference nor user adjudication is available,
-report that item as unadjudicated rather than calling the VRT successful.
-
-## Documentation and Public Examples
-
-Public docs and commit messages should be written in English.
-
-README, docs, and Storybook public-facing code examples should:
-
-- use `as Type` assertions instead of postfix non-null assertions,
-- use `canvas` for canvas-backed viewers (`DocxViewer`, `PptxViewer`),
-- use `container` for container-backed viewers (`XlsxViewer`),
-- avoid documenting private/local-only sample paths as public API.
-
-Keep announcements concise and user-facing:
-
-- write first for readers who do not know the implementation: lead with the
-  visible outcome and group low-level fixes by the user problem they solve;
-- state explicitly whether migration is required. When it is, give the minimum
-  steps and name any changed default or behavior; when it is not, say so plainly;
-- omit implementation detail that does not change a user's decision or action.
-  If a technical qualification is useful, put it in a final `Technical note`
-  section after the outcome and migration guidance;
-- keep version-sensitive bundle measurements on the stable `/bundle-size` page,
-  not in release announcements;
-- do not link API reference details directly to release notes. Use a stable
-  reference page when more detail is necessary.
-
-## Release Workflow
-
-When the user asks for a release, prepare a dedicated PR named
-`release/<version>` and do all release changes there.
-
-Release checklist:
-
-1. Update README screenshots in `docs/images/{pptx,docx,xlsx}.png` with
-   `pnpm screenshots:readme`.
-2. Review README against the current implementation:
-   - ESM-only package format,
-   - install/import examples,
-   - feature support table,
-   - bundle-size notes,
-   - deprecated API or stale version references.
-3. Sync public API documentation:
-   - `site/src/lib/api-reference.ts`,
-   - `site/src/components/Capabilities.astro` when capabilities changed.
-   - `site/src/pages/bundle-size.astro` with the latest production measurements.
-     Measure with `node scripts/measure-bundle-size.mjs` after `pnpm build:wasm && pnpm build`.
-4. Add a new top `CHANGELOG.md` section:
-   `## 0.x.0 — YYYY-MM-DD`.
-5. Bump all versions consistently:
-   - root `package.json`,
-   - `packages/{core,pptx,xlsx,docx,markdown,node,vscode-extension}/package.json`,
-   - `site/package.json`,
-   - `packages/mcp-server/Cargo.toml`.
-
-   After bumping the root version, run `pnpm sync:versions` to synchronize the
-   companion packages `packages/legacy-office/package.json`
-   (`@silurus/ooxml-legacy-office`) and `packages/opendocument/package.json`
-   (`@silurus/ooxml-opendocument`), their exact `@silurus/ooxml` peer pins, and
-   the compiled companion runtime version (`src/companion-version.ts`). Run
-   `pnpm install --lockfile-only` and `pnpm check:versions`; CI and publishing
-   reject any mismatch. All three npm packages publish from the same tag
-   (`scripts/publish-packages.mjs`): the viewer first, then legacy-office, then
-   opendocument; retries skip exact versions already present on npm.
-   `pnpm build:wasm` builds one OpenDocument reader per `./<format>` export of
-   the opendocument package through its `wasm:<format>` script, and
-   `pnpm test:packed-packages` expects exactly those formats' assets in the
-   tarball, so a new format needs only its export, script and build entry.
-   `publish.yml` authenticates with the `NPM_TOKEN` secret (plus OIDC for
-   provenance). Before the first release of a new companion package, the
-   repository owner must make sure that token can create new packages in the
-   `@silurus` scope (or publish the package once by hand and grant the token
-   access to it); a token limited to existing packages fails with E404/E403
-   after the viewer has already published, and the retry dispatch then
-   publishes only the missing companions.
-6. Run `cargo check -p ooxml-mcp-server` after bumping the MCP server so
-   `Cargo.lock` follows.
-7. Open PR `chore(release): 0.x.0`.
-8. Merge with `gh pr merge <number> --merge` or another non-squash strategy.
-9. Pull main, create and push the annotated tag:
-   `git tag -a v0.x.0 -m "v0.x.0"` and `git push origin v0.x.0`.
-10. Create the GitHub Release with notes based on the changelog and a full
-    changelog comparison link.
-
-Reference images under `tests/visual/references/` are outside the release
-checklist unless the user explicitly asks to update them.
-
-## VS Code Extension Release
-
-The VS Code extension version should match the npm library version. Pushing a
-`v*` tag triggers `.github/workflows/publish-vscode-extension.yml` to publish the
-extension. For manual packaging checks, use the workflow dispatch dry run.
+browser Canvas: a Rust/WASM parser layer plus TypeScript Canvas renderers and
+viewers.
+
+- `packages/core/`, `packages/ooxml-common/` — shared TypeScript and Rust layers.
+- `packages/{docx,xlsx,pptx}/` — per-format parser, renderer, viewer, tests.
+- `packages/legacy-office/`, `packages/opendocument/` — opt-in companion
+  packages for DOC/XLS/PPT and ODF.
+- `site/` — public site. `.storybook/` — unified Storybook config.
+
+## Invariants
+
+1. Knowledge that is not in this repository does not exist for other agents.
+   Express a decision in source code first, then in a comment beside the
+   source, then in the issue or PR. Do not add design documents, plans or
+   audits; `docs/` holds procedures, policy and user guides only. A change
+   that makes a documented statement false corrects or deletes it in the same
+   PR ([documentation](docs/workflow/documentation.md)).
+2. A browser library cannot carry Office's fonts, so its rendering never
+   matches Office exactly, and exact match is not the goal. Aim for
+   reasonable rendering whose layout does not break
+   ([core beliefs](docs/design-docs/core-beliefs.md)).
+3. Be specification-first: consult the local `spec/` symlink (ECMA-376 /
+   ISO-29500, then the Microsoft extension notes) before implementing OOXML
+   behavior. No heuristics fitted to one sample or one font.
+4. Never push to `main` or a release branch. Open PRs as drafts, take them
+   through the merge gate, and merge with a merge commit, never a squash
+   ([Git, PRs and issues](docs/workflow/git-and-prs.md)).
+5. Never commit private samples or generated local artifacts, and keep local paths,
+   usernames and private sample contents out of commits, PRs and public docs.
+6. Never update the reference images in
+   `packages/*/tests/visual/references/` or loosen VRT thresholds unless the
+   user explicitly asks. The VRT oracle is the previous renderer
+   ([VRT](docs/workflow/vrt.md)).
+7. Review every OOXML feature or fix adversarially before calling it complete
+   ([adversarial review](docs/workflow/adversarial-review.md)).
+8. Other sessions work in parallel worktrees. Treat unexpected dirty files as
+   theirs: preserve them, never revert them.
+9. Agent-authored commits carry a `Co-Authored-By:` trailer for each agent
+   involved, naming the model actually used.
+
+## Where to read next
+
+| When you are… | Read |
+| --- | --- |
+| implementing or reviewing OOXML behavior | [`docs/design-docs/core-beliefs.md`](docs/design-docs/core-beliefs.md) |
+| starting a branch, opening or merging a PR, triaging issues | [`docs/workflow/git-and-prs.md`](docs/workflow/git-and-prs.md) |
+| choosing or writing tests | [`docs/workflow/testing.md`](docs/workflow/testing.md) |
+| changing anything that renders pixels | [`docs/workflow/vrt.md`](docs/workflow/vrt.md) |
+| finishing a feature or fix | [`docs/workflow/adversarial-review.md`](docs/workflow/adversarial-review.md) |
+| changing DOCX layout architecture | [`docs/workflow/docx-architecture-audit.md`](docs/workflow/docx-architecture-audit.md) |
+| needing Office ground truth (controls, PDF exports) | [`docs/workflow/office-reference-export.md`](docs/workflow/office-reference-export.md) |
+| recording a decision, or writing, moving or deleting docs | [`docs/workflow/documentation.md`](docs/workflow/documentation.md) |
+| preparing a release or patch release | [`docs/workflow/release.md`](docs/workflow/release.md) |
+| looking for design contracts and guides | [`docs/README.md`](docs/README.md) (index of all docs) |
+| editing one package | that package's `AGENTS.md`, where it has one |
+
+## How the knowledge is organized
+
+- `AGENTS.md` (this file) and `packages/<name>/AGENTS.md` — short maps. A
+  package file adds package-specific facts and does not repeat this one.
+- Source code and the comments beside it — every design decision and its
+  rationale. There are no design documents.
+- `docs/design-docs/core-beliefs.md` — the policy every change is reviewed
+  against.
+- `docs/workflow/` — repeated procedures and the rules that govern them.
+- `docs/*.md` — guides for library users that a README, the site or shipped
+  code links to.
+- `docs/README.md` — the index; every document in `docs/` is listed there.
+- `.agents/skills/<name>/SKILL.md` — thin pointers that load a
+  `docs/workflow/` page on demand. Codex reads `.agents/skills/`; Claude Code
+  reads each through the relative symlink `.claude/skills/<name>` ->
+  `../../.agents/skills/<name>`. Skills hold no content of their own. On
+  Windows the links need `git config core.symlinks true` before checkout.
+- `.claude/CLAUDE.md` and `packages/<name>/CLAUDE.md` — one-line imports of
+  the matching `AGENTS.md` for Claude Code.
+- `ast-grep/` — lint rules (`rules/`), shared matchers (`utils/`) and rule
+  tests (`tests/`), configured by `sgconfig.yml`.
+
+Do not add tool-specific rule files. `scripts/check-agent-instructions.test.mjs`
+(part of `pnpm test`) checks the limits of every `AGENTS.md`, the index, links,
+named paths and scripts, the allowed document locations and the skills;
+[documentation](docs/workflow/documentation.md) lists the checks and the
+gardening pass that covers what they cannot.

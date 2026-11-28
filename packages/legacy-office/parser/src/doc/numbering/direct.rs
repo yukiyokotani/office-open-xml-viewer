@@ -285,6 +285,8 @@ impl Store {
         Ok(NumberingInfo {
             num_id: u32::try_from(reference.index + 1)
                 .map_err(|_| unsupported("Word list instance identifier overflow"))?,
+            // DOC list instances carry no OOXML abstractNum; identity stays numId-based.
+            abstract_num_id: None,
             level: u32::from(reference.level),
             format: number_format::name(effective_format(current, current, false))?.to_string(),
             text,

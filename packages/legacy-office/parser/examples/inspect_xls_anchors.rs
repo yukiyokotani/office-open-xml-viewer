@@ -1,4 +1,17 @@
 //! Passive native development metadata, not a list of renderable images.
+//!
+//! Prints raw worksheet drawing-anchor metadata without extracting images:
+//!
+//! ```sh
+//! cargo run -p legacy-office-parser --features inspection \
+//!   --example inspect_xls_anchors -- sample.xls
+//! ```
+//!
+//! Shape and object identities, group depth and the signed MS-XLS 2.5.193
+//! endpoint fractions are reported unchanged (they are not pixels or EMUs);
+//! groups are not flattened and client formulas or actions are not evaluated.
+//! The output does not prove visibility, image eligibility or object validity:
+//! deleted and OLE-marked shapes can carry anchors too.
 mod support;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

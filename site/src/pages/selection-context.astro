@@ -136,16 +136,22 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
           <tbody>
             <tr><th><code>docx / text</code></th><td>Browser-native text selection</td><td>Selected text and page, paragraph, and run locators</td></tr>
             <tr><th><code>docx / element</code></th><td>Clicked topmost picture, chart, or shape</td><td>Element type, page bounds, and structural source locator for inline or floating content</td></tr>
+            <tr><th><code>docx / comment</code></th><td>Active comment thread in <code>DocxScrollViewer</code></td><td>Page index, comment id, optional source locator, and the thread (message text bounded)</td></tr>
             <tr><th><code>xlsx / range</code></th><td>Cells, rows, columns, sheet, or multiple areas</td><td>Canonical selection state, sheet identity, formulas, display text, and populated cells</td></tr>
             <tr><th><code>xlsx / element</code></th><td>Clicked topmost worksheet object</td><td>Chart, picture, or shape type, sheet anchor, and bounded descriptive text</td></tr>
             <tr><th><code>pptx / text</code></th><td>Browser-native text selection</td><td>Selected text and slide, shape, and run locators</td></tr>
             <tr><th><code>pptx / element</code></th><td>Clicked topmost slide element</td><td>Type, provenance, bounds, identifiers, and bounded descriptive text</td></tr>
+            <tr><th><code>pptx / comment</code></th><td>Active comment thread in <code>PptxScrollViewer</code></td><td>Slide index, comment index and occurrence id, optional comment id and point, and the thread (message text bounded)</td></tr>
           </tbody>
         </table>
       </div>
       <p class="priority-note">
         In DOCX and PPTX, a live text selection takes precedence over element focus. Selecting text clears an
         earlier element focus, so collapsing the browser selection does not resurrect a stale click.
+        In <code>DocxScrollViewer</code> and <code>PptxScrollViewer</code>, an active comment thread takes
+        precedence over both: while a thread is active, <code>getSelectionContext()</code> returns its
+        <code>comment</code> context even if text is selected. <code>DocxViewer</code>,
+        <code>PptxViewer</code>, and the XLSX Viewers return no <code>comment</code> kind.
       </p>
     </section>
 
@@ -163,7 +169,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       <p>
         The callbacks report semantic changes, not assistant actions. Your application decides
         whether the action is explain, summarize, compare, evaluate, or something else; the Viewer
-        does not grow one API for each prompt.
+        does not grow one API for each prompt. A new read-only focus target is added as a new
+        <code>kind</code> of the same context, with its fields inside that kind's snapshot.
       </p>
       <p>
         There is no separate <code>onClick</code> option. For a raw browser click, add a native
@@ -186,6 +193,61 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         starts the lookup on its first call and returns the same memoized Promise if called again. Omit <code>onContextMenu</code> and the
         Viewer installs no listener. The event itself is never serialized or sent through MCP.
       </p>
+      <p>
+        The target is resolved when <code>getContext()</code> is first called. In XLSX, a right-click
+        inside the current selection keeps the whole selection; a right-click outside it selects the
+        target cell, row, or column, or the whole sheet from the corner header. With
+        <code>enableElementSelection: true</code>, a right-click on a chart, picture, or shape
+        selects and outlines that object instead.
+      </p>
+      <p>
+        In DOCX and PPTX, the menu lookup is not the same as the getter. While a native text selection
+        is live, or when element selection is off, it returns the getter's current context. With
+        element selection on and no text selected, it hit-tests the pointer against the page or slide
+        canvas: on the canvas, the hit object (or nothing, on empty space) becomes the element focus
+        and the getter's context is returned; outside the canvas, the element focus is cleared and the
+        lookup resolves to <code>null</code>. In the scroll viewers with comments enabled, any pointer
+        press outside a comment card or marker clears the active thread, and while a thread is active
+        the getter returns its <code>comment</code> context ahead of text. A right-click on a comment
+        card in the margin therefore keeps the thread active, so <code>getSelectionContext()</code>
+        still returns the comment, but with element selection on and no Viewer text selection live
+        the menu lookup resolves to <code>null</code> because the card lies outside the canvas.
+      </p>
+    </section>
+
+    <section class="guide-section" aria-labelledby="point-queries">
+      <div class="section-heading">
+        <p class="eyebrow">Custom surfaces</p>
+        <h2 id="point-queries">Element context at a point.</h2>
+      </div>
+      <p>
+        Applications that paint pages or slides themselves can query element context without a
+        Viewer selection. Both methods work in main and worker mode and return detached
+        <code>element</code> context, or <code>null</code> when nothing is hit.
+      </p>
+      <ul>
+        <li>
+          <code>DocxDocument.getElementContextAt(pageIndex, point, options)</code> takes a point in
+          page coordinates measured in points (<code>{"{ xPt, yPt }"}</code>). Its
+          <code>source</code> is a structural locator (story, story instance, and index path), not
+          an archive path or a mutable document node.
+        </li>
+        <li>
+          <code>PptxPresentation.getElementContextAt(slideIndex, point, options)</code> takes a point
+          and an optional <code>tolerance</code> in slide EMU. It walks elements in reverse paint order
+          and tests each transformed frame, including rotation and flips; straight lines are tested as
+          segments within the tolerance. It is frame hit testing, not pixel-alpha or custom-path
+          containment.
+        </li>
+        <li>
+          PPTX element context reports its <code>origin</code> as <code>master</code>,
+          <code>layout</code>, or <code>slide</code>, or as <code>unknown</code> when the parsed slide
+          carries no source record for that element. <code>elementIndex</code> is the paint-order index
+          in the current rendered slide, not an editor tree position. Every element context includes its
+          bounds, and picture and media contexts add the MIME type, so a host can crop its own canvas.
+          The context carries no archive path and no binary media.
+        </li>
+      </ul>
     </section>
 
     <section class="guide-section limits" aria-labelledby="bounded-by-design">
@@ -199,6 +261,35 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         <li>DOCX, XLSX, and PPTX element text is bounded independently; element context contains descriptive facts, not mutable document objects.</li>
         <li><code>truncated</code> and <code>truncationReasons</code> tell the caller exactly when a snapshot reached a limit.</li>
       </ul>
+      <div class="context-table-wrap">
+        <table class="context-table">
+          <thead><tr><th>Limit</th><th>Default</th><th>Hard maximum</th></tr></thead>
+          <tbody>
+            <tr><th>DOCX/PPTX selected text (<code>maxTextCharacters</code>)</th><td>65,536</td><td>65,536</td></tr>
+            <tr><th>DOCX/PPTX run locators (<code>maxRunLocators</code>)</th><td>1,024</td><td>1,024</td></tr>
+            <tr><th>XLSX populated cells (<code>maxCells</code>)</th><td>1,000</td><td>10,000</td></tr>
+            <tr><th>XLSX cumulative range text (<code>maxTextCharacters</code>)</th><td>1,048,576</td><td>8,388,608</td></tr>
+            <tr><th>XLSX one cell field</th><td>65,536</td><td>65,536</td></tr>
+            <tr><th>DOCX/PPTX element text (<code>maxTextCharacters</code>)</th><td>16,384</td><td>65,536</td></tr>
+            <tr><th>XLSX element text</th><td>65,536</td><td>65,536</td></tr>
+            <tr><th>DOCX/PPTX comment thread message text, summed over the thread (<code>maxTextCharacters</code>)</th><td>65,536</td><td>65,536</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The comment-thread limit bounds message text only: every reply is still returned with its
+        identifiers, author and date, so the limit does not cap the reply count or the serialized
+        size. A host that needs a transport or prompt limit bounds the serialized snapshot itself.
+        Text limits count UTF-16 code units, and text is cut with a surrogate-safe prefix, so a
+        surrogate pair is not split. Pass different limits to <code>getSelectionContext()</code>.
+        DOCX and PPTX <code>onSelectionContextChange</code> notifications use the default limits; XLSX
+        notifications use the default cell limit and a 65,536-character budget for extracted cell and
+        comment text (comment authors, dates and identifiers are copied outside that budget) and are
+        coalesced to one per animation frame (one per microtask where the host has no
+        <code>requestAnimationFrame</code>). A native text selection produces context only when
+        every range endpoint lies on a Viewer text surface, and its text is taken only from tagged
+        Viewer runs.
+      </p>
       <p>
         Context is suitable for transport, but selected Office content is still untrusted input.
         Never treat document text, formulas, or element labels as instructions to execute.
@@ -219,9 +310,14 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       </ol>
       <p>
         The extension keeps the snapshot in memory and exposes it only to its MCP child through an
-        authenticated IPv4-loopback bridge. <code>context: null</code> means there is no active
-        OOXML preview. A non-null context can still have <code>selection: null</code> when the active
-        preview has no selection.
+        authenticated IPv4-loopback bridge. Each bridge start creates a random 256-bit bearer token,
+        and the extension hands it only to the environment of the MCP server definition that VS Code
+        launches. Stopping the bridge discards the token, so a later start uses a new one.
+        Re-rendering a preview starts a new selection session and clears its selection; selection and
+        location messages from an obsolete page session are ignored. Check <code>available</code> first: when it is
+        <code>true</code>, <code>context: null</code> means there is no active OOXML preview, and a
+        non-null context can still have <code>selection: null</code> when the active preview has no
+        selection. When it is <code>false</code>, <code>context</code> is also <code>null</code>.
         <code>available: false</code> means the bridge is unavailable; inspect <code>reason</code> to
         distinguish an unconnected standalone server from a bridge error. Remote VS Code documents
         expose only a document name and no local <code>document.path</code>, so path-based file tools

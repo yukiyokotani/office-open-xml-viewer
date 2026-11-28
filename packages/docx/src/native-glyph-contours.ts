@@ -1,4 +1,10 @@
-import { canvasFontString, createAuxCanvas, GeometryWorkBudgetError } from '@silurus/ooxml-core';
+import {
+  canvasFontString,
+  createAuxCanvas,
+  fillTextAtReference,
+  GeometryWorkBudgetError,
+  type TextAdvancePlanner,
+} from '@silurus/ooxml-core';
 import type { GlyphContourRequest } from './layout/text.js';
 
 type Point = Readonly<{x: number; y: number}>;
@@ -10,7 +16,10 @@ type Point = Readonly<{x: number; y: number}>;
  * reuses the resolved font route; complete service-owned spans preserve joining and ligatures.
  * The resulting polygons permit a physical pen AFTER arbitrary VML fitting,
  * including independent dash/join/compound/image pens. */
-export function acquireCanvasGlyphContours(request: GlyphContourRequest): readonly (readonly Point[])[] | undefined {
+export function acquireCanvasGlyphContours(
+  request: GlyphContourRequest,
+  advances?: TextAdvancePlanner,
+): readonly (readonly Point[])[] | undefined {
   let ink = request.ink;
   // A Canvas implementation may quantize measured ink differently from its
   // scaled raster. Detect clipping at the scratch edge and expand acquisition
@@ -39,8 +48,13 @@ export function acquireCanvasGlyphContours(request: GlyphContourRequest): readon
       }
       let x = 0;
       for (const span of request.spans) {
-        ctx.font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);
-        ctx.fillText(span.text, x, 0);
+        const font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);
+        ctx.font = font;
+        // Shape with the em layout measured the span at (core
+        // reference-advances.ts) so contour glyphs sit on retained advances.
+        const reference = advances?.plan(font);
+        if (reference) fillTextAtReference(ctx, reference, span.text, x, 0);
+        else ctx.fillText(span.text, x, 0);
         x += span.advancePt;
       }
       const w = canvas.width, h = canvas.height, stride = w + 1;

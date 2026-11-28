@@ -239,6 +239,7 @@ impl Store<'_> {
                 .extension;
             self.selected_images.insert(index);
             return Ok(Some(ShapeFill::Image {
+                dpi: None,
                 vml: None,
                 image_path: format!("legacy-doc/float/{index}"),
                 mime_type: mime(extension)?.to_string(),
@@ -279,6 +280,7 @@ impl Store<'_> {
             let extension = image.extension;
             self.selected_images.insert(tile.blip);
             return Ok(Some(ShapeFill::Image {
+                dpi: None,
                 vml: None,
                 image_path: format!("legacy-doc/float/{}", tile.blip),
                 mime_type: mime(extension)?.to_string(),
@@ -342,6 +344,7 @@ impl Store<'_> {
         let [top, bottom, left, right] = crop;
         let image = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path,

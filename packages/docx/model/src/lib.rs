@@ -194,6 +194,34 @@ pub struct Document {
     /// document to the highest page. Empty, and omitted, for DOCX.
     #[serde(rename = "__pageObjects", skip_serializing_if = "Vec::is_empty")]
     pub page_objects: Vec<PageObjectStory>,
+    /// Private parser/layout wire: the ECMA-376 Part 1 §17.2.1 document
+    /// background painted beneath all content of every page. The DOCX parser
+    /// emits it only while §17.15.1.26 `w:displayBackgroundShape` is on, so its
+    /// presence is the decision to paint. Omitted when nothing is painted.
+    #[serde(rename = "__pageBackground", skip_serializing_if = "Option::is_none")]
+    pub page_background: Option<PageBackgroundWire>,
+}
+
+/// Paint-ready document background (see `Document::page_background`). Layers
+/// paint in order over the whole physical page: `color`, each of `fills`,
+/// then the drawings of `body`.
+#[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PageBackgroundWire {
+    /// §17.2.1 `w:color` / `w:themeColor` (+ `w:themeTint` / `w:themeShade`)
+    /// resolved to `RRGGBB`. Absent for `auto` or when neither is authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Part 4 §19.1.2.2 `v:background` fills layered above `color`, in
+    /// document order. Each covers the whole page.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub fills: Vec<ShapeFill>,
+    /// The §17.3.3.9 `w:drawing` children as a fixed story laid out on every
+    /// page above `fills`: page-anchored, page-sized drawings behind the text
+    /// that never wrap it (see the parser's `background_drawing_story`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub body: Vec<BodyElement>,
 }
 
 /// One physical page's anchored drawings (see `Document::page_objects`).
@@ -1068,6 +1096,12 @@ pub struct SectionPlacementWire {
     pub page_borders: Option<PageBorders>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_geometry: Option<Box<SectionPageGeometryWire>>,
+    /// §17.6.13 `pgSz/@orient` (ST_PageOrientation, default `portrait`),
+    /// present whenever the sectPr authors `<w:pgSz>`. The page box already
+    /// carries the authored width and height; layout needs the orientation
+    /// only to arrange two editing pages on one sheet (§§17.15.1.11/.13/.64).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_orient: Option<String>,
 }
 
 /// See [`SectionPlacementWire::section_flow`].
@@ -1139,6 +1173,11 @@ pub enum BodyElement {
             skip_serializing_if = "Option::is_none"
         )]
         same_paragraph_as_previous: Option<bool>,
+        /// Parser-private: the §17.3.1.23 pageBreakBefore of a paragraph whose
+        /// first content is a column break. Layout applies it as that
+        /// paragraph property (an empty page start satisfies it).
+        #[serde(rename = "__pageBreakBefore", skip_serializing_if = "Option::is_none")]
+        page_break_before: Option<bool>,
     },
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
     /// content into the next newspaper column of the current section (or the
@@ -1720,6 +1759,12 @@ pub struct NumberingInfo {
     /// box; they do not select its size or the font governing native AUTO.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pic_bullet_transform: Option<PictureBulletTransform>,
+    /// ECMA-376 §17.9.15 `<w:abstractNumId>` of the referenced `<w:num>`: the
+    /// list instance identity that numIds sharing one abstract definition
+    /// have in common (their running counters are shared). `None` for a
+    /// numId without an abstract reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abstract_num_id: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -2204,12 +2249,26 @@ pub struct ShapeRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_origin: Option<InlineObjectOrigin>,
+    /// Clockwise `wpg:grpSpPr/a:xfrm@rot` (degrees) of an inline `wpg:wgp`
+    /// flow object. Its children already carry the composed group transform;
+    /// layout reads this only to size the inline footprint
+    /// (compatibility rule `word-inline-drawing-turned-footprint`).
+    #[serde(
+        rename = "__inlineGroupRotation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_group_rotation: Option<f64>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
     /// [left, top, right, bottom] in points; `None` for anchors and zero.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2655,6 +2714,12 @@ pub enum ShapeFill {
         blip_effects: Vec<BlipEffect>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vml: Option<VmlImageFill>,
+        /// ECMA-376 §20.1.8.14 `CT_BlipFillProperties@dpi`, as authored (0
+        /// and absence both mean the DPI stored in the blip). It converts
+        /// native image pixels to a physical size for a §20.1.8.58 tile and
+        /// for physical blip effects. Private wire; VML fills carry none.
+        #[serde(rename = "__dpi", skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
     },
 }
 
@@ -3563,6 +3628,11 @@ pub struct ImageRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",
@@ -3721,6 +3791,25 @@ pub struct UnavailableDrawingRun {
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
+    /// §20.1.7.6 a:xfrm rotation (degrees) and flips of a picture placeholder,
+    /// as on the available picture (`ImageRun`); they shape its line footprint.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
+    /// Parser-private §17.3.2.24 position of the hosting run of an inline
+    /// picture placeholder, as on the available picture (`ImageRun`).
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
+    /// Parser-private font facts of the hosting run of an inline picture
+    /// placeholder, as on the available picture (`ImageRun`).
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
     #[serde(
         rename = "__anchorAcquisition",
         skip_serializing_if = "Option::is_none"

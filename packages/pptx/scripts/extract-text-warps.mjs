@@ -9,7 +9,9 @@
 // preset shape's, so the extracted `{ adj, gd, paths }` records feed the very
 // same evaluator (createEvaluator) and path flattener.
 //
-// Usage: node scripts/extract-text-warps.mjs <input.xml> <output.json>
+// Usage (from packages/pptx):
+//   node scripts/extract-text-warps.mjs scripts/preset-text-warp-definitions.xml \
+//     ../core/src/shape/preset-geometry/text-warp-presets.json
 
 import fs from 'node:fs';
 

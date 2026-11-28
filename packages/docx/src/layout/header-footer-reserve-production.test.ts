@@ -75,6 +75,7 @@ function owner(
       textDirection: 'lrTb',
       gutterPt: 0,
       rtlGutter: false,
+      sheetOrientation: 'portrait' as const,
       mirrorMargins: false,
       gutterAtTop: false,
       bookFoldPrinting: false,

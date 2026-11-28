@@ -456,17 +456,8 @@ function planShapeDrawingBase(
     });
   }
   if (shape.fill?.fillType === 'image') {
-    if (shape.fill.tile !== undefined) {
-      return Object.freeze({
-        status: 'unsupported',
-        command: Object.freeze({ kind: 'noop' }),
-        diagnostics: Object.freeze([Object.freeze({
-          code: 'UNSUPPORTED_FEATURE',
-          severity: 'error',
-          message: 'Tiled DrawingML shape image fills are not rendered',
-        })]),
-      });
-    }
+    // A §20.1.8.58 tile is a resource brush (tile geometry needs the decoded
+    // image size); the command fills the shape with it like a stretch does.
     if (!imageFillResourceKey) {
       throw new Error('DrawingML shape image fill requires a retained image resource key');
     }

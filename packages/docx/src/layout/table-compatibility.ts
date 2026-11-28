@@ -5,7 +5,7 @@ import type { DocxCompatProfile } from './compat-profile.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { ParagraphLayoutSource, ParagraphAcquisitionInput } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput } from './types.js';
+import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput, TableBorderInput } from './types.js';
 
 export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
   id: 'word-cell-owned-grid-frame',
@@ -246,13 +246,18 @@ export const WORD_TABLE_CELL_SPACING_GEOMETRY = defineCompatibilityRule({
   id: 'word-table-cell-spacing-geometry',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'table-cell-spacing-geometry',
     application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
-  description: 'Windows Word controls use three 2000-twip tracks, tblW 6000, spacing 0/60/200 twips, omitted/zero/108-twip margins, no borders or uniform single borders sz4/sz24, fixed layout or content-sized AutoFit, left/center/right justification, no indent or +720, LTR/bidiVisual and omitted/14/15 modes; the blk-0898 table controls add one-row two-column fixed tables (60-twip spacing, 108-twip or omitted margins, single sz4 borders without insideH) in modes 11 and 12, which place exactly like mode 14, and with tblInd -360, which moves a leading table like a positive indent. Positive spacing s reserves 2s at every outer and shared boundary. Each cell contains its own full border width t before its margins. Fixed cell widths carve (n+1)*2s from the resolved grid proportionally; a horizontal span retains its interior gaps. Vertical extents include the outer table top/bottom border as well as both cell borders. Mode 15 LTR boxes move inward by half the aligned outer border (center stays centered); bidi boxes shift a further half border left. Omitted/11/12/14 modes have no border shift: leading tables with authored indentation and trailing tables hang the full 2s+t+margin content inset in LTR, or s+t+margin in bidi, leaving exactly s there. Unindented leading and centered tables do not hang. AutoFit content-sized tables fit all unspanned unpreferred tracks to their content maxima only when those maxima and all gaps fit the occurrence ceiling and text band together; binding multitrack distribution is not established and retains the complete previous geometry, including content constraints, width ceiling, origin and row heights. Omitted margins retain the library zero instead of approximating the observed Word half-point quanta. Fixed proportional widths were measured within 0.1pt at s=3/10pt; these are ideal geometry rules, not fits to raster/quantized offsets. Scope is one ordinary top-level table in a horizontal single-column body, uniform positive table-level tblPr spacing (including style-inherited spacing) and uniform absent or single borders (an inside border a one-row or one-column table cannot show is ignored), legacy dxa or omitted margins, fixed dxa width or content-sized AutoFit, modes omitted/11/12/14/15. Row-level trPr spacing and tblPrEx spacing retain their previous geometry even when all effective row values match. Asymmetric borders, any cell border override, row exceptions/justification/skips, vertical merges, nested tables or contents, floating tables, other stories, vertical text, gaps exhausting the fixed width or AutoFit band, authored row heights and other modes retain their previous geometry. Horizontal spans join only the fixed width formula; AutoFit spans remain excluded. Pagination of the measured automatic rows uses the same page-local outer gaps and border footprints; Office continuation placement was not separately measured.',
+  description: 'Windows Word controls use three 2000-twip tracks, tblW 6000, spacing 0/60/200 twips, omitted/zero/108-twip margins, no borders or uniform single borders sz4/sz24, fixed layout or content-sized AutoFit, left/center/right justification, no indent or +720, LTR/bidiVisual and omitted/14/15 modes; the blk-0898 table controls add one-row two-column fixed tables (60-twip spacing, 108-twip or omitted margins, single sz4 borders without insideH) in modes 11 and 12, which place exactly like mode 14, and with tblInd -360, which moves a leading table like a positive indent. Positive spacing s reserves 2s at every outer and shared boundary. Each cell contains its own full border width t before its margins. Fixed cell widths carve (n+1)*2s from the resolved grid proportionally; a horizontal span retains its interior gaps. Vertical extents include the outer table top/bottom border as well as both cell borders. Mode 15 LTR boxes move inward by half the aligned outer border (center stays centered); bidi boxes shift a further half border left. Omitted/11/12/14 modes have no border shift: leading tables with authored indentation and trailing tables hang the full 2s+t+margin content inset in LTR, or s+t+margin in bidi, leaving exactly s there. Unindented leading and centered tables do not hang. AutoFit content-sized tables fit all unspanned unpreferred tracks to their content maxima only when those maxima and all gaps fit the occurrence ceiling and text band together; binding multitrack distribution is not established and retains the complete previous geometry, including content constraints, width ceiling, origin and row heights. Omitted margins retain the library zero instead of approximating the observed Word half-point quanta. Fixed proportional widths were measured within 0.1pt at s=3/10pt; these are ideal geometry rules, not fits to raster/quantized offsets. A further set of controls (A4 with 465.3pt of text width, cells of 72 and 108pt or 60, 72 and 108pt with dxa tcW, single sz4 borders, mode 15, AutoFit) measures tables with preferred widths. With an automatic tblW the cell boxes keep the widths the table resolves to without spacing and the gaps are added outside them: 192pt at 2pt spacing, 210pt at 5pt, 256pt for three columns; a row spanning both columns, a vertically merged first column (drawn as one box from its first row to its last), a nested table, a 20pt tblInd, jc center and right, a two-column section and spacing set on the rows (trPr) instead of the table all keep that geometry. With a preferred table width the table keeps it and the cells are resolved in what the gaps leave of it; when that only scales the cells this is the proportional carving of tblLayout fixed: tblW 3600 gives 67.2 and 100.8pt, 4800 gives 91.2 and 136.8pt, three columns in 4800 give 56, 67.2 and 100.8pt, 50% gives 232.65pt with 88.3 and 132.4pt, and pct cells in a 100% table 181.3 and 272pt. A table whose border box would pass the text width (220 and 240pt cells) is held to it and resolved the same way (216.6 and 236.3pt). A spaced table of two 30pt cells nested in a plain cell without margins keeps its 72pt in a 144 or 216pt cell, takes the cell when its tblW is 100% (65.5 and 101.5pt cells) and is held to a 72pt cell (29.5pt cells); 5.4pt cell margins come off first and leave 24.3pt cells. The cell\'s collapsed side rules straddle its edges, and the nested table starts and ends inside them: each side gives up the half rule its margin does not cover (0.25pt for the sz4 rules without margins, nothing with the 5.4pt margins). Where the widths differ from Word, the same controls without spacing differ in the same way, so the difference belongs to the AutoFit resolution and not to this rule: pct cells under an automatic table width (Word sizes them from content), a cell without tcW beside one with it (content-sized), cells without tcW under a preferred table width (shared equally), a cell whose content is wider than its tcW (Word widens an automatic table by it and lets the cell keep its tcW under a preferred table width), and a preferred table width below the grid (tblW 3000 gives 60.5 and 89.5pt without spacing and 55.9 and 82.0pt with 2pt, against 60 and 90pt and 55.2 and 82.8pt here; Word takes the reduction from the width above each cell\'s content). The upright block table of a one-column tbRl section gives the same widths (192, 210 and 256pt automatic, 180pt with tblW 3600, and 50% of the 701.9pt band). In all these controls the outer rules of the table are centred on the edges of the grid, the width given above: with sz4 rules and 2pt spacing the outer rule is 4.2 to 4.4pt from the rule of the first or last cell, centre to centre, against 4.5 to 4.6pt between the rules of neighbouring cells, so the first cell box starts twice the spacing inside the grid edge and half the outer rule lies beyond the grid. Wider rules with spacing were not measured. Controls with tblInd of 20 and 40pt in one- and two-column sections (222pt columns): an automatic table ends where its column ends, so its border box is the column less the indent (72 and 108pt cells at 40pt in a 222pt column give 181.6pt between the outer rules; 220 and 240pt cells are held the same way in either section), and keeps its width while it fits (192pt at 20pt). A preferred table width is kept and moves with the indent, past the column: tblW 3600 stays 180pt, and 100% stays the column or text width (221.5 and 464.9pt between the outer rules from an origin 40pt in). With tblInd of -20 and -40pt the same holds: the automatic table still ends where its column ends, so 220 and 240pt cells keep their widths in a one-column section (472.1pt between the outer rules from an origin 40pt left of the text) and are held at the column end in a two-column section (261.6pt), and tblW 3600 and 100% keep their widths. ECMA-376 §17.4.43 keeps row-level (trPr) spacing inside the table width where §17.4.45 adds table-level spacing outside it. The control with tblW auto, dxa tcW of 72 and 108pt, no tblPr spacing and the same 2pt trPr spacing on every row is 192pt wide in Word, the width it has with tblPr spacing; that is the whole exception, and it is admitted for the preferred-width AutoFit form with one trPr value on every row and no tblPr or style spacing beside it (with a preferred table width the table keeps that width under either provision). Fixed and content-sized tables with trPr spacing, and tblPrEx spacing, retain their previous geometry even when all effective row values match. Scope by form, always one ordinary table with uniform positive spacing (tblPr, including style-inherited), uniform absent or single borders (an inside border a one-row or one-column table cannot show is ignored), legacy dxa or omitted margins and modes omitted/11/12/14/15: the fixed dxa-width form in a top-level single-column body table or the upright block table of a one-column vertical section, with horizontal spans; the content-sized AutoFit form in a top-level horizontal single-column body table, without spans; the AutoFit form with a preferred table or cell width in a top-level body table of a one- or multi-column section, as the upright block table of a one-column vertical section, or, in compatibility mode 15 and leading, left-to-right and unindented, nested one cell deep in a body table (the half-rule inset is established for collapsed rules only; a cell of a spaced table gives none), with horizontal spans, vertical merges and trPr spacing. Asymmetric borders, any cell border override, row exceptions/justification/skips, vertical merges and nested tables outside the preferred-width form, floating tables, other stories, content-sized tables and cells of vertical text, a spaced table nested more than one cell deep, gaps exhausting the fixed width or AutoFit band, authored row heights and other modes retain their previous geometry. Pagination of the measured automatic rows uses the same page-local outer gaps and border footprints; Office continuation placement was not separately measured.',
 });
 
 /** An independent border box is established only for the measured uniform
  * table-border class. A cell override, even one matching the table, is outside
  * the evidence; never infer its ownership from an equal effective width. */
-export function wordUniformSpacedTableBorderPt(table: TableLayoutSource): number | null {
+export function wordUniformSpacedTableBorderPt(
+  table: TableLayoutSource,
+  /** Vertical merges and nested tables are measured for an AutoFit table
+   * with preferred widths only. */
+  mergedAndNestedCells = false,
+): number | null {
   // An inside border a one-row (insideH) or one-column (insideV) table cannot
   // show has no geometry, so it does not break uniformity.
   const singleRow = table.rows.length <= 1;
@@ -265,8 +270,9 @@ export function wordUniformSpacedTableBorderPt(table: TableLayoutSource): number
   if (widths.some((width) => width === null || width !== widths[0])) return null;
   if (table.rows.some((row) => row.cells.some((cell) =>
     Object.values(cell.borders).some((border) => border != null)
-    || cell.vMerge != null || (cell.textDirection != null && cell.textDirection !== 'lrTb')
-    || cell.content.some((block) => block.type === 'table')))) return null;
+    || (cell.textDirection != null && cell.textDirection !== 'lrTb')
+    || (!mergedAndNestedCells
+      && (cell.vMerge != null || cell.content.some((block) => block.type === 'table')))))) return null;
   return widths[0] ?? 0;
 }
 
@@ -277,10 +283,13 @@ export function wordSpacedTableTranslationPt(input: Readonly<{
   compat: Pick<DocxCompatProfile, 'tableMode15Geometry'>; justification: string | null | undefined; bidi: boolean;
   indentPt: number; indentAuthored: boolean; spacingPt: number; borderPt: number;
   leadingMarginPt: number; trailingMarginPt: number;
+  hostRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>;
 }>): number {
   const leading = input.justification == null || input.justification === 'left' || input.justification === 'start';
   const center = input.justification === 'center';
-  const indent = leading ? input.indentPt : 0;
+  // A nested table, always leading and left-to-right in this rule, starts
+  // inside the side rule of the cell around it.
+  const indent = leading ? input.indentPt + (input.hostRuleInsetPt?.leftPt ?? 0) : 0;
   if (input.compat.tableMode15Geometry) {
     const physicalBorderShift = center ? 0 : (leading !== input.bidi ? 1 : -1) * input.borderPt / 2;
     const physicalShift = physicalBorderShift - (input.bidi ? input.borderPt / 2 : 0);
@@ -361,7 +370,20 @@ export const WORD_OVER_PAGE_CANT_SPLIT_CLIP = defineCompatibilityRule({
     kind: 'microsoft-note',
     reference: '[MS-OI29500] §2.1.120',
   },
-  description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation.',
+  description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation. The note does not distinguish a nested row; as a library reading without an Office measurement, the page of a nested row is the fresh band of its table: the content band of the enclosing cell on a fresh page, not the page band, which no nested table inside a cell with margins, rules or repeated headers is ever given.',
+});
+
+/** Consumed by table-pagination.ts partialRow (the re-selection, and the
+ * selection every enclosing row keeps: TableFragmentResult.wholeSource),
+ * nestedTableFragmentContext (a nested table's own fresh band) and by the
+ * containment limit of table.ts measureTableCellBlockFlowHeightPt. */
+export const LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP = defineCompatibilityRule({
+  id: 'library-over-page-table-cell-unit-clip',
+  evidence: {
+    kind: 'library-policy',
+    reference: 'packages/docx/src/layout/table-pagination.test.ts#clips an over-page first cell line on a fresh page and continues the cell on the next page',
+  },
+  description: 'Library policy, no Office measurement, applied in every compatibility mode: ECMA-376 §17.4.6 lets a splittable row continue across pages but defines nothing for a cell unit that no page can hold. When a row fragment on a fresh band (nothing but repeated header rows above it, so relocating cannot gain space) would otherwise select nothing, whether because no cell progresses or because word-parallel-paragraph-row-cut rejects a cut that leaves a blocked paragraph cell behind, the row is re-selected once: a layoutInCell containment interval (§20.4.2.3) whose own extent exceeds the fresh content band stops charging admission, so the text around its drawing keeps flowing, and a first line or block still taller than the band is retained alone. The recovered cells are materialized as admitted: a left-out containment interval neither grows the row nor offsets the text below a drawing that starts above it, and the cells are laid out from their top because a centered or bottom vAlign (§17.4.84) would align against the over-band row, so every admitted line is painted inside the band. The fragment is clipped at the band end and its remaining content continues on the next page. The same holds at every nesting depth: the fresh band of a nested table is the content band of its cell on a fresh page (the page band less every enclosing cell margin, row rule, cell spacing and repeated header row), the re-selection governs only the cell units of the row itself, so a table nested in a recovered cell recovers in its own band, and every enclosing row and table materializes a recovered or clipped fragment exactly as selected instead of its source layout, whether or not the row completes; floating-table anchors are resolved against the same placement. Content below the band end (part of an over-band unit, or of a drawing) is not painted. This is a recovery from an otherwise non-converging pagination, not a claim about Word or the specification; the warning channel is reserved for caller opt-outs, so it reports nothing.',
 });
 
 export const WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY = defineCompatibilityRule({
@@ -509,6 +531,18 @@ export const WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE = defineCompatibilityRule({
   description: 'Apply the supported first-row table-property exception facts at table scope. An authored first-row tblPrEx/tblW shadows the body width, including auto/nil/zero clearing it; width ceiling selection and column fitting share this effective preference.',
 });
 
+export const WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT = defineCompatibilityRule({
+  id: 'word-hidden-cell-paragraph-joins-next',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'hidden-cell-paragraph-controls',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A table-cell paragraph whose paragraph mark is vanished (ECMA-376 §17.3.1.29 mark run properties, §17.3.2.41 vanish) and which holds no ink lays out nothing in the cell: no line, no stored or automatic spacing, and it is no neighbour of the blocks around it, as in body flow. The cell\'s last paragraph carries the end-of-cell mark and is kept as an ordinary line even when vanished. ECMA-376 does not describe the join; this is observed Word behaviour. Evidence: Windows Word 16.0.20527 PDFs of synthetic cells (Arial, exact 12pt lines, stored before/after 3/8pt, compatibility mode 15) with doNotUseHTMLParagraphAutoSpacing off and on, one variant per row between plain reference rows. Dropped: one and three leading vanished empty paragraphs before an automatic paragraph (it then opens the cell: its automatic before is dropped without the setting, its stored 3pt kept with it); a leading one whose own stored before/after is 5/11pt (its spacing is dropped too); one between two automatic paragraphs (gap 14pt without the setting, 8 + 3pt with it) and between two stored 3/8pt paragraphs (8pt, 11pt); one between an automatic paragraph and a nested table (the paragraph keeps its after before the table); and a leading one before a nested table (the table opens the cell). Kept as a 12pt line: a trailing vanished empty paragraph (the paragraph before it keeps its after) and the sole vanished paragraph of a cell; control 052 of the automatic-spacing matrix agrees. Not covered by this rule: a paragraph with visible text and a vanished mark, which Word joins onto the next paragraph\'s line; which paragraph\'s properties govern that joined line is not measured, so it keeps its own line here, as in body flow.',
+});
+
 export const WORD_TRAILING_STRUCTURAL_CELL_MARKER = defineCompatibilityRule({
   id: 'word-trailing-structural-cell-marker',
   evidence: {
@@ -535,6 +569,26 @@ export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
   },
   description: 'Resolve the bottom edge of a vertically merged cell from its terminal continuation cell before applying shared-edge conflict rules. Library policy, no Office measurement: terminal border of a vertical merge (PR #1032); the ECMA-376 §17.4.66 tcBorders note does not address vMerge.',
 });
+
+export const WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-vertical-merge-interior-border-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vmerge-interior-border-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.4.85 vMerge joins cells into one merged cell, so no horizontal rule is drawn between its rows, and §17.4.66 tcBorders does not say whether a merged constituent\'s own bottom border still takes space. Windows Word 16.0.20527 controls (4-row tables of 20pt atLeast rows, Times New Roman 11pt, vAlign bottom text; two- and three-row merges in the first column, ending on or before the last row; single 0.5pt and 3pt borders; on and off a 20pt line grid; with and without adjustLineHeightInTable; compatibility modes 14 and 15) show that the bottom border of every constituent except the last one is charged to the row below it like an ordinary rule between rows, though it is not drawn: a 0.5pt border on the first merged cell makes the next row 0.5pt taller and moves its text down 0.5pt (3pt: 3pt), a three-row merge charges both interior borders, a taller next row still grows by the border, and a border only on the last constituent charges nothing inside the merge. The table bottom keeps the terminal continuation border (WORD_VERTICAL_MERGE_TERMINAL_BORDER). The controls set the borders on the cells themselves; a table-level insideH reaching a merged cell was not measured and charges nothing.',
+});
+
+/** WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: the width a merged
+ * constituent's own bottom border charges to the row below inside the merge. */
+export function wordVerticalMergeInteriorBorderPt(bottom: TableBorderInput | null): number {
+  void WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT;
+  if (!bottom || bottom.authoredStyle === 'nil' || bottom.authoredStyle === 'none') return 0;
+  return Number.isFinite(bottom.widthPt) && bottom.widthPt > 0 ? bottom.widthPt : 0;
+}
 
 export const WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE = defineCompatibilityRule({
   id: 'word-vertical-section-upright-block-table',

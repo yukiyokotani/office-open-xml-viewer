@@ -21,7 +21,7 @@ import type {
   RetainedTableAcquisition,
   RetainedTableAcquisitionDependencies,
 } from './table-acquisition.js';
-import type { LayoutRect, LayoutServices, SectionFlow } from './types.js';
+import type { LayoutRect, LayoutServices, WritingMode } from './types.js';
 
 /** One acquired body-table occurrence and the point-space placement facts that
  * bind it to the current retained-layout session. */
@@ -44,10 +44,9 @@ export interface PhysicalAnchorFrame {
   readonly marginRight: number;
   readonly marginTop: number;
   readonly marginBottom: number;
-  readonly physicalPageWidthPt: number;
-  /** Section-flow counter-clockwise frame; absent for the Transitional vertical
-   * frame, whose established clockwise projection is unchanged. */
-  readonly sectionFlow?: SectionFlow;
+  /** The section frame (sectionWritingMode) whose canonical matrix maps
+   * between this upright physical page and the section-logical frame. */
+  readonly writingMode: WritingMode;
 }
 
 /** The authority a nested text-box story inherits from the state that owns it. */
@@ -198,5 +197,6 @@ export type BodyMeasurementContext = Readonly<Pick<
   | 'noteReferenceNumber'
   | 'verticalCJK'
   | 'verticalAllRotated'
+  | 'uprightPhysicalTable'
   | 'containerShading'
 >>;

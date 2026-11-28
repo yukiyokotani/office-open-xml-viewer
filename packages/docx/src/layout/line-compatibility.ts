@@ -90,7 +90,31 @@ export const WORD_FIXED_PARAGRAPH_AUTO_SPACING_STORED_MARGINS = defineCompatibil
     version: '16.113.3',
     platform: 'macOS 27.0',
   },
-  description: 'With doNotUseHTMLParagraphAutoSpacing enabled, Word for Mac retains stored paragraph before/after spacing instead of imposing Part 4 §14.8.3.15 fixed 5pt/10pt automatic margins. Eighteen fixed-setting documents and eighteen HTML-setting counterexamples cover direct and inherited automatic flags, explicit false, missing/zero/5pt/20pt stored values, line-unit conflicts, adjacent automatic paragraphs and page edges. Three faces at 8/12/24pt and a separate 6/18/36pt Normal-style-size sweep show no face- or inline-size-dependent amount. The fixed-setting projection preserves the already resolved stored numerical margins; it does not invent a second line-unit interpreter. Without that setting, the separate consumer HTML-em policy remains unchanged. This is an approved Word compatibility choice, not the normative fixed-pair rule or a claim that other Office versions/HTML consumers share this behavior. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: 'With doNotUseHTMLParagraphAutoSpacing enabled, Word for Mac retains stored paragraph before/after spacing instead of imposing Part 4 §14.8.3.15 fixed 5pt/10pt automatic margins. Eighteen fixed-setting documents and eighteen HTML-setting counterexamples cover direct and inherited automatic flags, explicit false, missing/zero/5pt/20pt stored values, line-unit conflicts, adjacent automatic paragraphs and page edges. Three faces at 8/12/24pt and a separate 6/18/36pt Normal-style-size sweep show no face- or inline-size-dependent amount. The fixed-setting projection preserves the already resolved stored numerical margins; it does not invent a second line-unit interpreter. Without that setting, WORD_HTML_PARAGRAPH_AUTO_SPACING applies. This is an approved Word compatibility choice, not the normative fixed-pair rule or a claim that other Office versions/HTML consumers share this behavior. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+});
+
+export const WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP = defineCompatibilityRule({
+  id: 'word-fixed-paragraph-spacing-additive-gap',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'html-paragraph-auto-spacing-controls',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.33 makes the gap between two paragraphs the maximum of the first one\'s space after and the second one\'s space before, and Word folds them that way while Part 4 §14.8.3.15 doNotUseHTMLParagraphAutoSpacing is off. With the setting on, Word adds the two for every adjacent paragraph pair, automatic flags on or off. Evidence: Windows Word 16.0.20527 PDFs of 25 synthetic fixed-setting controls (Arial, exact 12pt lines, stored before/after 3/8pt, compatibility mode 15) beside their setting-off counterparts. Two adjacent automatic paragraphs step 12 + 8 + 3 = 23pt (14pt maximum without the setting) whatever the docDefaults, Normal-style, paragraph-style, paragraph-mark or inline size (8 to 36pt). An automatic paragraph before or after a stored 3/8pt one also adds (8 + 3), in body flow, between items of one numId, of numIds sharing an abstract definition and across list levels, and inside three-paragraph and mixed plain/automatic table cells; a paragraph whose stored before or after is 0 adds nothing on that side. The first body and first cell paragraph keep their stored before (WORD_FIXED_PARAGRAPH_AUTO_SPACING_STORED_MARGINS). A Windows Word 16.0.20430 retest of three-paragraph controls without automatic flags (stored 0/5/20pt on both sides) steps 13.8/23.8/53.8pt, so stored-only neighbours add too, while the same paragraphs fold to the maximum without the setting. A follow-up set of 16 controls on the same build measures the other flows and contextualSpacing with the setting on and off. Headers, footers, footnotes, VML text boxes and text frames add too (8 + 3pt between an automatic and the next automatic or stored paragraph; the first header, text-box and frame paragraph keeps its stored 3pt before). With contextualSpacing, each toggling side of a same-style pair removes its own contribution and the other side is kept whole: an earlier-only toggle leaves the later before (3pt for 8/3, 8pt for 3/8, where the maximum fold leaves 0 and 5pt), a later-only toggle leaves the earlier after, both toggles leave 0, and paragraphs of different styles add (11pt); automatic paragraphs behave the same. A paragraph with automatic flags and no stored value anywhere has 0pt on that side; stored values from its paragraph style apply (5/11pt), as do automatic flags inherited from the style.',
+});
+
+export const WORD_HTML_PARAGRAPH_AUTO_SPACING = defineCompatibilityRule({
+  id: 'word-html-paragraph-auto-spacing',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'html-paragraph-auto-spacing-controls',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.33 beforeAutospacing/afterAutospacing ask for the spacing an HTML user agent would give the paragraph, and Part 4 §14.8.3.15 says the same while doNotUseHTMLParagraphAutoSpacing is off; neither, nor the [MS-OI29500] §2.1.60 note on §17.3.1.33 (which covers only line-unit inheritance), gives an amount or says where it applies. Observed Word behaviour without the fixed setting: (1) each automatic side is 14pt; (2) like an HTML margin at a box edge, it is dropped before the first block of a table cell, the document body, a header and a text box, and after the last block of a table cell; (3) like the zero margins of HTML list items, it is dropped between two adjacent paragraphs of the same list, at any level: the earlier one loses its automatic after, the later one its automatic before. A list is one abstract numbering definition (§17.9.15), so numIds sharing it continue the list. Stored (non-automatic) values, explicit 0 included, stay, and adjacent margins still fold by the §17.3.1.33 maximum and §17.3.1.9 contextualSpacing. Evidence: 61 synthetic controls (Arial, exact 12pt lines, stored before/after 3/8pt, compatibility mode 15) exported by Windows Word 16.0.20527. The amount stays 14.0pt for both-sided, before-only and after-only paragraphs and between adjacent automatic paragraphs while the docDefaults, Normal-style, paragraph-style or paragraph-mark size is 8, 11, 20 or 36pt (inline 12pt), and while the inline size is 8, 20 or 36pt. Dropped: before the first body paragraph (also after a leading vanished empty paragraph, but not after a leading table); before the first and after the last paragraph of a cell (single, three-paragraph, plain+automatic and automatic+plain cells; a paragraph after or before a nested table keeps that side); before the first paragraph of a header and of a text box; between items of one numId, across levels 0/1, of numIds sharing an abstract definition, of style-defined numbering, next to a stored, after-only, before-only or plain item, and across a vanished unnumbered paragraph. Kept: next to an unnumbered paragraph or another abstract definition, across a vanished numbered paragraph to an unnumbered one, after the last paragraph of a footer and of the body, and before the first paragraph after a continuous section break. contextualSpacing between same-style automatic paragraphs leaves no gap. With the fixed setting every control keeps the stored 3/8pt values on every edge and list item (WORD_FIXED_PARAGRAPH_AUTO_SPACING_STORED_MARGINS), and adjacent sides add instead of folding (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP). Public-corpus Word PDFs agree (14.0pt gaps at 10.5/12/18pt text; a 40-row table of one-paragraph cells fits one page). Library scope: footer and note starts, note and text-box ends and the first paragraph of a nextPage section were not measured and keep their automatic sides; page-top suppression after a page break belongs to the pagination rules. In body flow, and in table cells except for the last paragraph of the cell (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT), a swallowed vanished paragraph is no neighbour. A follow-up set of 16 controls on the same build agrees: 14pt gaps between automatic paragraphs of a header, footer, footnote, VML text box and text frame; the first paragraph of a text frame keeps its automatic before; automatic flags inherited from a paragraph style apply; and contextualSpacing folds automatic sides like stored ones.',
 });
 
 export const LIBRARY_ABSENT_FACE_FALLBACK_LINE_BOX = defineCompatibilityRule({
@@ -543,7 +567,7 @@ export const WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION = defineCompatibilityRule({
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'Word 16.0 build 20430 on Windows, compatibility mode 14, allocates a single-spaced inline-picture line to ceil(natural height / line pitch) whole cells and centers the object in the extra space. ECMA-376 §20.4.2.8 makes inline objects affect line height like glyphs; §17.6.5 and §17.3.1.32 define grid participation but not this tall-object rounding. Library policy reuses the existing grid allocation and centered baseline when inline pictures, charts or shapes supply the natural ascent and the font design height does not exceed that natural box, with automatic or omitted spacing. Smaller objects retain the taller text line\'s grid policy. The Office evidence establishes the single-spaced picture class only; automatic multiples and other inline payloads reuse that allocation without claiming separately measured Office parity. Off-grid, snap-disabled, exact and atLeast lines retain their existing paths; floating-anchor reference origins are independent. Evidence: issue #1674 / PR #1796 (a 221.2pt picture takes 240pt of grid).',
+  description: 'Word 16.0 build 20430 on Windows, compatibility mode 14, allocates a single-spaced inline-picture line to ceil(natural height / line pitch) whole cells and centers the object in the extra space. ECMA-376 §20.4.2.8 makes inline objects affect line height like glyphs; §17.6.5 and §17.3.1.32 define grid participation but not this tall-object rounding. Library policy reuses the existing grid allocation and centered baseline when inline pictures, charts or shapes supply the natural ascent and the font design height does not exceed that natural box, with automatic or omitted spacing. Smaller objects retain the taller text line\'s grid policy. The Office evidence establishes the single-spaced picture class only; automatic multiples and other inline payloads reuse that allocation without claiming separately measured Office parity. Off-grid, snap-disabled and atLeast lines retain their existing paths, and exact lines follow WORD_INLINE_OBJECT_EXACT_LINE; floating-anchor reference origins are independent. Evidence: issue #1674 / PR #1796 (a 221.2pt picture takes 240pt of grid).',
 });
 
 export const WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED = defineCompatibilityRule({
@@ -1551,6 +1575,89 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
   description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. Additional Windows mode-15 controls with Times New Roman, Arial and Yu Mincho distinguish document defaults, resolved Normal/default styles, an applied paragraph style, direct drawing-run font/size and direct paragraph-mark formatting: automatic leading follows the effective outer drawing run, with paragraph style below direct run rPr; a direct paragraph mark does not select it. Literal pictures and WPS shapes agree. Grid-snapped allocation remains independent, and the existing document-script font-slot policy is preserved. When an authored face is unavailable, the selected fallback supplies its own metrics; direct paragraph-mark size must not compensate for that resource difference. ECMA-376 §17.7.5.1 leaves omitted document defaults application-defined. Without document/style font declarations, preserve unspecified font slots and selected generic metrics rather than guessing an Office host default or borrowing the direct paragraph mark. In controlled inline-object clones, explicit Times New Roman 10pt default-font declarations make the renderer’s source-case page boundaries agree with Word; their fontless originals can differ. Fully authored Windows mode-15 auto-single controls use outer run8/20pt, object8/40pt and mark8pt: 16 WPS cases cover Times New Roman/Arial, four literal-picture cases cover Times New Roman, and four static VML textbox cases cover Times New Roman. DrawingML WPS and literal pictures reserve their outer-run natural minimum as extra ascent while preserving actual suffix descent; large objects retain their actual geometry. The static in-flow VML textbox controls have the same minimum advance but keep their object top, reserving extra below the visible box. The minimum is limited to horizontal off-grid main-body flow, with mixed ordinary text admitted only for DrawingML; mixed VML, relative VML, active WordArt including retained textbox content, unknown/public origins, ruby, numbering, frames and other stories remain outside this measured class. The parser retains actual source provenance; this minimum is not an invisible glyph or additional descent. The earlier box-height-only observation applies when the resolved outer-run minimum does not exceed the actual union. Minimum-height (atLeast) spacing remains outside this outer-run minimum rule. Controlled cases retain a preexisting object-top mismatch with Word even when line advance agrees; synthetic host metrics must not compensate for that separate limitation. Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
 
+export const WORD_INLINE_OBJECT_POSITION = defineCompatibilityRule({
+  id: 'word-inline-object-position',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-object-position-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.2.24 raises or lowers the content of a run by w:position relative to the baseline but does not say how a positioned inline object takes part in its line. Windows Word 16.0.20527 controls (compatibility mode 15, Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures; 16pt and 30pt objects; position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides; automatic single and 1.5 spacing) move the object with its run: its box ends position above the baseline instead of on it, and the line takes the union of that shifted box with the text, exactly as a positioned glyph box. A raised object adds its raise above the baseline; a lowered one moves its descent below the baseline and the text rises toward the line top (a 16pt object lowered 15pt in a text line: 24.4pt line, text 6.6pt higher than unpositioned). DrawingML and VML pictures agree to 0.1pt, and the automatic multiple adds the same leading as without a position. Exact line spacing is a separate rule (WORD_INLINE_OBJECT_EXACT_LINE).',
+});
+
+/** WORD_INLINE_OBJECT_POSITION: an inline object's extent around the
+ * baseline after its run's §17.3.2.24 raise (+) / lower (-). */
+export function wordInlineObjectPositionedExtentPx(
+  heightPx: number,
+  positionPx: number,
+): Readonly<{ ascentPx: number; descentPx: number }> {
+  void WORD_INLINE_OBJECT_POSITION;
+  return {
+    ascentPx: Math.max(0, heightPx + positionPx),
+    descentPx: Math.max(0, -positionPx),
+  };
+}
+
+export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
+  id: 'word-inline-object-exact-line',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-object-position-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Vertical sections (tbRl and tbLrV, exact 24pt, compatibility mode 15; the same DrawingML and VML pictures with position -5, 0 and +5pt) keep the exact line too: the line pitch and the text do not move, but the upright object hangs from the line top moved by its run position instead of standing on the baseline (a 40pt-wide picture lowered 5pt shows the 19pt between its top and the far line edge; DrawingML clipped to the line, VML overlapping the next line). In tbLrV the VML picture does the same, but the clipped DrawingML picture hangs from the mirrored strip edge (lowered 5pt it leaves the 5pt gap on the other side of the strip). The upright extent itself is word-vertical-inline-picture-upright-extent. Library scope: lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); charts and math keep their established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
+});
+
+/** WORD_INLINE_OBJECT_EXACT_LINE gate: an exact line with inline objects keeps
+ * the four-fifths baseline of an exact text line. */
+export function wordInlineObjectExactLineApplies(input: Readonly<{
+  lineSpacing: LineSpacing | null | undefined;
+  wrapOrigin: boolean;
+  hasInlineObject: boolean;
+}>): boolean {
+  void WORD_INLINE_OBJECT_EXACT_LINE;
+  const spacing = input.lineSpacing;
+  return input.hasInlineObject && !input.wrapOrigin
+    && spacing?.rule === 'exact' && spacing.value > 0;
+}
+
+/** WORD_INLINE_OBJECT_EXACT_LINE: in a vertical section an object of an exact
+ * line hangs from the line top (moved by its run position) instead of standing
+ * on the baseline. */
+export function wordInlineObjectExactLineHangsFromTop(exactObjectLine: boolean, vertical: boolean): boolean {
+  void WORD_INLINE_OBJECT_EXACT_LINE;
+  return exactObjectLine && vertical;
+}
+
+/** WORD_INLINE_OBJECT_EXACT_LINE: in a tbLrV line a clipped DrawingML
+ * picture hangs from the mirrored strip edge (VML follows the line). */
+export function wordInlineObjectExactLineReflectsClipped(clipped: boolean, blockReflectedLine: boolean): boolean {
+  void WORD_INLINE_OBJECT_EXACT_LINE;
+  return clipped && blockReflectedLine;
+}
+
+/** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture is clipped to its
+ * exact line box (outside table cells and text boxes); a VML picture is not. */
+export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticTextbox' | undefined): boolean {
+  return origin === 'drawingml';
+}
+
+export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
+  id: 'word-empty-mark-ascii-face',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'empty-mark-face-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (368 rows: three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, with and without a lines docGrid, compatibility modes omitted and 15) give every off-grid empty line the single-line height of the ascii face (1.15 em for Times New Roman/Arial, 1.2 em for Century), never the East Asian face, whatever the hint, language or document scripts; under a lines docGrid every case takes the grid pitch. A separate 24-case Windows page-edge matrix in modes 14 and 15 (11pt marks, 16.4pt pitch; ascii/eastAsia Times New Roman/MS Mincho, Arial/Yu Mincho and MS Mincho/Arial; 15, 15.5, 16.35 and 16.4pt remaining) shows that the ascii face also owns the content box used for grid page-edge admission: only the MS Mincho ascii mark with 15pt remaining moves to the next page; swapping MS Mincho into the eastAsia slot does not. A Windows Word export of a real off-grid mode-15 document agrees for SimSun/zh-CN marks with hint eastAsia, including empty table-cell paragraphs and the empty paragraph after a table. The real 20pt-grid document that once appeared to contradict the page-edge matrix does not: its Times New Roman mark box fits only because a preceding vertically merged table row ends about 0.5pt higher than in Word (an unrelated table-height difference); with Word\'s position the same box no longer fits. Inline object runs are outside this rule.',
+});
+
 /** Observed outer-run leading selection is bounded to mode-15 box-only body
  * paragraphs. The caller additionally admits only horizontal off-grid root
  * body flow; other stories, mixed text and legacy modes keep their old route. */
@@ -1560,14 +1667,25 @@ export function wordInlineDrawingRunLeadingApplies(
     lineSpacing?: Readonly<LineSpacing> | null;
     numbering?: unknown;
     framePr?: unknown;
-    runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
+    runs: readonly InlineObjectRunFacts[];
   }>,
 ): boolean {
   return compat.inlinePictureAutoLeading && !paragraph.numbering && !paragraph.framePr
     && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
     && paragraph.runs.length > 0
-    && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)
-      || (run.type === 'shape' && run.inline === true));
+    && paragraph.runs.every(isInlineDrawingRun);
+}
+
+type InlineObjectRunFacts = Readonly<{
+  type: string; anchor?: boolean; inline?: boolean; resourceKind?: string; anchorAcquisitionInput?: unknown;
+}>;
+
+/** An inline picture or drawing shape run; the placeholder of an unavailable
+ * inline picture is its picture. */
+export function isInlineDrawingRun(run: InlineObjectRunFacts): boolean {
+  return (run.type === 'image' && run.anchor !== true)
+    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image' && run.anchorAcquisitionInput === undefined)
+    || (run.type === 'shape' && run.inline === true);
 }
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
@@ -1739,3 +1857,47 @@ export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
   evidence: { kind: 'regression-test', reference: 'packages/docx/src/kinsoku-off-edges.test.ts#neither hangs nor pushes the mode15 Japanese OFF closing mark under %s' },
   description: 'Observed original Japanese paragraph-OFF body controls in unset/11/12/14/15: mode15 LEFT/BOTH/distribute and Kashida/Thai alignments retain the closing mark at the next line head without hanging or pushing; pre15 LEFT/BOTH/distribute retain one hanging mark. The version distinction is observed Office compatibility, not implied by ECMA37617.3.1.16. Initial capability requires canonical ordinary single-column horizontal LTR root body, document rules originally enabled, no complete-store floats, frame/section flow, grids other than a lines or charSpace-0 lines-and-chars grid (w2144-kinoff measured those alike), custom table presence including empty, numbering/tabs, ruby, controls, transformed/protected/nontext or complex/RTL runs. Homogeneous explicit Japanese is admitted; absent EA language requires actual Kana and does not synthesize a language tag. Chinese/Korean/mixed language and unmeasured placements keep previous behavior. Explicit punctuation or punctuation/kana compression with low/medium/high Kashida also retains its complete previous paragraph geometry: the existing scalar minima can allocate 6+6pt where the measured 12pt Word ON and OFF pair retains 12+12pt. Changing only the edges exposes that unresolved compression deficit. This withdraws unproved capability until the source-owned compression contract is established (#2079); it does not claim that Word ignores paragraph OFF in that class. Original controls without explicit compression remain admitted. The separately approved pre15 explicit punctuation/kana-compression Thai edge exception retains document head/tail prohibitions except the existing ten confirmed closing heads with overflow on; overflow off retains them all. Kana compression grants no additional head permissions. Head legality, tail legality and the one-character extension budget remain independent. The separate bounded edge view never supplies hanging, compression grouping, intrinsic or paint authority. Existing intrinsic paragraph-table atoms remain unchanged when the paragraph toggle is off. Word-box/partition observations do not establish all ink, source-SPACE or caret geometry.',
 });
+
+/** ECMA-376 §20.4.2.7 defines wp:extent as the object's final displayed size,
+ * and §20.4.2.8 makes an inline object occupy its line like a glyph of that
+ * size; neither (nor [MS-OI29500] for §§20.4.2.6-8 or §20.1.7.6) says how an
+ * a:xfrm rot of the object itself changes that line box. */
+export const WORD_INLINE_DRAWING_TURNED_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-inline-drawing-turned-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Word writes wp:extent of an inline drawing as its unturned size and lays it out in a base box that is the extent turned a quarter turn (cy wide, cx tall) when the object\'s own clockwise a:xfrm rot, taken modulo 360, lies in [45, 135) or [225, 315), and the authored extent otherwise. wp:effectExtent then widens that base box on its page edges as authored; Word does not derive it from the rotation or from effects. The unturned object is centred in the base box and turned about its centre, so at other angles its corners can overflow the line box and the column. Synthetic controls (a 200 x 100pt object between text on one line, Arial 11pt, A4): pictures at 0, 30, 45, 60, 90, 135, 180, 270 and -90 degrees, at 30/45/60/135 both with effectExtent 0 and with effectExtent set to the rotated bounding box; 90 degrees with flipH, flipV and both; 90 degrees with effectExtent l10 t20 r30 b40pt against the same at 0; 90 and 0 degrees with a 10pt outer shadow, with effectExtent 0 and with the shadow offset; a WPS rectangle with text at 0, 30, 45 and 90 degrees (45 also with the bounding-box effectExtent); a two-child wpg group at 0, 45 and 90 degrees. Every control matches the rule within 0.1pt in the following text position, the next line position and the object placement: 45, 60, 90, 270 and -90 are turned and 30, 135 and 180 are not; flips and shadows do not change the box. Corpus Word exports of two 90-degree inline photos agree. 225 and 315 degrees follow from the 180-degree symmetry of the turned box, not a control. Library scope: DrawingML pictures, WPS shapes and groups (an inline chart has no rotation; VML inline pictures and shapes, whose rotation is a CSS style, are unmeasured and keep the extent box).',
+});
+
+/** Projection of {@link WORD_INLINE_DRAWING_TURNED_FOOTPRINT}: whether an
+ * inline drawing with this clockwise a:xfrm rotation (degrees) is laid out in
+ * its quarter-turned (cy x cx) base box. */
+export function wordInlineDrawingTurnsFootprint(rotationDeg: number | null | undefined): boolean {
+  if (rotationDeg == null || !Number.isFinite(rotationDeg)) return false;
+  const turn = ((rotationDeg % 360) + 360) % 360;
+  return (turn >= 45 && turn < 135) || (turn >= 225 && turn < 315);
+}
+
+export const WORD_INLINE_ROTATED_PICTURE_LINE_CLIP = defineCompatibilityRule({
+  id: 'word-inline-rotated-picture-line-clip',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Word clips an inline picture turned by its own a:xfrm rot to the vertical extent of its line box (line top to line bottom, including the text descent below the picture); horizontally the turned picture is not clipped and may overflow the column and the page margin. ECMA-376 does not define this clip. In the inline-drawing-rotation-footprint controls (Windows Word 16.0.20527) the PDF clip of a 200 x 100pt picture at 30, 45, 60 and 135 degrees with effectExtent 0 is the turned rectangle cut at the line top and at the line bottom 2.3pt below the picture; with effectExtent covering the turned bounding box, at 90, 270, -90 and with flips the clip is the whole picture. WPS shapes and groups at 30 and 45 degrees are not clipped. Unturned pictures (including those in exact or atLeast lines) and VML pictures are outside this rule and unmeasured. Hit testing and element bounds follow the visible, clipped outline.',
+});
+
+/** Projection of {@link WORD_INLINE_ROTATED_PICTURE_LINE_CLIP}: whether an inline
+ * picture with this clockwise a:xfrm rotation (degrees) paints clipped to its
+ * line box's vertical extent. */
+export function wordInlinePictureClipsToLine(rotationDeg: number | null | undefined): boolean {
+  return rotationDeg != null && Number.isFinite(rotationDeg) && rotationDeg % 360 !== 0;
+}

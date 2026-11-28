@@ -1,6 +1,6 @@
 import { resolveBorderConflict, type BorderCandidate } from '../cell-border-conflict.js';
 import { retainedBorderTreatment } from './border-treatment.js';
-import { paragraphGapPt } from './paragraph-spacing.js';
+import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
@@ -11,6 +11,7 @@ import {
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
+  wordVerticalMergeInteriorBorderPt,
 } from './table-compatibility.js';
 import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import type {
@@ -73,7 +74,10 @@ function paragraphBlockAdvance(layout: ParagraphLayout): number {
  * between adjacent paragraphs, so it cannot be recovered by summing each
  * child's advance independently after table placement.
  */
-function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeometry {
+function resolveCellFlow(
+  blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
+): CellFlowGeometry {
   const placements: TableCellBlockLayout[] = [];
   let cursorPt = 0;
   let previousParagraph: ParagraphLayout | null = null;
@@ -89,22 +93,25 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
       const beforePt = layout.spacing.beforePt;
       const afterPt = layout.spacing.afterPt;
       const gapPt = previousParagraph
-        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt)
+        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt, paragraphGapFoldOf(layout))
         : beforePt;
-      const advancePt = block.structuralTrailing ? 0 : paragraphBlockAdvance(layout);
-      const offsetPt = cursorPt + (block.structuralTrailing ? 0 : gapPt);
+      const advancePt = block.ownsNoCellFlow ? 0 : paragraphBlockAdvance(layout);
+      const offsetPt = cursorPt + (block.ownsNoCellFlow ? 0 : gapPt);
       placements.push({ layout, offsetPt, advancePt });
-      if (!block.structuralTrailing) {
+      if (!block.ownsNoCellFlow) {
         cursorPt = offsetPt + advancePt;
         firstInkTopPt ??= offsetPt;
         lastInkBottomPt = Math.max(lastInkBottomPt, cursorPt);
         previousParagraph = layout;
         previousAfterPt = afterPt;
       }
-      if (layout.cellContainmentBounds) {
-        const containmentTopPt = offsetPt
-          + layout.cellContainmentBounds.yPt
-          - layout.flowBounds.yPt;
+      const ownContainmentTopPt = layout.cellContainmentBounds
+        ? layout.cellContainmentBounds.yPt - layout.flowBounds.yPt
+        : 0;
+      if (layout.cellContainmentBounds
+        && Math.max(0, ownContainmentTopPt + layout.cellContainmentBounds.heightPt)
+          - Math.min(0, ownContainmentTopPt) <= containmentLimitPt + 1e-6) {
+        const containmentTopPt = offsetPt + ownContainmentTopPt;
         const containmentBottomPt = containmentTopPt
           + layout.cellContainmentBounds.heightPt;
         firstInkTopPt = firstInkTopPt === undefined
@@ -143,6 +150,16 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
   };
 }
 
+/** A cell's flow as row layout materializes it; a recovered fragment's cell
+ * applies its admission containment limit (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP)
+ * so its text sits where pagination admitted it. */
+function cellFlow(cell: TableCellLayoutInput): CellFlowGeometry {
+  return resolveCellFlow(
+    cell.verticalMerge === 'continue' ? [] : cell.blocks,
+    cell.recoveryContainmentLimitPt,
+  );
+}
+
 function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
   const containmentTopPt = flow.cellContainmentTopPt ?? 0;
   const containmentBottomPt = flow.cellContainmentBottomPt ?? 0;
@@ -157,11 +174,17 @@ function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
  * Return the authored block-flow height used by table row layout. Pagination
  * calls this same fold while choosing legal fragment boundaries so paragraph
  * spacing collapse cannot disagree with the geometry materialized afterwards.
+ *
+ * `containmentLimitPt` is for the fresh-band recovery only: a paragraph's
+ * layoutInCell containment interval whose own extent exceeds it is left out,
+ * top and bottom alike (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP). The recovered
+ * cells carry the same limit, so row layout materializes the admitted flow.
  */
 export function measureTableCellBlockFlowHeightPt(
   blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
 ): number {
-  return cellContentRequiredHeightPt(resolveCellFlow(blocks));
+  return cellContentRequiredHeightPt(resolveCellFlow(blocks, containmentLimitPt));
 }
 
 interface RowSpacingInsets {
@@ -237,31 +260,44 @@ export function mergeEndRow(
 ): number {
   let endRow = startRow;
   for (let rowIndex = startRow + 1; rowIndex < rows.length; rowIndex += 1) {
-    const continuation = rows[rowIndex]?.cells.find((cell) => (
-      cell.columnStart === columnStart
-      && cell.columnSpan === columnSpan
-      && cell.verticalMerge === 'continue'
-    ));
-    if (!continuation) break;
+    if (!continuesMergeFromAbove(rows[rowIndex - 1], rows[rowIndex]!, columnStart, columnSpan)) break;
     endRow = rowIndex;
   }
   return endRow;
 }
 
 /**
+ * Whether `row` continues, in these grid columns, a vertical merge of the
+ * row `above` it. ECMA-376 §17.4.84 relates a continuation to the cell above
+ * it in the table: the two rows follow each other in the source. A repeated
+ * header row and the body row a page fragment places under it do not, so
+ * their merges stay apart.
+ */
+export function continuesMergeFromAbove(
+  above: TableRowLayoutInput | undefined,
+  row: TableRowLayoutInput,
+  columnStart: number,
+  columnSpan: number,
+): boolean {
+  const matches = (cell: TableCellLayoutInput): boolean =>
+    cell.columnStart === columnStart && cell.columnSpan === columnSpan;
+  return above !== undefined && above.logicalRowIndex + 1 === row.logicalRowIndex
+    && row.cells.some((cell) => matches(cell) && cell.verticalMerge === 'continue')
+    && above.cells.some((cell) => matches(cell) && cell.verticalMerge !== 'none');
+}
+
+/**
  * The vertical-merge role `cell` of `row` (input row `rowIndex`) plays in
  * this input's grid. ECMA-376 §17.4.84 relates a continuation to the merged
- * cell above it in the same grid, so every cell keeps its authored role,
- * except in a cell-owner segment projection
- * (`segmentOpeningLogicalRowIndex`, table-owner-runs.ts): there a
- * continuation of the segment's first own row with no merged cell above it in
- * this grid lost its restart to another segment, and opens its region as an
- * empty owner with its own borders, shading (materializeTableRow) and margins
- * (resolveRowTrack) (library projected-segment contract). Its content stays
- * suppressed, since its authored role is unchanged. The row is matched by its
- * logical index, so every occurrence of it — each fragment of a row cut
- * across pages included, whose id is its own — is projected alike: a fragment
- * that opens its own grid has no merged cell above it either.
+ * cell above it in the same grid (continuesMergeFromAbove), so every cell
+ * keeps its authored role except a continuation with no cell of its merge
+ * above it in this grid: the first own row of a cell-owner segment
+ * (table-owner-runs.ts), or the first row of a page fragment below the
+ * merge's restart, also when repeated header rows stand above it. Its restart
+ * is elsewhere, and it opens its region here as an empty owner with its own
+ * borders, shading (materializeTableRow) and margins (resolveRowTrack)
+ * (library projected-region contract). Its content stays suppressed, since
+ * its authored role is unchanged.
  */
 function gridMergeRole(
   input: TableLayoutInput,
@@ -283,15 +319,12 @@ export function projectedMergeRole(
   row: TableRowLayoutInput,
   cell: TableCellLayoutInput,
 ): TableCellLayoutInput['verticalMerge'] {
-  if (cell.verticalMerge !== 'continue' || row.logicalRowIndex !== segmentOpeningLogicalRowIndex) {
-    return cell.verticalMerge;
-  }
-  const mergedAbove = above?.cells.some((candidate) => (
-    candidate.verticalMerge !== 'none'
-    && candidate.columnStart === cell.columnStart
-    && candidate.columnSpan === cell.columnSpan
-  )) ?? false;
-  return mergedAbove ? 'continue' : 'restart';
+  void segmentOpeningLogicalRowIndex;
+  if (cell.verticalMerge !== 'continue') return cell.verticalMerge;
+  // A continuation with no cell of its merge above it in this grid opens
+  // its region here: the first row of a segment or of a page fragment, also
+  // below repeated header rows, which are not rows of its merge.
+  return continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan) ? 'continue' : 'restart';
 }
 
 function semanticRowFloor(row: TableRowLayoutInput): number {
@@ -391,7 +424,7 @@ function resolveRowTrack(
   }
   const stillOpen: OpenMergeTrack[] = [];
   for (const merge of owners) {
-    if (next?.cells.some((cell) => continuesMerge(cell, merge.cell))) {
+    if (next && continuesMergeFromAbove(row, next, merge.cell.columnStart, merge.cell.columnSpan)) {
       stillOpen.push(merge);
       continue;
     }
@@ -399,7 +432,7 @@ function resolveRowTrack(
       merge.cell,
       flowOf(merge.cell),
       { topPt: merge.topInsetPt, bottomPt: spacing.bottomPt },
-    );
+    ) + 2 * (row.spacingGeometry?.borderPt ?? 0);
     store.raiseContentHeight(merge.start, requiredPt);
     const deficitPt = requiredPt - store.sum(merge.start, rowIndex);
     if (deficitPt <= 0) continue;
@@ -463,7 +496,7 @@ function toConflictCandidate(
 }
 
 function physicalCellEdges(
-  cell: TableCellLayoutInput,
+  cell: Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>,
   table: TableEdgeInputs,
   exception: TableEdgeInputs | null,
   rowIndex: number,
@@ -534,6 +567,66 @@ function physicalCellEdges(
   return bidiVisual
     ? { top, right: logicalLeft, bottom, left: logicalRight }
     : { top, right: logicalRight, bottom, left: logicalLeft };
+}
+
+/**
+ * Widths of the collapsed rules on the physical left and right of each cell
+ * of one row, before the cells are acquired. Cells of the same row decide a
+ * side rule (ECMA-376 §17.4.66); a skipped grid column leaves the cell's own
+ * candidate.
+ */
+export function collapsedRowSideRuleWidthsPt(
+  cells: readonly (Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>
+    /** The row exception of the row that opens the cell's vertical merge. */
+    & { readonly ownerException?: TableEdgeInputs | null })[],
+  table: TableEdgeInputs,
+  exception: TableEdgeInputs | null,
+  rowIndex: number,
+  rowCount: number,
+  columnCount: number,
+  bidiVisual: boolean,
+): readonly Readonly<{ leftPt: number; rightPt: number }>[] {
+  const edges = cells.map((cell) =>
+    physicalCellEdges(cell, table, cell.ownerException === undefined ? exception : cell.ownerException,
+      rowIndex, rowIndex, rowCount, columnCount, bidiVisual));
+  const widthPt = (first: BorderCandidate | null, second: BorderCandidate | null): number =>
+    visibleBorder(resolveBorderConflict(first, second))?.widthPt ?? 0;
+  return cells.map((cell, index) => {
+    const before = cells[index - 1];
+    const after = cells[index + 1];
+    const beforeEdges = before && before.columnStart + before.columnSpan === cell.columnStart ? edges[index - 1]! : null;
+    const afterEdges = after && cell.columnStart + cell.columnSpan === after.columnStart ? edges[index + 1]! : null;
+    const leftNeighbour = bidiVisual ? afterEdges : beforeEdges;
+    const rightNeighbour = bidiVisual ? beforeEdges : afterEdges;
+    return {
+      leftPt: widthPt(leftNeighbour?.right ?? null, edges[index]!.left),
+      rightPt: widthPt(edges[index]!.right, rightNeighbour?.left ?? null),
+    };
+  });
+}
+
+/**
+ * The widest side rules along the rows a cell covers: its own row and, for
+ * the cell that opens a vertical merge, every row of that merge. `rules`
+ * holds each row's cells by first grid column
+ * (collapsedRowSideRuleWidthsPt), with `continues` on a continuation.
+ */
+export function widestSideRulesAlongMergePt(
+  rules: readonly ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[],
+  rowIndex: number,
+  columnStart: number,
+  opensMerge: boolean,
+): Readonly<{ leftPt: number; rightPt: number }> | undefined {
+  const own = rules[rowIndex]?.get(columnStart);
+  if (!own) return undefined;
+  let { leftPt, rightPt } = own;
+  for (let below = rowIndex + 1; opensMerge && below < rules.length; below += 1) {
+    const continuation = rules[below]!.get(columnStart);
+    if (!continuation?.continues) break;
+    leftPt = Math.max(leftPt, continuation.leftPt);
+    rightPt = Math.max(rightPt, continuation.rightPt);
+  }
+  return { leftPt, rightPt };
 }
 
 function candidateInput(candidate: BorderCandidate | null): TableBorderInput | null {
@@ -611,10 +704,19 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
     const exceptionRowIndex = terminal && cell !== owner.input
       ? owner.lastRowIndex
       : owner.rowIndex;
+    const rowException = input.rows[exceptionRowIndex]?.exceptionBorders ?? null;
+    // A continuation that opens its merge here takes the side rules of the
+    // row that opens the merge in the source; the top and bottom edges stay
+    // with its own row, and the bottom with the merge's last row.
+    const opening = terminal ? undefined : owner.input.mergeOpenerExceptionBorders;
+    const exception = opening === undefined ? rowException : (opening === null && rowException === null ? null : {
+      top: rowException?.top ?? null, bottom: rowException?.bottom ?? null, insideH: rowException?.insideH ?? null,
+      left: opening?.left ?? null, right: opening?.right ?? null, insideV: opening?.insideV ?? null,
+    });
     return physicalCellEdges(
       cell,
       input.borders,
-      input.rows[exceptionRowIndex]?.exceptionBorders ?? null,
+      exception,
       owner.rowIndex,
       owner.lastRowIndex,
       rowCount,
@@ -678,8 +780,17 @@ function collapsedHorizontalBoundaryWidthsPt(
       effectiveCellSpacingPt(input.rows[boundaryIndex - 1]) > 0
       || effectiveCellSpacingPt(input.rows[boundaryIndex]) > 0
     ) return 0;
-    return segments.reduce((maximumPt, segment) => {
-      if (!segment) return maximumPt;
+    return segments.reduce((maximumPt, segment, column) => {
+      if (!segment) {
+        // WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: inside a vertical
+        // merge no rule is drawn, but the merged constituent above still
+        // charges its own bottom border to the row below.
+        const constituent = boundaryIndex > 0 ? input.rows[boundaryIndex - 1]?.cells.find((cell) => (
+          cell.verticalMerge !== 'none'
+          && cell.columnStart <= column && column < cell.columnStart + cell.columnSpan
+        )) : undefined;
+        return Math.max(maximumPt, wordVerticalMergeInteriorBorderPt(constituent?.borders.bottom ?? null));
+      }
       const winner = resolveBoundary(segment.above.border, segment.below.border, segment.edge);
       return Math.max(maximumPt, winner?.border.widthPt ?? 0);
     }, 0);
@@ -859,20 +970,34 @@ function materializeBorders(
       push(edges.left, 'left', { xPt: left + t / 2, yPt: top + t / 2 }, { xPt: left + t / 2, yPt: bottom - t / 2 });
       push(edges.right, 'right', { xPt: right - t / 2, yPt: top + t / 2 }, { xPt: right - t / 2, yPt: bottom - t / 2 });
     };
-    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length), input.borders);
+    // The table's left and right rules are its start and end ones
+    // (§17.4.36, §17.4.13): a visually right-to-left table mirrors them.
+    // Its side rules straddle the edges of the grid, as the column solver
+    // sizes it: the border box is half a rule wider than the grid on either
+    // side, and the first cell is twice the spacing in from the grid edge.
+    rectangle((rowXPt[0] ?? 0) - t / 2, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt + t / 2, rowY(input.rows.length),
+      input.bidiVisual ? { ...input.borders, left: input.borders.right, right: input.borders.left } : input.borders);
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);
       for (const cell of row.cells) {
+        // A vertically merged cell is one box from its first row here to
+        // its last; after a page break its first row is a continuation.
+        if (cell.verticalMerge === 'continue'
+          && continuesMergeFromAbove(input.rows[rowIndex - 1], row, cell.columnStart, cell.columnSpan)) continue;
+        const lastRowIndex = cell.verticalMerge === 'none' ? rowIndex
+          : mergeEndRow(input.rows, rowIndex, cell.columnStart, cell.columnSpan);
+        const lastSpacing = lastRowIndex === rowIndex ? spacing : rowSpacingInsets(input.rows, lastRowIndex);
         const start = columnX(rowIndex, cell.columnStart);
         const end = columnX(rowIndex, cell.columnStart + cell.columnSpan);
         const insets = tableCellHorizontalSpacingInsets(row.cellSpacingPt, cell.columnStart,
           cell.columnSpan, input.columnWidthsPt.length, true);
-        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, rowIndex,
+        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, lastRowIndex,
           input.rows.length, input.columnWidthsPt.length, input.bidiVisual);
         rectangle(Math.min(start, end) + (input.bidiVisual ? insets.endPt : insets.startPt),
           rowY(rowIndex) + spacing.topPt + (rowIndex === 0 ? t : 0),
           Math.max(start, end) - (input.bidiVisual ? insets.startPt : insets.endPt),
-          rowY(rowIndex + 1) - spacing.bottomPt - (rowIndex === input.rows.length - 1 ? t : 0),
+          rowY(lastRowIndex + 1) - lastSpacing.bottomPt
+            - (lastRowIndex === input.rows.length - 1 ? t : 0),
           { top: visibleBorder(edges.top), bottom: visibleBorder(edges.bottom),
             left: visibleBorder(edges.left), right: visibleBorder(edges.right) });
       }
@@ -1411,7 +1536,7 @@ export function layoutTable(
   }
   const flows = new Map<string, CellFlowGeometry>();
   input.rows.forEach((row) => row.cells.forEach((cell) => {
-    flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
+    flows.set(cell.id, cellFlow(cell));
   }));
   const boundaries = resolvedBoundaries(input);
   const ruleInsetsPt = rowRuleInsetsPt(input, boundaries);
@@ -1553,7 +1678,9 @@ function materializeTableRow(
     const lastRowSpacing = rowSpacingInsets(input.rows, lastRowIndex);
     const cellBottomPt = yPt
       + (rowOffsets[lastRowIndex + 1] ?? rowOffsets[rowIndex + 1] ?? 0)
-      - lastRowSpacing.bottomPt;
+      - lastRowSpacing.bottomPt
+      // A spaced box ends above the table's own bottom rule.
+      - (row.spacingGeometry ? ruleInsetsPt.bottom[lastRowIndex] ?? 0 : 0);
     const logicalStartX = columnX(cell.columnStart);
     const logicalEndX = columnX(
       Math.min(input.columnWidthsPt.length, cell.columnStart + cell.columnSpan),
@@ -1738,7 +1865,7 @@ export function laidOutTableTracks(
       }
       const flows = new Map(candidate.cells.map((cell) => [
         cell.id,
-        resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks),
+        cellFlow(cell),
       ] as const));
       return materializeTableRow(input, rowIndex, { ...frame, flows }, placement, candidate);
     },
@@ -1856,7 +1983,8 @@ function rowCoverage(
   const covered = new Set<TableCellLayoutInput>();
   for (const merge of open) {
     claim(merge.cell);
-    const continuation = row.cells.find((cell) => continuesMerge(cell, merge.cell));
+    const continuation = continuesMergeFromAbove(above, row, merge.cell.columnStart, merge.cell.columnSpan)
+      ? row.cells.find((cell) => continuesMerge(cell, merge.cell)) : undefined;
     if (continuation) covered.add(continuation);
   }
   for (const cell of row.cells) {
@@ -1873,7 +2001,7 @@ export function tablePrefixTracks(input: TableLayoutInput, services?: LayoutServ
   const flowOf = (cell: TableCellLayoutInput): CellFlowGeometry => {
     let flow = flows.get(cell);
     if (!flow) {
-      flow = resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks);
+      flow = cellFlow(cell);
       flows.set(cell, flow);
     }
     return flow;

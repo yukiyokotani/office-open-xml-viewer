@@ -12,6 +12,15 @@ export interface PageObjectStoryWire {
   body: BodyElement[];
 }
 
+/** The ECMA-376 §17.2.1 background drawing story of a model (private
+ * `__pageBackground.body`): page-anchored, page-sized drawings laid out on
+ * every page beneath all other page stories. Empty without one. */
+export function documentPageBackgroundStory(doc: DocxDocumentModel): BodyElement[] {
+  const background = (doc as DocxDocumentModel & { __pageBackground?: { body?: BodyElement[] } })
+    .__pageBackground;
+  return Array.isArray(background?.body) ? background.body : [];
+}
+
 /** The page objects of a model; empty for every DOCX document. */
 export function documentPageObjects(doc: DocxDocumentModel): readonly PageObjectStoryWire[] {
   return (doc as DocxDocumentModel & { __pageObjects?: PageObjectStoryWire[] }).__pageObjects ?? [];

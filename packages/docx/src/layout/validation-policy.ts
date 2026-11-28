@@ -7,8 +7,8 @@
  * - FATAL checks, which always run and are NOT governed by this policy: the
  *   full `assertDocumentLayout` invariant suite on every finished layout
  *   (non-finite or negative geometry, invalid ownership, broken layout
- *   invariants — fatal per the layout engine's error contract in
- *   docs/docx-layout-engine-redesign.md, with no test/production split), plus
+ *   invariants — always fatal, never downgraded to a diagnostic, with no
+ *   test/production split; see `assertAndDeepFreezeDocumentLayout`), plus
  *   the backstops fused into the unconditional clone/freeze walks in
  *   `plain-data.ts` and `invariants.ts` (non-cloneable values, foreign
  *   prototypes, non-finite numbers).

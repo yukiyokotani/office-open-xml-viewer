@@ -311,6 +311,7 @@ function validateResourceManifests(
   mathOccurrences: readonly MathOccurrence[],
   imageMetadata: readonly ImageMetadataRecord[],
   paintDescriptors: readonly PaintResourceDescriptor[],
+  bodyLayoutInput: BodyLayoutInput,
 ): void {
   const imageKeys = new Set<string>();
   const imageKindByKey = new Map<string, 'image' | 'picture-bullet'>();
@@ -366,6 +367,9 @@ function validateResourceManifests(
         addImage(imageResourceKey(runSource, run.fill.imagePath));
       }
     });
+  }
+  for (const fill of bodyLayoutInput.pageBackground?.fills ?? []) {
+    if (fill.kind === 'image') for (const resource of fill.resources) addImage(resource.resourceKey);
   }
   const metadataKeys = new Set(imageMetadata.map((record) => record.resourceKey));
   if (metadataKeys.size !== imageMetadata.length) throw new TypeError('Duplicate image metadata resource');
@@ -495,6 +499,7 @@ function sealLayoutSourceStoreWithBody(
     input.mathOccurrences,
     input.imageMetadata,
     input.paintDescriptors,
+    bodyLayoutInput,
   );
   const numberingMarkers = new WeakMap<object, Map<number, NonNullable<ParagraphAcquisitionInput['numberingMarkerShapeInput']>>>();
   for (const fact of input.acquisitionFacts.paragraphs) {

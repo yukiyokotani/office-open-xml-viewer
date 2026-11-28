@@ -1956,6 +1956,9 @@ mod tests {
                 "p[t:42]",
                 "pageBreak:authored",
                 "columnBreak",
+                // WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: the break-only
+                // paragraph's mark starts the next column.
+                "p[]",
                 "p[t:A]",
                 "pageBreak:authored",
                 "p[t:B]",
@@ -1963,6 +1966,45 @@ mod tests {
                 "p[t:C]",
             ]
         );
+    }
+
+    #[test]
+    fn column_break_paragraphs_share_the_docx_mark_and_page_break_before_rules() {
+        // Every paragraph carries sprmPFPageBreakBefore (0x2407) through the
+        // single PAPX run.
+        let with_page_break_before = |text: &str| {
+            let bytes = source(text);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let mut word = cfb.stream("WordDocument").unwrap();
+            let table = cfb.stream("0Table").unwrap();
+            let bte = u32::from_le_bytes(word[0x102..0x106].try_into().unwrap()) as usize;
+            let page_number =
+                u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+            let page = &mut word[page_number * 512..(page_number + 1) * 512];
+            page[8] = 32;
+            page[64] = 3;
+            page[65..70].copy_from_slice(&[0, 0, 0x07, 0x24, 1]);
+            projected_body(&build_scoped_cfb(&[
+                ("WordDocument", word),
+                ("0Table", table),
+            ]))
+        };
+        // A break-only paragraph: its pageBreakBefore is the idempotent
+        // paragraph transition before the column break, and its mark follows.
+        let body = with_page_break_before("\u{e}\rB\r");
+        assert_eq!(
+            body_outline(&body["body"])[..3],
+            ["pageBreak:authored", "columnBreak", "p[]"]
+        );
+        assert_eq!(body["body"][0]["__pageBreakBefore"], true);
+        assert_eq!(body["body"][2]["pageBreakBefore"], serde_json::Value::Null);
+        // A text paragraph ending with a column break keeps its mark too.
+        let body = with_page_break_before("A\u{e}\rB\r");
+        assert_eq!(
+            body_outline(&body["body"])[..3],
+            ["p[t:A]", "columnBreak", "p[]"]
+        );
+        assert!(body["body"][0].get("__pageBreakBefore").is_none());
     }
 
     #[test]
@@ -3665,6 +3707,7 @@ mod tests {
                 }
                 let mut numbering = docx_model::NumberingInfo {
                     num_id: 1,
+                    abstract_num_id: None,
                     level: 0,
                     format: "bullet".into(),
                     text: "•".into(),

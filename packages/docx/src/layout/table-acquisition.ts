@@ -7,10 +7,10 @@ import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import {
   acquireTableCellBlocks,
-  isStructuralTrailingParagraph,
+  cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
+import { collapsedRowSideRuleWidthsPt, widestSideRulesAlongMergePt, layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { unmeasuredTableMemberDecision, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -41,7 +41,10 @@ import type {
 } from './types.js';
 
 export interface RetainedTableAcquisitionDependencies<State> {
-  tableDecision?(table: TableLayoutSource, contentWidthPt: number, state: State): LogicalTableDecision;
+  tableDecision?(
+    table: TableLayoutSource, contentWidthPt: number, state: State,
+    hostCellRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>,
+  ): LogicalTableDecision;
   layoutServices(state: State): LayoutServices | undefined;
   tableFormat(table: TableLayoutSource): TableFormatInput;
   resolveColumns(table: TableLayoutSource, contentWidthPt: number, state: State, decision?: LogicalTableDecision): readonly number[];
@@ -493,9 +496,9 @@ function verticalCellMode(
 
 /**
  * Line extent of rotated cell content at an acquired line width: each line's
- * placement span (independent of its alignment on that
- * line) plus the paragraph's side indents and, on the first line, a positive
- * first-line indent. The line box advance is also a minimum along the rotated
+ * natural placement span (independent of its alignment on that line) plus the
+ * paragraph's side indents and, on the first line, a positive first-line
+ * indent. The line box advance is also a minimum along the rotated
  * row axis, even when a glyph is narrower; see WORD_ROTATED_CELL_AUTO_ROW_WRAP.
  * The unconstrained extent is an upper bound on the row height needed to fit
  * the rotated content; it is not the auto-row minimum.
@@ -525,7 +528,14 @@ function naturalLineExtentPt(
       }
       if (endPt < startPt) return;
       const firstLinePt = lineIndex === 0 ? Math.max(0, paragraph?.indentFirst ?? 0) : 0;
-      extentPt = Math.max(extentPt, endPt - startPt + sideIndentsPt + firstLinePt);
+      // ECMA-376 §17.18.44 `distribute` spreads every line, the last one too,
+      // across whatever line length it is given (as `both` does to a line its
+      // compatibility rules justify), so a justified span is the trial length
+      // itself. The natural length removes only the expansion paragraph
+      // layout recorded; natural seams such as automatic East Asian spacing
+      // (WORD_EAST_ASIAN_AUTO_SPACE) stay inside it.
+      const spanPt = Math.max(0, endPt - startPt - (line.justificationExpansionPt ?? 0));
+      extentPt = Math.max(extentPt, spanPt + sideIndentsPt + firstLinePt);
     });
   });
   return Math.min(MAXIMUM_ROTATED_LINE_LENGTH_PT, Math.ceil(extentPt * 100) / 100);
@@ -631,6 +641,42 @@ export function acquireRetainedTable<State>(
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rotatedCells: RotatedCellAcquisition[] = [];
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: the collapsed side rules of every cell,
+  // by row and by the cell's first grid column. Spaced cells keep their own
+  // boxes, so only collapsed rules straddle a cell edge. One pass over the
+  // table, made only when a cell holds a nested spaced table; the cell that
+  // opens a vertical merge, carried from row to row, owns the side rules of
+  // all its rows.
+  type SourceCell = TableLayoutSource['rows'][number]['cells'][number];
+  let sideRulesByRow: ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[] | undefined;
+  const sideRules = () => sideRulesByRow ??= (() => {
+    const openers = new Map<number, Readonly<{ cell: SourceCell; rowIndex: number }>>();
+    return table.rows.map((row, rowIndex) => {
+      const rowFormat = format.rows[rowIndex];
+      let start = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
+      const skeleton = row.cells.map((cell) => {
+        const columnStart = start;
+        const columnSpan = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - columnStart));
+        start += columnSpan;
+        if (cell.vMerge === true) openers.set(columnStart, { cell, rowIndex });
+        else if (cell.vMerge !== false) openers.delete(columnStart);
+        const opener = cell.vMerge === false ? openers.get(columnStart) : undefined;
+        if (!opener) return { borders: retainedEdges(cell.borders), columnStart, columnSpan };
+        const openerException = format.rows[opener.rowIndex]?.exception?.borders;
+        return { borders: retainedEdges(opener.cell.borders), columnStart, columnSpan,
+          ownerException: openerException ? retainedEdges(openerException) : null };
+      });
+      const widths = (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
+        skeleton,
+        retainedEdges(table.borders),
+        rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
+        rowIndex, table.rows.length, columnWidthsPt.length, bidiVisual,
+      );
+      return new Map(skeleton.flatMap((entry, cellIndex) => (widths[cellIndex]
+        ? [[entry.columnStart, { ...widths[cellIndex]!, continues: row.cells[cellIndex]!.vMerge === false }] as const]
+        : [])));
+    });
+  })();
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -658,6 +704,20 @@ export function acquireRetainedTable<State>(
         member.spacingGeometry !== null,
       );
       const cellBorderInsetsPt = 2 * (member.spacingGeometry?.borderPt ?? 0);
+      // WORD_TABLE_CELL_SPACING_GEOMETRY: the part of each half side rule the margin leaves uncovered.
+      let hostInset: Readonly<{ leftPt: number; rightPt: number }> | null | undefined;
+      const hostRuleInsetPt = (nestedTable: TableLayoutSource) => {
+        if (!dependencies.tableFormat(nestedTable).rows.some((nestedRow) => nestedRow.cellSpacingPt > 0)) return undefined;
+        // Once per host cell, however many nested tables it holds.
+        if (hostInset === undefined) {
+          const rules = widestSideRulesAlongMergePt(sideRules(), rowIndex, currentColumnStart, cell.vMerge === true);
+          hostInset = rules ? {
+            leftPt: Math.max(0, rules.leftPt / 2 - formatMargins.left),
+            rightPt: Math.max(0, rules.rightPt / 2 - formatMargins.right),
+          } : null;
+        }
+        return hostInset ?? undefined;
+      };
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
       // Same grouped insets as the horizontal content width below.
@@ -708,7 +768,7 @@ export function acquireRetainedTable<State>(
               sourceAt(paragraphPath),
             ),
             acquireNestedTable: (cellState, nestedTable, nestedContentWidthPt, nestedPath) => {
-              const nestedDecision = dependencies.tableDecision?.(nestedTable, nestedContentWidthPt, cellState);
+              const nestedDecision = dependencies.tableDecision?.(nestedTable, nestedContentWidthPt, cellState, hostRuleInsetPt(nestedTable));
               const nestedColumns = dependencies.resolveColumns(
                 nestedTable,
                 nestedContentWidthPt,
@@ -841,12 +901,12 @@ export function acquireRetainedTable<State>(
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),
-            ...(isStructuralTrailingParagraph(
+            ...(cellParagraphOwnsNoFlow(
               cell.content,
               sourceBlockIndex,
               cell.hideMark === true,
             )
-              ? { structuralTrailing: true }
+              ? { ownsNoCellFlow: true }
               : {}),
           }];
         });

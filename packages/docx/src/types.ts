@@ -743,6 +743,10 @@ export interface LineSpacing {
 
 export interface NumberingInfo {
   numId: number;
+  /** @internal ECMA-376 §17.9.15 abstractNumId the numId references: numIds sharing
+   *  one abstract definition form one list (shared counters). Absent when
+   *  the numId has no abstract reference. */
+  abstractNumId?: number;
   level: number;
   format: string;
   text: string;       // resolved bullet text, e.g. "1." or "•"
@@ -1878,6 +1882,14 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing. */
   font: string;
+  /** Present when the host grid-fits this run's face at its size (Chromium on
+   * Windows rounds faces with embedded bitmaps to whole pixels): the run was
+   * laid out and drawn from the size-proportional advances of {@link font} at
+   * a reference em, so measuring or laying out {@link font} directly would
+   * disagree with the drawn glyphs. `font` is that reference-em shorthand and
+   * `scale` maps its measurements onto this run's CSS px; overlays measure and
+   * lay out the run's text with it. */
+  referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
   /** CSS transform used by the overlay for vertical-page text. */
