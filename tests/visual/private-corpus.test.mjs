@@ -862,6 +862,11 @@ test('the baseline worktree command creates a new worktree at the base and overw
     git(candidate, 'worktree', 'add', '--quiet', '--detach', join(scratch, 'unrelated'), revision);
     renameSync(join(scratch, 'unrelated'), join(scratch, 'unrelated-moved'));
     assert.equal(worktrees(), 3);
+    // Its old path is still registered: the command refuses it and leaves
+    // that registration in place.
+    assert.throws(() => create('unrelated'), /already registered/);
+    assert.equal(worktrees(), 3);
+    assert.match(git(candidate, 'worktree', 'list', '--porcelain'), /unrelated\n/);
 
     // A failing checkout (here a post-checkout hook) leaves nothing registered
     // or on disk, so the command can be run again for the same path.

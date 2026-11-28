@@ -82,6 +82,11 @@ export function createBaselineWorktree({ source, destination, base }) {
     const parent = dirname(destination);
     return join(exists(parent) ? realpathSync(parent) : parent, basename(destination));
   };
+  // A moved worktree keeps its registration at the old path; never create
+  // (or later roll back) a destination Git already has registered.
+  if (registered().includes(canonical())) {
+    throw new Error(`baseline worktree path is already registered with Git: ${destination}`);
+  }
   let worktree;
   try {
     git(from, 'worktree', 'add', '--quiet', '--detach', destination, revision);
