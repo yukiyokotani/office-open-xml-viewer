@@ -4,6 +4,7 @@ import {
   anchoring,
   collisions,
   COLUMN_END,
+  ENDNOTE_REFERENCE,
   FOOTNOTE_REFERENCE,
   MARGIN,
   PAGE_H,
@@ -385,6 +386,29 @@ describe('upright block table of a vertical section', () => {
       expect(pages[0]!.tables).toHaveLength(1);
       expect(tablesEnd(direction, pages[0]!)).toBeLessThanOrEqual(pages[0]!.noteStart! + 1e-6);
       expect(pages[1]!.noteStart).not.toBeNull();
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('keeps a page-start run whose second table refers to a continued note (%s)', (direction) => {
+      // The 420 pt-wide table is first on its page and cannot move, nor can
+      // the table placed with it. The note the second table refers to takes
+      // the room the run's box leaves and continues on the next page.
+      const first = table(2, 40).replace(/w:w="1440"/g, 'w:w="4200"').replace(/w:w="2160"/g, 'w:w="4200"');
+      const second = noted(table(2, 41)).replace(/w:sz="4"/g, 'w:sz="8"');
+      const pages = layOutNoted(direction, [first, second, P], 1, { continueFootnotes: true });
+      expect(pages.map((page) => page.tables.length)).toEqual([2, 0]);
+      expect(tablesEnd(direction, pages[0]!)).toBeLessThanOrEqual(pages[0]!.noteStart! + 1e-6);
+      expect(pages[1]!.noteStart).not.toBeNull();
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('starts document-end notes past a final table (%s)', (direction) => {
+      // The table adds no flow advance: the endnotes after the final empty
+      // paragraph start past its box, not at the flow position.
+      const endnoted = table(2, 40).replace('</w:p>', `${ENDNOTE_REFERENCE}</w:p>`);
+      const pages = layOutPages(direction, [P, endnoted, '<w:p/>'], 1, 360, undefined, undefined,
+        { endnote: paragraph('note').repeat(2) });
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.noteStart).not.toBeNull();
+      expect(tablesEnd(direction, pages[0]!)).toBeLessThanOrEqual(pages[0]!.noteStart! + 1e-6);
     });
 
     it.each(['tbRl', 'tbLrV'] as const)('leaves a table of two columns where the flow reaches it, also over its note (%s)', (direction) => {

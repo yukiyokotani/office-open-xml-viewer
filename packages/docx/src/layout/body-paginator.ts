@@ -3855,13 +3855,17 @@ function* paginateBodyPassSteps(
           : Math.max(notes.reservePt, footnoteAdmissionForIds(
             [...new Set([...notes.ids, ...placedWithReferenceIds])], location.availableBounds.widthPt,
           ).reservePt);
-        // A table that cannot move (first on its page) keeps its place; its
-        // notes take the room its box leaves and continue on the next page.
-        if (candidateUprightEnd && notes.reservePt > 0 && !state.flow.pageHasContent
+        // A table that cannot move (first on its page) keeps its place, and
+        // so do the tables placed with it: a run moves as one. The notes of
+        // the whole run take the room its box leaves and continue on the
+        // next page; they are admitted with the run's first table, before
+        // it gives the page content.
+        if (candidateUprightEnd && !state.flow.pageHasContent
           && services.allowFootnoteContinuation === true
-          && footnoteReserveInvadesCommittedPageContent(notes.reservePt)) {
+          && footnoteReserveInvadesCommittedPageContent(uprightReservePt())) {
           notes = footnoteAdmissionForIds(
-            notes.ids, location.availableBounds.widthPt, additionalFootnoteReserveCapacityPt(),
+            [...new Set([...notes.ids, ...(placedWithReferenceIds ?? [])])],
+            location.availableBounds.widthPt, additionalFootnoteReserveCapacityPt(),
           );
         }
         // A zero-advance cell-owner host still occupies the host flow below the
@@ -4129,6 +4133,15 @@ function* paginateBodyPassSteps(
   // §17.11.4 applies also when the next band starts with a new note.
   let endnoteFlowStarted = false;
   if (endnoteIds.length > 0) endnoteFlowStartPage = state.flow.pageIndex;
+  // `word-vertical-section-upright-block-table`: an upright table adds no
+  // flow advance, so the flow position does not say how far the last page
+  // is occupied. The document-end notes start past its box, as the page's
+  // footnote band ends before it (committedFootnoteContentEndPt).
+  if (endnoteIds.length > 0 && uprightOccupiedEndPt() > state.flow.cursorBlockPt) {
+    state = Object.freeze({ ...state, flow: Object.freeze({ ...state.flow,
+      cursorBlockPt: Math.min(uprightOccupiedEndPt(), activeBlockEndPt(state)),
+    }) });
+  }
   const modernEndnotes = compat.pageWideEndnoteArea && activeRegion(state).columns.length > 1;
   if (modernEndnotes) {
     let pending: readonly PageNoteSource[] = endnoteIds.map(id => Object.freeze({ id, cursor: null }));

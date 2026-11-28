@@ -88,11 +88,17 @@ export type Stories = Readonly<{
   /** How many footnotes there are, each with the content `footnote`
    * (ids 1 to this; one when absent). */
   footnoteCount?: number;
+  /** The content of endnote 1, which `ENDNOTE_REFERENCE` refers to; endnotes
+   * sit at the end of the document (the default w:endnotePr). */
+  endnote?: string;
 }>;
 /** A run referring to footnote `id` (1 to `Stories.footnoteCount`). */
 export const footnoteReference = (id: number) =>
   `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
 export const FOOTNOTE_REFERENCE = footnoteReference(1);
+/** A run referring to endnote 1 (`Stories.endnote`). */
+export const ENDNOTE_REFERENCE =
+  '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r>';
 
 function docx(
   direction: Direction,
@@ -124,18 +130,22 @@ function docx(
       + storyKinds.map((kind) => `<Override PartName="/word/${kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`).join('')
       + (stories.footnote === undefined ? ''
         : '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>')
+      + (stories.endnote === undefined ? ''
+        : '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
     ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0
-      && stories.footnote === undefined ? [] : [
+      && stories.footnote === undefined && stories.endnote === undefined ? [] : [
       ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
         + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
         + storyKinds.map((kind) => `<Relationship Id="rId${kind}" Type="${REL}/${kind}" Target="${kind}1.xml"/>`).join('')
         + (stories.footnote === undefined ? ''
           : `<Relationship Id="rIdFootnotes" Type="${REL}/footnotes" Target="footnotes.xml"/>`)
+        + (stories.endnote === undefined ? ''
+          : `<Relationship Id="rIdEndnotes" Type="${REL}/endnotes" Target="endnotes.xml"/>`)
         + '</Relationships>')],
     ] as Array<[string, Uint8Array]>),
     ...(stories.footnote === undefined ? [] : [
@@ -145,6 +155,12 @@ function docx(
         + Array.from({ length: stories.footnoteCount ?? 1 }, (_, at) =>
           `<w:footnote w:id="${at + 1}">${stories.footnote}</w:footnote>`).join('')
         + '</w:footnotes>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.endnote === undefined ? [] : [
+      ['word/endnotes.xml', xml(`<w:endnotes xmlns:w="${W}">`
+        + '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
+        + '<w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>'
+        + `<w:endnote w:id="1">${stories.endnote}</w:endnote></w:endnotes>`)],
     ] as Array<[string, Uint8Array]>),
     ...storyKinds.map((kind): [string, Uint8Array] => [
       `word/${kind}1.xml`,
