@@ -2280,3 +2280,45 @@ fn an_oversized_class_language_is_not_copied_into_inheriting_runs() {
         assert_eq!(axes, kept_axes);
     }
 }
+
+#[test]
+fn an_oversized_class_language_is_bounded_before_items_copy_it() {
+    // Page fields after non-Latin text and ruby bases each take a class
+    // language other than their position's (§20.358). An oversized tag is
+    // bounded where it is resolved, so those items copy only the empty
+    // "names none" tag, never the inherited value per item.
+    let tag = format!("en-{}", "a".repeat(200));
+    let style = format!(
+        r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="{tag}" fo:language="fr" fo:country="FR" style:rfc-language-tag-asian="{tag}" style:language-asian="zh" style:country-asian="CN"/></style:style>"#
+    );
+    let item = "\u{5B57}<text:page-number>1</text:page-number><text:ruby><text:ruby-base>a</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby>";
+    let body = format!(
+        "<text:p><text:span text:style-name=\"T\">{}</text:span></text:p>",
+        item.repeat(200)
+    );
+    let before = text::CLASS_LANGUAGE_BYTES.with(|bytes| bytes.get());
+    let document = read_fixture(Fixture {
+        automatic: &style,
+        body: &body,
+        ..Fixture::default()
+    });
+    let copied = text::CLASS_LANGUAGE_BYTES.with(|bytes| bytes.get()) - before;
+    assert_eq!(copied, 0);
+    let facts: Vec<Option<&str>> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Field(field) => Some(field.lang_script_class.as_deref()),
+            DocRun::Text(text) => Some(text.lang_script_class.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert!(facts.len() >= 400);
+    assert!(facts.iter().all(|fact| *fact == Some("")));
+    // The regional inputs are unchanged.
+    let run = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(run.lang_east_asia.as_deref(), Some("zh-CN"));
+}

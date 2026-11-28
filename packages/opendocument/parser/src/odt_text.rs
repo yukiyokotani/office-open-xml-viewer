@@ -954,7 +954,11 @@ impl<'a> Reader<'a> {
         class: ScriptClass,
     ) -> Result<Option<String>, String> {
         let cascade = Cascade::build(self.search_order(contexts, context)?, TEXT)?;
-        Ok(class_language_tag(&cascade, class, self.fonts).map(|tag| tag.to_string()))
+        let tag = class_language_tag(&cascade, class, self.fonts).map(|tag| tag.to_string());
+        #[cfg(test)]
+        CLASS_LANGUAGE_BYTES
+            .with(|bytes| bytes.set(bytes.get() + tag.as_ref().map_or(0, String::len)));
+        Ok(tag)
     }
 
     /// The class language of an item's own visible text (a ruby base, a
@@ -2059,7 +2063,7 @@ fn class_language_tag(
             .min()
             .is_some_and(|component| Some(component) < depth);
         if !nearer_component {
-            return Some(fonts.atom(tag));
+            return Some(canvas_language_atom(fonts, tag));
         }
     }
     let language = cascade.get(ns, language).filter(|v| *v != "none")?;
@@ -2080,7 +2084,31 @@ fn class_language_tag(
         tag.push('-');
         tag.push_str(&country.to_ascii_uppercase());
     }
-    Some(fonts.atom(&tag))
+    Some(canvas_language_atom(fonts, &tag))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes of class-language tags copied out for items on this thread
+    /// (tests assert an oversized tag is bounded before it is copied).
+    pub(crate) static CLASS_LANGUAGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A class language as interned for Canvas: a tag longer than the renderer
+/// admits (`MAX_CANVAS_LANGUAGE_TAG_UNITS`) names no language there, so it
+/// is bounded here, before it is interned, cached or copied into any run,
+/// and becomes the empty "names none" tag (RFC 5646 §4.4.1 lets an
+/// implementation bound tag length). It still counts as naming a language
+/// (`RunProperties::names_language`), so every class keeps an explicit fact.
+fn canvas_language_atom(fonts: &FontFaces, tag: &str) -> Atom {
+    // UTF-16 units never exceed UTF-8 bytes, so short tags skip the count.
+    if tag.len() > MAX_CANVAS_LANGUAGE_TAG_UNITS
+        && tag.encode_utf16().count() > MAX_CANVAS_LANGUAGE_TAG_UNITS
+    {
+        fonts.atom("")
+    } else {
+        fonts.atom(tag)
+    }
 }
 
 /// The Table 22 class of an item's own text: the one class its classified
