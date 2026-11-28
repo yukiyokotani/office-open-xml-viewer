@@ -2067,20 +2067,36 @@ fn class_language_tag(
         }
     }
     let language = cascade.get(ns, language).filter(|v| *v != "none")?;
-    let mut tag = language.to_ascii_lowercase();
-    if let Some(script) = cascade
+    let script = cascade
         .get(ns, script)
-        .filter(|v| *v != "none" && !v.is_empty())
+        .filter(|v| *v != "none" && !v.is_empty());
+    let country = cascade
+        .get(ns, country)
+        .filter(|v| *v != "none" && !v.is_empty());
+    // Bound the combined UTF-16 length (with the '-' separators) before any
+    // case conversion or copy; counting stops once the limit is exceeded.
+    let mut units = 0usize;
+    for (index, part) in [Some(language), script, country]
+        .iter()
+        .flatten()
+        .enumerate()
     {
+        units += usize::from(index > 0);
+        for c in part.chars() {
+            units += c.len_utf16();
+            if units > MAX_CANVAS_LANGUAGE_TAG_UNITS {
+                return Some(fonts.atom(""));
+            }
+        }
+    }
+    let mut tag = language.to_ascii_lowercase();
+    if let Some(script) = script {
         let mut chars = script.chars();
         tag.push('-');
         tag.extend(chars.next().map(|c| c.to_ascii_uppercase()));
         tag.push_str(&chars.as_str().to_ascii_lowercase());
     }
-    if let Some(country) = cascade
-        .get(ns, country)
-        .filter(|v| *v != "none" && !v.is_empty())
-    {
+    if let Some(country) = country {
         tag.push('-');
         tag.push_str(&country.to_ascii_uppercase());
     }

@@ -2322,3 +2322,35 @@ fn an_oversized_class_language_is_bounded_before_items_copy_it() {
         .unwrap();
     assert_eq!(run.lang_east_asia.as_deref(), Some("zh-CN"));
 }
+
+#[test]
+fn an_oversized_language_component_bounds_the_class_language_tag() {
+    // The language/script/country components are measured before the Canvas
+    // tag is built: an inherited 1,024-byte fo:script names no Canvas
+    // language, while regional inputs within the limit are unchanged.
+    let class_language = |attributes: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties {attributes}/></style:style>"#
+        );
+        let document = read_fixture(Fixture {
+            automatic: &style,
+            body: "<text:p><text:span text:style-name=\"T\">a</text:span></text:p>",
+            ..Fixture::default()
+        });
+        text_runs(paragraphs(&document.body)[0])
+            .into_iter()
+            .next()
+            .unwrap()
+            .lang_script_class
+            .clone()
+    };
+    let script = "a".repeat(1024);
+    assert_eq!(
+        class_language(&format!(r#"fo:language="en" fo:script="{script}""#)).as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        class_language(r#"fo:language="en" fo:script="latn" fo:country="us""#).as_deref(),
+        Some("en-Latn-US")
+    );
+}
