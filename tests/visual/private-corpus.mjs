@@ -212,9 +212,9 @@ function assertRendererCheckout({ root, revision, label }) {
   // A public specimen the candidate adds or rewrites is copied into the
   // baseline checkout so that the previous renderer draws it too. Its content
   // is not checked here: the manifests bind every input by SHA-256. A deleted
-  // specimen is not admitted.
+  // specimen, or one replaced by a symlink, is not admitted.
   const specimenCopy = process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
-    ? (path) => isCorpusInputPath(path) && existsSync(join(root, path))
+    ? (path) => isCorpusInputPath(path) && isPlainFile(root, path)
     : () => false;
   const changed = [...new Set([...tracked, ...untracked])].filter((path) => !specimenCopy(path));
   if (changed.length === 0) return;
@@ -248,6 +248,23 @@ function assertRendererCheckout({ root, revision, label }) {
       );
     }
   }
+}
+
+/** True when `path` below `root` is a regular file and no component of it is
+ * a symlink. Only lstat is used, so nothing is followed or opened. */
+function isPlainFile(root, path) {
+  let current = root;
+  let stat;
+  for (const component of path.split('/')) {
+    current = join(current, component);
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink()) return false;
+  }
+  return stat.isFile();
 }
 
 function checkoutRoot(path) {
@@ -617,7 +634,11 @@ function assertExactManifest(actual, expected, path) {
   }
 }
 
-/** Fail closed on an empty/stale corpus and bind every baseline to an explicit
+/** Call from a suite hook (`beforeAll`), never while tests are being
+ * collected: it writes the snapshot manifest and removes stale output, which a
+ * list-only run must not do.
+ *
+ * Fail closed on an empty/stale corpus and bind every baseline to an explicit
  * merge-base revision. This prevents a candidate server or unrelated old
  * snapshot from silently becoming its own regression oracle. A subset corpus
  * (`private-fast`) is additionally bound to its selection manifest digest.

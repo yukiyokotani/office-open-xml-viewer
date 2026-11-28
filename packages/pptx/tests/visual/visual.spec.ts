@@ -243,9 +243,14 @@ function describeSelfRegression(
   { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
 ): void {
   test.describe(title, () => {
-    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and removes stale output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
-        prepareSelfVrtCorpus({ corpus, format: 'pptx', files, snapshot: SNAPSHOT });
+        prepareSelfVrtCorpus({
+          corpus, format: 'pptx', files, snapshot: SNAPSHOT,
+          ...(selection ? { selectionDigest: selection.digest } : {}),
+        });
       });
     }
     for (const file of files) {
@@ -333,11 +338,9 @@ const PPTX_FAST_SELECTION: FastTierSelection | undefined =
     ? loadFastTierSelection({ format: 'pptx', files: PPTX_PRIVATE_CORPUS })
     : undefined;
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({
-    corpus: PPTX_PRIVATE_SELF_VRT, format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
-    selectionDigest: PPTX_FAST_SELECTION?.digest,
-  });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && PPTX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('pptx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', PPTX_DEMO_CORPUS);

@@ -228,7 +228,9 @@ function describeSelfRegression(
   { query = '&width=612' }: { query?: string } = {},
 ): void {
   test.describe(title, () => {
-    if (corpus !== 'private' && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and removes stale output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({ corpus, format: 'docx', files, snapshot: SNAPSHOT });
       });
@@ -297,8 +299,9 @@ const DOCX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
   ? selfVrtCorpusFiles({ corpus: 'private', format: 'docx' })
   : [];
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({ corpus: 'private', format: 'docx', files: DOCX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && DOCX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('docx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', DOCX_DEMO_CORPUS);

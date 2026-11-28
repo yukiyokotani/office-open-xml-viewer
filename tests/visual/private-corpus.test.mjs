@@ -700,6 +700,16 @@ test('specimen copies are admitted only under the flag, and only as present spec
       git(base, 'checkout', '-q', '--', 'renderer.js');
       rmSync(join(corpus, 'old.pptx'));
       assert.throws(verify, /clean renderer checkout; changed paths at .*: packages\/pptx\/public\/corpus\/old\.pptx$/);
+      // Nor one replaced by a symlink (a Git type change), even to the same bytes.
+      writeFileSync(join(fixture.scratch, 'elsewhere.pptx'), 'v1');
+      symlinkSync(join(fixture.scratch, 'elsewhere.pptx'), join(corpus, 'old.pptx'));
+      assert.throws(verify, /clean renderer checkout; changed paths at .*: packages\/pptx\/public\/corpus\/old\.pptx$/);
+      // Nor one reached through a symlinked corpus folder.
+      rmSync(corpus, { recursive: true });
+      mkdirSync(join(fixture.scratch, 'elsewhere'));
+      writeFileSync(join(fixture.scratch, 'elsewhere/old.pptx'), 'v1');
+      symlinkSync(join(fixture.scratch, 'elsewhere'), corpus);
+      assert.throws(verify, /clean renderer checkout; changed paths at /);
     });
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
@@ -949,5 +959,39 @@ test('a named pipe or symlink in place of an input or an output is refused witho
     assert.match(child.stdout, /image pipe: .*non-regular file/, child.stderr);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('collecting the specs prepares nothing: stale output survives until a suite hook runs', () => {
+  // Preparation writes the snapshot manifest and removes stale documents, so a
+  // list-only run (`playwright test --list`) must not reach it. What the specs
+  // do while they are collected is enumeration only ...
+  const fixture = selfVrtFixture();
+  const stale = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo/gone');
+  try {
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, 'slide-1.png'), 'old');
+    const previous = process.cwd();
+    process.chdir(join(fixture.base, 'packages/pptx'));
+    try {
+      assert.deepEqual(selfVrtCorpusFiles({ corpus: 'demo', format: 'pptx' }), ['demo/deck.pptx']);
+    } finally {
+      process.chdir(previous);
+    }
+    assert.deepEqual(readdirSync(join(stale, '..')), ['gone']);
+    assert.equal(readFileSync(join(stale, 'slide-1.png'), 'utf8'), 'old');
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+  // ... and every preparation call in them sits directly in a `beforeAll`.
+  for (const format of ['docx', 'xlsx', 'pptx']) {
+    const lines = readFileSync(
+      new URL(`../../packages/${format}/tests/visual/visual.spec.ts`, import.meta.url), 'utf8',
+    ).split('\n');
+    const calls = lines.flatMap((line, index) => (/\bprepareSelfVrtCorpus\(/.test(line) ? [index] : []));
+    assert.ok(calls.length > 0, format);
+    for (const index of calls) {
+      assert.match(lines[index - 1], /^\s*test\.beforeAll\(\(\) => \{$/, `${format} visual.spec.ts:${index + 1}`);
+    }
   }
 });

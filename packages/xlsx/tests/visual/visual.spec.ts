@@ -226,9 +226,14 @@ function describeSelfRegression(
   { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
 ): void {
   test.describe(title, () => {
-    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and removes stale output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
-        prepareSelfVrtCorpus({ corpus, format: 'xlsx', files, snapshot: SNAPSHOT });
+        prepareSelfVrtCorpus({
+          corpus, format: 'xlsx', files, snapshot: SNAPSHOT,
+          ...(selection ? { selectionDigest: selection.digest } : {}),
+        });
       });
     }
     for (const file of files) {
@@ -317,11 +322,9 @@ const XLSX_FAST_SELECTION: FastTierSelection | undefined =
     ? loadFastTierSelection({ format: 'xlsx', files: XLSX_PRIVATE_CORPUS })
     : undefined;
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({
-    corpus: XLSX_PRIVATE_SELF_VRT, format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
-    selectionDigest: XLSX_FAST_SELECTION?.digest,
-  });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && XLSX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('xlsx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', XLSX_DEMO_CORPUS);
