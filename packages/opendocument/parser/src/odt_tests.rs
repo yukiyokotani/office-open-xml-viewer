@@ -118,6 +118,35 @@ fn text_runs(paragraph: &DocParagraph) -> Vec<&TextRun> {
 }
 
 #[test]
+fn untagged_styles_resolve_no_language_attribute() {
+    // A cascade build notes whether any style sets a language attribute, so
+    // text whose styles name none does no language lookups at all.
+    let automatic = r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+    let before = crate::style::LANGUAGE_LOOKUPS.with(|count| count.get());
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r#"<text:p><text:span text:style-name="B">a漢</text:span>b<text:page-number>1</text:page-number></text:p>"#,
+        ..Fixture::default()
+    });
+    let after = crate::style::LANGUAGE_LOOKUPS.with(|count| count.get());
+    assert_eq!(after, before);
+    assert!(text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .all(|run| run.lang.is_none()
+            && run.lang_east_asia.is_none()
+            && run.lang_bidi.is_none()
+            && run.lang_script_class.is_none()));
+    // A language attribute anywhere in the search order enables resolution.
+    let tagged = r#"<style:style style:name="B" style:family="text"><style:text-properties style:country-asian="JP"/></style:style>"#;
+    read_fixture(Fixture {
+        automatic: tagged,
+        body: r#"<text:p><text:span text:style-name="B">a</text:span></text:p>"#,
+        ..Fixture::default()
+    });
+    assert!(crate::style::LANGUAGE_LOOKUPS.with(|count| count.get()) > after);
+}
+
+#[test]
 fn western_language_and_country_become_the_run_language() {
     let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs"/></style:style><style:style style:name="Ro" style:family="text"><style:text-properties fo:language="ro"/></style:style><style:style style:name="None" style:family="text"><style:text-properties fo:language="none" fo:country="RS"/></style:style>"#;
     let document = read_fixture(Fixture {

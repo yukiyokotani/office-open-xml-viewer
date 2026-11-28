@@ -7,7 +7,7 @@
 
 use crate::budget;
 use crate::error::invalid;
-use crate::xml::{self, Stepped, NS_STYLE, NS_TEXT};
+use crate::xml::{self, Stepped, NS_FO, NS_STYLE, NS_TEXT};
 use std::collections::{HashMap, HashSet};
 
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
@@ -345,6 +345,46 @@ pub struct Cascade<'a> {
     /// The keys and values in first-seen order (nearest style first), with
     /// the position in `styles` of the style that sets each.
     order: Vec<(&'a Key, &'a str, usize)>,
+    /// Whether any style of a text-properties search order sets a language
+    /// attribute (`is_language_attribute`), found while the order is
+    /// flattened. A cascade without one resolves no language, so language
+    /// resolution does no lookups for untagged text.
+    names_language: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lookups of language attributes on this thread (tests assert that
+    /// untagged text resolves none).
+    pub(crate) static LANGUAGE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_language_lookup(namespace: &str, name: &str) {
+    if is_language_attribute(namespace, name) {
+        LANGUAGE_LOOKUPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+/// The ODF 1.3 Part 3 text-properties attributes that name a language for
+/// a script class: §20.202/§20.302/§20.303 language, §20.222/§20.356/§20.357
+/// script, §20.188/§20.256/§20.257 country and §§20.343–20.345
+/// style:rfc-language-tag (with their -asian and -complex forms).
+fn is_language_attribute(namespace: &str, name: &str) -> bool {
+    (namespace == NS_FO && matches!(name, "language" | "script" | "country"))
+        || (namespace == NS_STYLE
+            && matches!(
+                name,
+                "language-asian"
+                    | "language-complex"
+                    | "script-asian"
+                    | "script-complex"
+                    | "country-asian"
+                    | "country-complex"
+                    | "rfc-language-tag"
+                    | "rfc-language-tag-asian"
+                    | "rfc-language-tag-complex"
+            ))
 }
 
 impl<'a> Cascade<'a> {
@@ -361,6 +401,8 @@ impl<'a> Cascade<'a> {
         }))?;
         let mut values: HashMap<(&'a str, &'a str), usize> = HashMap::new();
         let mut order = Vec::new();
+        let text_group = group == TEXT;
+        let mut names_language = false;
         for (position, style) in styles.iter().enumerate() {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
@@ -369,6 +411,7 @@ impl<'a> Cascade<'a> {
                     {
                         entry.insert(order.len());
                         order.push((key, value.as_str(), position));
+                        names_language |= text_group && is_language_attribute(&key.0, &key.1);
                     }
                 }
             }
@@ -378,10 +421,19 @@ impl<'a> Cascade<'a> {
             group,
             values,
             order,
+            names_language,
         })
     }
 
+    /// Whether this text-properties cascade sets any language attribute
+    /// (`is_language_attribute`); always false for other groups.
+    pub fn names_language(&self) -> bool {
+        self.names_language
+    }
+
     pub fn get(&self, namespace: &str, name: &str) -> Option<&'a str> {
+        #[cfg(test)]
+        count_language_lookup(namespace, name);
         // The map's key lifetime shortens to the arguments' (it is
         // covariant); the value comes from `order`, at its full lifetime.
         let values: &HashMap<(&str, &str), usize> = &self.values;
@@ -394,6 +446,8 @@ impl<'a> Cascade<'a> {
     /// the attribute's resolved value, for attributes whose meaning depends
     /// on which of two alternatives is set nearer.
     pub fn depth(&self, namespace: &str, name: &str) -> Option<usize> {
+        #[cfg(test)]
+        count_language_lookup(namespace, name);
         let values: &HashMap<(&str, &str), usize> = &self.values;
         values
             .get(&(namespace, name))

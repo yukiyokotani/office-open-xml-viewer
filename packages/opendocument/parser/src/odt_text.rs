@@ -1961,6 +1961,10 @@ impl RunProperties {
 /// regional font lists (zh-CN, ja-JP, ...), so they keep this shape; the
 /// Canvas language of the class is `class_language_tag`.
 fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
+    // Untagged styles: no language attribute anywhere, so no lookups.
+    if !cascade.names_language() {
+        return None;
+    }
     let (ns, language, country) = match class {
         ScriptClass::Latin => (NS_FO, "language", "country"),
         ScriptClass::Asian => (NS_STYLE, "language-asian", "country-asian"),
@@ -2002,6 +2006,10 @@ fn class_language_tag(
     class: ScriptClass,
     fonts: &FontFaces,
 ) -> Option<Atom> {
+    // Untagged styles: no language attribute anywhere, so no lookups.
+    if !cascade.names_language() {
+        return None;
+    }
     let (ns, rfc, language, script, country) = match class {
         ScriptClass::Latin => (NS_FO, "rfc-language-tag", "language", "script", "country"),
         ScriptClass::Asian => (
