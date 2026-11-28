@@ -1,7 +1,11 @@
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -15,6 +19,23 @@ import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
 
 const SCHEMA_VERSION = 2;
+
+/** Read a whole regular file through one descriptor. The open is non-blocking
+ * and refuses a final symlink, and the descriptor is checked with fstat before
+ * any read, so a path that turned into a named pipe or device after an earlier
+ * check cannot block the worker or be read. */
+function readRegularFile(path) {
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`self-VRT input is not a regular file: ${path}`);
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // Bootstrap-only exception for running the current VRT harness against an old
 // renderer commit that predates the harness. No renderer/parser source is
@@ -182,7 +203,7 @@ function copyDigest(path) {
   const key = `${dev}:${ino}:${size}:${mtimeMs}:${ctimeMs}`;
   const cached = copyDigests.get(path);
   if (cached?.key === key) return cached.digest;
-  const digest = sha256(readFileSync(path));
+  const digest = sha256(readRegularFile(path));
   copyDigests.set(path, { key, digest });
   return digest;
 }
@@ -530,7 +551,7 @@ const preparedInputs = new Map();
 
 function corpusFiles(corpus, files) {
   return files.map((name) => {
-    const digest = sha256(readFileSync(`public/${selfVrtInputPath({ corpus, file: name })}`));
+    const digest = sha256(readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`));
     preparedInputs.set(`${corpus}\0${name}`, digest);
     return { name, sha256: digest };
   });
@@ -544,7 +565,7 @@ export function selfVrtInputBody({ corpus, file }) {
   const expected = preparedInputs.get(`${corpus}\0${file}`);
   if (!expected) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
   const path = `public/${selfVrtInputPath({ corpus, file })}`;
-  const body = readFileSync(path);
+  const body = readRegularFile(path);
   if (sha256(body) !== expected) {
     throw new Error(`self-VRT input ${path} changed after its manifest recorded it`);
   }
@@ -554,7 +575,7 @@ export function selfVrtInputBody({ corpus, file }) {
 function readBaselineJson(location, path) {
   const verified = verifiedBaselinePath(location, path);
   if (!verified) throw new Error(`missing previous-renderer manifest: ${path}`);
-  return JSON.parse(readFileSync(verified, 'utf8'));
+  return JSON.parse(readRegularFile(verified).toString('utf8'));
 }
 
 function assertExactManifest(actual, expected, path) {
@@ -719,7 +740,7 @@ export function verifySelfVrtItemManifest({
         + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
       );
     }
-    const items = names.map((name) => ({ name, sha256: sha256(readFileSync(join(directory, name))) }));
+    const items = names.map((name) => ({ name, sha256: sha256(readRegularFile(join(directory, name))) }));
     writeFileSync(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
     return;
   }
@@ -743,7 +764,7 @@ export function verifySelfVrtItemManifest({
   }
   for (const { name, sha256: expected } of recordedItems) {
     const verified = verifiedBaselinePath(location, join(directory, name));
-    if (!verified || sha256(readFileSync(verified)) !== expected) {
+    if (!verified || sha256(readRegularFile(verified)) !== expected) {
       throw new Error(`previous-renderer image changed since its snapshot: ${join(directory, name)}`);
     }
   }
@@ -777,7 +798,7 @@ export function captureOrCompareSelfVrtItem({
   const baselinePath = join(directory, key);
   const verified = verifiedBaselinePath(location, baselinePath);
   if (!verified || !expected) return `missing previous-renderer baseline: ${baselinePath}`;
-  const baseline = readFileSync(verified);
+  const baseline = readRegularFile(verified);
   if (sha256(baseline) !== expected) {
     throw new Error(`previous-renderer image changed since its snapshot: ${baselinePath}`);
   }

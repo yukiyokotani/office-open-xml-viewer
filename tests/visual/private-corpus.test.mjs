@@ -776,3 +776,48 @@ test('a non-regular or symlinked candidate input is rejected without being read'
     rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test('a prepared input replaced by a named pipe is refused without blocking', (t) => {
+  const { root, first } = baselineRepository();
+  const rel = 'packages/pptx/public/corpus';
+  const module = new URL('./private-corpus.mjs', import.meta.url).href;
+  try {
+    mkdirSync(join(root, rel), { recursive: true });
+    writeFileSync(join(root, rel, 'deck.pptx'), 'x');
+    try {
+      execFileSync('mkfifo', [join(root, 'probe')]);
+      unlinkSync(join(root, 'probe'));
+    } catch {
+      t.skip('mkfifo unavailable');
+      return;
+    }
+    // Separate process with a timeout: a blocking read of the pipe never returns.
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { execFileSync } from 'node:child_process';
+      import { unlinkSync } from 'node:fs';
+      import { prepareSelfVrtCorpus, selfVrtInputBody } from ${JSON.stringify(module)};
+      process.chdir(${JSON.stringify(join(root, 'packages/pptx'))});
+      prepareSelfVrtCorpus({ corpus: 'corpus', format: 'pptx', files: ['corpus/deck.pptx'], snapshot: true });
+      unlinkSync('public/corpus/deck.pptx');
+      execFileSync('mkfifo', ['public/corpus/deck.pptx']);
+      try {
+        selfVrtInputBody({ corpus: 'corpus', file: 'corpus/deck.pptx' });
+        console.log('accepted');
+      } catch (error) { console.log(error.message); }
+    `], {
+      encoding: 'utf8',
+      timeout: 15000,
+      env: {
+        ...process.env,
+        VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
+        VRT_ALLOW_HARNESS_CHANGES: '',
+        VRT_BASELINE_CHECKOUT: '',
+        VRT_BASELINE_REVISION: first,
+      },
+    });
+    assert.equal(result.error, undefined, 'must not block on the pipe');
+    assert.match(result.stdout, /not a regular file/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
