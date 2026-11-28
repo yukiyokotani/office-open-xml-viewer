@@ -1,4 +1,4 @@
-import { isRunLanguageField } from './run-language-capability.js';
+import { isLanguageRunRecord, LANGUAGE_FACT_KEYS, recordNamesRunLanguage } from './run-language-capability.js';
 import type { DocxDocumentModel } from './types.js';
 
 const DOM_VERTICAL_PAGE_DIRECTIONS = new Set(['tbRl', 'tbRlV', 'tbLrV']);
@@ -70,6 +70,11 @@ export function documentRenderCapabilities(
       continue;
     }
     const record = value as Record<string, unknown>;
+    // Only run objects carry a run language; a property merely named `lang`
+    // elsewhere (a font-table key) must not route the document.
+    if (!carriesRunLanguage && isLanguageRunRecord(record) && recordNamesRunLanguage(record)) {
+      carriesRunLanguage = true;
+    }
     for (const key of Object.keys(record)) {
       const field = record[key];
       if (!requiresDomVerticalGlyphLayout && key === 'textDirection'
@@ -77,7 +82,10 @@ export function documentRenderCapabilities(
         if (stopOnVerticalLayout) return { requiresDomVerticalGlyphLayout: true };
         requiresDomVerticalGlyphLayout = true;
       }
-      if (!carriesRunLanguage && isRunLanguageField(key, field)) carriesRunLanguage = true;
+      if (!carriesRunLanguage && LANGUAGE_FACT_KEYS.has(key) && field !== null && typeof field === 'object'
+        && !Array.isArray(field) && recordNamesRunLanguage(field as Record<string, unknown>)) {
+        carriesRunLanguage = true;
+      }
       if (requiresDomVerticalGlyphLayout && carriesRunLanguage) {
         return { requiresDomVerticalGlyphLayout, carriesRunLanguage };
       }

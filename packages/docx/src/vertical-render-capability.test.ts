@@ -49,7 +49,7 @@ describe('vertical render capability', () => {
     const keys = vi.spyOn(Object, 'keys');
     try {
       // A language and a vertical section found first: the walk stops there.
-      document.body = [{ type: 'sectionBreak', textDirection: 'tbRl', lang: 'sr-rs' },
+      document.body = [{ type: 'paragraph', runs: [{ type: 'text', lang: 'sr-rs' }] }, { type: 'sectionBreak', textDirection: 'tbRl' },
         ...Array.from({ length: 1000 }, () => ({ type: 'paragraph', runs: [] }))];
       (document.body as unknown[]).reverse();
       documentRenderCapabilities(document as unknown as DocxDocumentModel);

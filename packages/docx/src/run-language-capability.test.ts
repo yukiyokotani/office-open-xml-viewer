@@ -15,12 +15,33 @@ describe('run-language capability', () => {
   });
 
   it('ignores x-none and ruby guide tags (guides are shaped untagged)', () => {
-    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ lang: 'x-none' }] }] }))).toBe(false);
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', lang: 'x-none' }] }] }))).toBe(false);
     // A tag shaping would not admit (extlang, ill-formed) names no language here either.
-    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ lang: 'zh-cmn-Hans-CN' }, { langEastAsia: 'en-a' }] }] })))
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', lang: 'zh-cmn-Hans-CN' }, { type: 'text', langEastAsia: 'en-a' }] }] })))
       .toBe(false);
     expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', text: '漢',
       typographyInput: { ruby: { language: { status: 'valid', value: 'ja-JP' }, guideRuns: [{ language: 'ja-jp' }] } },
     }] }] }))).toBe(false);
+  });
+
+  it('does not read a property named lang outside a run as a run language', () => {
+    expect(documentCarriesRunLanguage(model({ body: [], fontFamilyClasses: { lang: 'roman' } }))).toBe(false);
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', text: 'a', langBidi: 'ar-sa' }] }] })))
+      .toBe(true);
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [], paragraphMarkFontFacts: { lang: 'sr-rs' } }] })))
+      .toBe(true);
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [], numbering: { fontFacts: { langEastAsia: 'ja-jp' } } }] })))
+      .toBe(true);
+  });
+
+  it('reads language properties only on runs and run facts', () => {
+    let reads = 0;
+    const counted = () => Object.defineProperty({ type: 'paragraph', runs: [{ type: 'image' }] }, 'lang', {
+      enumerable: true, get: () => { reads += 1; return 'sr-rs'; },
+    });
+    const body = Array.from({ length: 100 }, counted);
+    expect(documentCarriesRunLanguage(model({ body, fontFamilyClasses: { lang: 'roman' } }))).toBe(false);
+    // Only the walk's own enumeration touches the value, never the predicate's keyed reads.
+    expect(reads).toBe(100);
   });
 });
