@@ -141,6 +141,14 @@ pub struct RunFmt {
     /// `w:val` is omitted (the Western language is "automatically determined"
     /// for that level), so `apply_run` needs presence, not only the value.
     pub lang_element_set_here: bool,
+    /// w:eastAsia and w:bidi resolved by element presence, like `lang`: the
+    /// value of the deepest level whose `<w:lang>` is present, none where that
+    /// element omits the attribute (§17.3.2.20 leaves it to automatic
+    /// determination). Canvas language input only; `lang_east_asia` and
+    /// `lang_bidi` keep their per-attribute merge for regional font selection
+    /// and bidi digit classification.
+    pub lang_east_asia_by_element: Option<String>,
+    pub lang_bidi_by_element: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -1558,6 +1566,8 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     // which feeds regional font selection and bidi digit classification.
     if src.lang_element_set_here {
         dst.lang = src.lang.clone();
+        dst.lang_east_asia_by_element = src.lang_east_asia_by_element.clone();
+        dst.lang_bidi_by_element = src.lang_bidi_by_element.clone();
         dst.lang_element_set_here = true;
     }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
@@ -2345,6 +2355,8 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang = Some(val.to_lowercase());
             }
         }
+        fmt.lang_east_asia_by_element = fmt.lang_east_asia.clone();
+        fmt.lang_bidi_by_element = fmt.lang_bidi.clone();
     }
 
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT

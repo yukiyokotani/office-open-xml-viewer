@@ -124,6 +124,7 @@ export function shapeNumberingMarkerText(
     eastAsiaLanguage: input.eastAsiaLanguage,
     language: input.language,
     complexScriptLanguage: input.complexScriptLanguage,
+    canvasEastAsiaLanguage: input.canvasEastAsiaLanguage,
     scriptClassLanguage: input.scriptClassLanguage,
     kerning: input.kerning ?? false,
     measure: true,

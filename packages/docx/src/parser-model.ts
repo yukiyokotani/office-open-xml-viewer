@@ -161,6 +161,22 @@ export interface InternalRunSlotMetadata {
   /** The one language of all the text where the source resolved it by its
    * own script classification (ODF 1.3 Part 3 §20.358); empty: none. */
   langScriptClass?: string;
+  /** Element-presence Canvas axes (layout/text.ts canvasLanguageAxes). */
+  langEastAsiaCanvas?: string;
+  langBidiCanvas?: string;
+}
+
+/** layout/text.ts canvasLanguageAxes for numbering and paragraph-mark run
+ * properties (kept local: this module imports only types from there). */
+function markCanvasLanguageAxes(
+  facts: Readonly<InternalRunSlotMetadata>,
+): Pick<NumberingMarkerShapeInput, 'complexScriptLanguage' | 'canvasEastAsiaLanguage'> {
+  const bidi = facts.langBidiCanvas !== undefined ? facts.langBidiCanvas || undefined : facts.langBidi;
+  return {
+    ...(bidi !== undefined ? { complexScriptLanguage: bidi } : {}),
+    ...(facts.langEastAsiaCanvas !== undefined
+      ? { canvasEastAsiaLanguage: facts.langEastAsiaCanvas || null } : {}),
+  };
 }
 
 function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {
@@ -1733,7 +1749,7 @@ export function numberingMarkerShapeInput(
     fontHint: facts?.fontHint,
     eastAsiaLanguage: facts?.langEastAsia,
     ...(facts?.lang !== undefined ? { language: facts.lang } : {}),
-    ...(facts?.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
+    ...(facts ? markCanvasLanguageAxes(facts) : {}),
     ...(facts?.langScriptClass !== undefined ? { scriptClassLanguage: facts.langScriptClass } : {}),
     // Marker-specific zero-threshold observations are absent. Preserve its
     // previous size comparison; the content-run zero-disables extension is
@@ -1818,7 +1834,7 @@ function nonContentRunShapeInput(
     fontHint: facts.fontHint,
     eastAsiaLanguage: facts.langEastAsia,
     ...(facts.lang !== undefined ? { language: facts.lang } : {}),
-    ...(facts.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
+    ...markCanvasLanguageAxes(facts),
     ...(facts.langScriptClass !== undefined ? { scriptClassLanguage: facts.langScriptClass } : {}),
     // Paragraph marks likewise have no measured zero-threshold evidence.
     kerning: wordKerningApplies(fontSizePt, facts.kerning, 'size-comparison'),

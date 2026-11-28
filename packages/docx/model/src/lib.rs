@@ -2888,6 +2888,18 @@ pub struct RunFontFacts {
     /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
+    /// The Canvas (language-sensitive glyph form) language of East Asian
+    /// text, present only where it differs from `lang_east_asia`. ECMA-376
+    /// §17.3.2.20 resolves it by element presence: a level whose `<w:lang>`
+    /// omits w:eastAsia leaves that axis to automatic determination, so no
+    /// inherited tag applies there (empty string: none). `lang_east_asia`
+    /// keeps its per-attribute merge for regional font selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia_canvas: Option<String>,
+    /// As `lang_east_asia_canvas`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi_canvas: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning: Option<f64>,
 }
@@ -3115,6 +3127,18 @@ pub struct FieldRun {
     /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
+    /// The Canvas (language-sensitive glyph form) language of East Asian
+    /// text, present only where it differs from `lang_east_asia`. ECMA-376
+    /// §17.3.2.20 resolves it by element presence: a level whose `<w:lang>`
+    /// omits w:eastAsia leaves that axis to automatic determination, so no
+    /// inherited tag applies there (empty string: none). `lang_east_asia`
+    /// keeps its per-attribute merge for regional font selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia_canvas: Option<String>,
+    /// As `lang_east_asia_canvas`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi_canvas: Option<String>,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
@@ -3335,6 +3359,18 @@ pub struct TextRun {
     /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
+    /// The Canvas (language-sensitive glyph form) language of East Asian
+    /// text, present only where it differs from `lang_east_asia`. ECMA-376
+    /// §17.3.2.20 resolves it by element presence: a level whose `<w:lang>`
+    /// omits w:eastAsia leaves that axis to automatic determination, so no
+    /// inherited tag applies there (empty string: none). `lang_east_asia`
+    /// keeps its per-attribute merge for regional font selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia_canvas: Option<String>,
+    /// As `lang_east_asia_canvas`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi_canvas: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]

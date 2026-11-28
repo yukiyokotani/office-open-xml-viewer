@@ -1163,6 +1163,8 @@ fn evaluated_field_run(
             italic_cs: run.italic_cs,
             lang: run.lang,
             lang_script_class: run.lang_script_class,
+            lang_east_asia_canvas: run.lang_east_asia_canvas,
+            lang_bidi_canvas: run.lang_bidi_canvas,
             lang_bidi: run.lang_bidi,
             lang_east_asia: run.lang_east_asia,
             background: run.background,

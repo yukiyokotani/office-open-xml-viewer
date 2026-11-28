@@ -381,6 +381,78 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn canvas_east_asian_and_bidi_axes_follow_element_presence() {
+        // ECMA-376 §17.3.2.20: a present <w:lang> that omits w:eastAsia or
+        // w:bidi leaves that axis to automatic determination at its level, so
+        // no inherited tag reaches Canvas there. The per-attribute values stay
+        // as before: regional font selection and bidi digit classes read them.
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:style w:type="paragraph" w:styleId="Ja"><w:rPr><w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        for (rpr, ea_canvas, bidi_canvas) in [
+            // No w:lang on the run: the style's element applies whole.
+            ("", None, None),
+            // Only w:val on the run: both other axes are automatic.
+            (r#"<w:lang w:val="en-US"/>"#, Some(""), Some("")),
+            // The run names w:eastAsia again: only w:bidi is automatic.
+            (
+                r#"<w:lang w:val="en-US" w:eastAsia="ja-JP"/>"#,
+                None,
+                Some(""),
+            ),
+            (r#"<w:lang w:bidi="ar-SA" w:eastAsia="ja-JP"/>"#, None, None),
+        ] {
+            let p = parse_p(
+                &format!(
+                    r#"<w:pPr><w:pStyle w:val="Ja"/></w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>漢</w:t></w:r>"#
+                ),
+                &styles,
+            );
+            let wire = first_run_json(&p, "text");
+            // Regional inputs keep the per-attribute merge.
+            assert_eq!(wire["langEastAsia"], "ja-jp", "{rpr}");
+            assert_eq!(wire["langBidi"], "ar-sa", "{rpr}");
+            match ea_canvas {
+                Some(value) => assert_eq!(wire["langEastAsiaCanvas"], value, "{rpr}"),
+                None => assert!(wire.get("langEastAsiaCanvas").is_none(), "{rpr}"),
+            }
+            match bidi_canvas {
+                Some(value) => assert_eq!(wire["langBidiCanvas"], value, "{rpr}"),
+                None => assert!(wire.get("langBidiCanvas").is_none(), "{rpr}"),
+            }
+            // The paragraph mark follows the style chain only.
+            let mark = p.paragraph_mark_font_facts.as_ref().unwrap();
+            assert_eq!(mark.lang_east_asia_canvas, None, "{rpr}");
+            assert_eq!(mark.lang_bidi_canvas, None, "{rpr}");
+        }
+        // A character style chain folded into one level keeps presence: a
+        // run style with only w:val clears the paragraph style's w:eastAsia
+        // for Canvas, and its own w:eastAsia would restore it.
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:eastAsia="zh-CN"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="character" w:styleId="Val"><w:rPr><w:lang w:val="fr-FR"/></w:rPr></w:style>
+          <w:style w:type="character" w:styleId="ValChild"><w:basedOn w:val="Val"/></w:style>
+        </w:styles>"#
+        ));
+        let p = parse_p(
+            r#"<w:r><w:rPr><w:rStyle w:val="ValChild"/></w:rPr><w:t>漢</w:t></w:r>"#,
+            &styles,
+        );
+        let wire = first_run_json(&p, "text");
+        assert_eq!(wire["langEastAsia"], "zh-cn");
+        assert_eq!(wire["langEastAsiaCanvas"], "");
+        assert!(wire.get("langBidiCanvas").is_none());
+        // An untagged run carries neither key.
+        let p = parse_p(r#"<w:r><w:t>漢</w:t></w:r>"#, &StyleMap::default());
+        let wire = first_run_json(&p, "text");
+        assert!(wire.get("langEastAsiaCanvas").is_none());
+        assert!(wire.get("langBidiCanvas").is_none());
+    }
+
+    #[test]
     fn private_run_typography_is_identical_for_text_and_field_results() {
         let rpr = r#"<w:rPr>
           <w:u w:val="words" w:color="FF0000" w:themeColor="accent2" w:themeTint="20"/>
@@ -7884,6 +7956,15 @@ fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
     }
 }
 
+/// A Canvas language axis (`TextRun::lang_east_asia_canvas`): the
+/// element-presence value of ECMA-376 §17.3.2.20 where it differs from the
+/// per-attribute `regional` value, empty when it names none. Absent where the
+/// two agree, so documents whose levels name every attribute they inherit (and
+/// untagged documents) carry nothing new.
+fn canvas_language_axis(regional: &Option<String>, by_element: &Option<String>) -> Option<String> {
+    (regional != by_element).then(|| by_element.clone().unwrap_or_default())
+}
+
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     RunFontFacts {
@@ -7907,6 +7988,11 @@ fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
         lang_east_asia: fmt.lang_east_asia.clone(),
         lang: fmt.lang.clone(),
         lang_script_class: None,
+        lang_east_asia_canvas: canvas_language_axis(
+            &fmt.lang_east_asia,
+            &fmt.lang_east_asia_by_element,
+        ),
+        lang_bidi_canvas: canvas_language_axis(&fmt.lang_bidi, &fmt.lang_bidi_by_element),
         kerning: fmt.kerning,
     }
 }
@@ -8116,6 +8202,11 @@ fn make_field_run(
         lang_east_asia: fmt.lang_east_asia.clone(),
         lang: fmt.lang.clone(),
         lang_script_class: None,
+        lang_east_asia_canvas: canvas_language_axis(
+            &fmt.lang_east_asia,
+            &fmt.lang_east_asia_by_element,
+        ),
+        lang_bidi_canvas: canvas_language_axis(&fmt.lang_bidi, &fmt.lang_bidi_by_element),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -8220,6 +8311,8 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.lang_bidi == b.lang_bidi
         && a.lang_east_asia == b.lang_east_asia
         && a.lang == b.lang
+        && a.lang_east_asia_canvas == b.lang_east_asia_canvas
+        && a.lang_bidi_canvas == b.lang_bidi_canvas
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -8510,6 +8603,9 @@ fn parse_run_inner(
     let lang_bidi = fmt.lang_bidi.clone();
     let lang_east_asia = fmt.lang_east_asia.clone();
     let lang = fmt.lang.clone();
+    let lang_east_asia_canvas =
+        canvas_language_axis(&fmt.lang_east_asia, &fmt.lang_east_asia_by_element);
+    let lang_bidi_canvas = canvas_language_axis(&fmt.lang_bidi, &fmt.lang_bidi_by_element);
     let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
@@ -8609,6 +8705,8 @@ fn parse_run_inner(
                         lang_east_asia: lang_east_asia.clone(),
                         lang: lang.clone(),
                         lang_script_class: None,
+                        lang_east_asia_canvas: lang_east_asia_canvas.clone(),
+                        lang_bidi_canvas: lang_bidi_canvas.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8721,6 +8819,8 @@ fn parse_run_inner(
                         lang_east_asia: lang_east_asia.clone(),
                         lang: lang.clone(),
                         lang_script_class: None,
+                        lang_east_asia_canvas: lang_east_asia_canvas.clone(),
+                        lang_bidi_canvas: lang_bidi_canvas.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8784,6 +8884,8 @@ fn parse_run_inner(
                     lang_east_asia: lang_east_asia.clone(),
                     lang: lang.clone(),
                     lang_script_class: None,
+                    lang_east_asia_canvas: lang_east_asia_canvas.clone(),
+                    lang_bidi_canvas: lang_bidi_canvas.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -8900,6 +9002,8 @@ fn parse_run_inner(
                     lang_east_asia: lang_east_asia.clone(),
                     lang: lang.clone(),
                     lang_script_class: None,
+                    lang_east_asia_canvas: lang_east_asia_canvas.clone(),
+                    lang_bidi_canvas: lang_bidi_canvas.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -9141,6 +9245,8 @@ fn parse_run_inner(
                     lang_east_asia: lang_east_asia.clone(),
                     lang: lang.clone(),
                     lang_script_class: None,
+                    lang_east_asia_canvas: lang_east_asia_canvas.clone(),
+                    lang_bidi_canvas: lang_bidi_canvas.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,

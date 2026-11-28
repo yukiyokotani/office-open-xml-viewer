@@ -159,9 +159,12 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       // key is unchanged.
       ...((request.complexScript ? undefined : canvasLanguageTag(request.language)) !== undefined
         || request.complexScriptLanguage !== undefined || request.scriptClassLanguage !== undefined
+        || request.canvasEastAsiaLanguage !== undefined
         ? [['lang', (request.complexScript ? undefined : canvasLanguageTag(request.language)) ?? null,
           request.complexScriptLanguage ?? null,
-          ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : [])]] : []),
+          ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : []),
+          // The element-presence East Asian Canvas axis (canvasLanguageAxes).
+          ...(request.canvasEastAsiaLanguage !== undefined ? [['ea', request.canvasEastAsiaLanguage]] : [])]] : []),
     ] : null,
     segment.bold,
     segment.italic,

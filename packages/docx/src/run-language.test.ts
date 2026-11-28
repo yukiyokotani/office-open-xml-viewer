@@ -42,6 +42,7 @@ import type { ParagraphLayoutContext } from './layout-context.js';
 import { runOverlayMeasure } from './run-overlay-measure.js';
 import { canvasLanguageTag, createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
+import { buildSegments } from './line-layout.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
 
 // ECMA-376 §17.3.2.20 w:lang — w:val governs text that is neither East Asian
@@ -604,6 +605,37 @@ describe('Canvas lang at measure and paint', () => {
     // No text takes another run's East Asian language.
     const language = (text: string) => draws.find(draw => draw.text.includes(text))?.lang;
     expect([language('\u0433'), language('\u304b'), language('\u6f22')]).toEqual(['sr-rs', 'ja-jp', 'ja-jp']);
+  });
+
+  it('takes East Asian and complex-script Canvas languages by w:lang element presence', async () => {
+    // ECMA-376 §17.3.2.20: a style naming w:eastAsia="ja-JP" and w:bidi,
+    // then a run whose <w:lang> names only w:val. The parser keeps the
+    // per-attribute langEastAsia/langBidi (regional font selection, bidi
+    // digit classes) and records the element-presence Canvas axes apart.
+    const style = { lang: 'en-us', langEastAsia: 'ja-jp', langBidi: 'ar-sa' };
+    const partial = { ...style, langEastAsiaCanvas: '', langBidiCanvas: '' };
+    const { canvas, draws } = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([run('\u6f22', partial), run('x\u5b57', style)]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([
+      ['\u6f22', 'inherit'], ['x', 'en-us'], ['\u5b57', 'ja-jp'],
+    ]);
+    // The regional font-selection input keeps the inherited w:eastAsia.
+    const text = createLayoutServices(documentOf([]), { measureContext: recordingCanvas().ctx as never }).text;
+    const [han] = buildSegments([run('\u6f22', partial)] as unknown as Parameters<typeof buildSegments>[0], { pageIndex: 0, totalPages: 1,
+      compat: compatProfile({ compatibilityMode: 15 }), layoutServices: { text } as never });
+    expect(han && 'textShapeRequest' in han ? han.textShapeRequest : undefined).toMatchObject({
+      eastAsiaLanguage: 'ja-jp', canvasEastAsiaLanguage: null,
+    });
+    expect(han && 'textShapeRequest' in han ? han.textShapeRequest?.complexScriptLanguage : 'unset').toBeUndefined();
+    // Complex-script text: no Canvas language, while digits stay AN under
+    // the per-attribute w:bidi.
+    const arabic = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([run('\u0633 12-34', { cs: true, ...partial })]), arabic.canvas, 0, { dpr: 1, width: 600 });
+    expect(arabic.draws.map(draw => draw.text)).toEqual(expect.arrayContaining(['-', '12', '34', '\u0633']));
+    expect(new Set(arabic.draws.map(draw => draw.lang))).toEqual(new Set(['inherit']));
+    const inherited = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([run('\u0633', { cs: true, ...style })]), inherited.canvas, 0, { dpr: 1, width: 600 });
+    expect(inherited.draws.map(draw => draw.lang)).toEqual(['ar-sa']);
   });
 
   it('draws script-class runs in their class language, cluster seams included', async () => {

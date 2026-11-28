@@ -31,7 +31,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup, canvasLanguageTag } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup, canvasLanguageTag, canvasLanguageAxes } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -1360,6 +1360,7 @@ function pushSegmentPiece(
     ...emissionState.sequenceRun,
     lang: range.lang, langEastAsia: range.langEastAsia, langBidi: range.langBidi,
     langScriptClass: range.langScriptClass,
+    langEastAsiaCanvas: range.langEastAsiaCanvas, langBidiCanvas: range.langBidiCanvas,
   }) as ParagraphTextBearingRun;
   emissionState.digitsAsAN = bidiDigitsAsAN(emissionState, range.langBidi);
   pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,
@@ -1489,7 +1490,7 @@ function pushLanguagePiece(
     ...(r.lang ? { language: r.lang } : {}),
     // Vertical presentation forms join the language proof (TextShapeRequest).
     ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
-    ...(r.langBidi ? { complexScriptLanguage: r.langBidi } : {}),
+    ...canvasLanguageAxes(r),
     ...(r.langScriptClass !== undefined ? { scriptClassLanguage: r.langScriptClass } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),

@@ -109,6 +109,9 @@ export interface SequenceLanguageRange {
   readonly langEastAsia: string | undefined;
   readonly langBidi: string | undefined;
   readonly langScriptClass: string | undefined;
+  /** ParagraphTextFacts.langEastAsiaCanvas / langBidiCanvas of that run. */
+  readonly langEastAsiaCanvas: string | undefined;
+  readonly langBidiCanvas: string | undefined;
 }
 
 /**
@@ -145,7 +148,10 @@ function languageKey(run: SequenceRun): string {
   if (western === undefined && run.langEastAsia === undefined && run.langBidi === undefined
     && run.langScriptClass === undefined) return '';
   return JSON.stringify([western ?? null, run.langEastAsia ?? null, run.langBidi ?? null,
-    run.langScriptClass ?? null]);
+    run.langScriptClass ?? null,
+    // The element-presence Canvas axes (ParagraphTextFacts), only when set.
+    ...(run.langEastAsiaCanvas !== undefined || run.langBidiCanvas !== undefined
+      ? [run.langEastAsiaCanvas ?? null, run.langBidiCanvas ?? null] : [])]);
 }
 
 /** Whether a grapheme cluster boundary at `offset` of `text` can be
@@ -224,6 +230,7 @@ function languageRanges(
   return Object.freeze(ranges.map(({ end, run }) => Object.freeze({
     end, lang: run.lang, langEastAsia: run.langEastAsia, langBidi: run.langBidi,
     langScriptClass: run.langScriptClass,
+    langEastAsiaCanvas: run.langEastAsiaCanvas, langBidiCanvas: run.langBidiCanvas,
   })));
 }
 
