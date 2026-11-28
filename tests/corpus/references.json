@@ -686,5 +686,13 @@
   "xlsx-016-line-chart.win.pdf": {
     "source": "542d474da14f7c6d9b1d5e47de0b4371823de4a64404885c456b9d936d7b96df",
     "pdf": "aa0ab676431d8e0eae8ac3533e0681a785f3c9ec317bb5bd7afde14eb133e0b8"
+  },
+  "xlsx-017-chartex.mac.pdf": {
+    "source": "5d6159f70ccf1f0ab38fe8f172e6a32bf97ba7d3813dc98aa1f907dd2f3b9c21",
+    "pdf": "eaf05c443736f199fb83ec315eea2869461f1b811b4cd20952d27a01535e748f"
+  },
+  "xlsx-017-chartex.win.pdf": {
+    "source": "5d6159f70ccf1f0ab38fe8f172e6a32bf97ba7d3813dc98aa1f907dd2f3b9c21",
+    "pdf": "266c739742fbc83e3cb8c39a04b41d1b16e0056e38158c4f30734f8c26e22b23"
   }
 }
