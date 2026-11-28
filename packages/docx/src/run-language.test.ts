@@ -205,10 +205,10 @@ describe('text service: §17.3.2.20 language per font slot', () => {
         const out = stringify(...args);
         units += out?.length ?? 0;
         carriesPiece ||= out?.includes(text) === true;
-        // The piece enters a fragment's key as constant-size facts (Han
-        // presence, coverage per slot), whatever the piece's length.
+        // The piece enters a fragment's key as its Han presence alone,
+        // whatever the piece's length.
         const part = /\["faceText",("[^"]*")\]/u.exec(out ?? '');
-        if (part) expect(part[1]).toBe('"H0000"');
+        if (part) expect(part[1]).toBe('"H"');
         return out;
       });
       try {
@@ -277,6 +277,57 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     // rescan per fragment took 17,024 units for 128 fragments, 264,704 for
     // 512).
     for (const count of [128, 512]) expect(unitsFor(count)).toBeLessThanOrEqual(8 * count);
+  });
+
+  it('resolves untagged text directly, consulting no table keyed by its text', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver([
+        { requestedFamily: 'Scoped Face', resolvedFamily: 'Arabic Substitute', source: 'substitute', script: 'arabic' },
+      ], {
+        scriptScopedFamilies: { 'scoped face': { script: 'arabic', substituteFamilies: ['Arabic Substitute'] } },
+        regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
+        nativeFamilyLists: { Absent: '"Plain Face", serif' },
+      }),
+      measurer: { fingerprint: 'untagged-resolve', namedFamiliesDraw: () => true,
+        measure: request => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }) },
+    });
+    const text = '\u4e00\u0628\u4e8c-untagged';
+    const lookups = { count: 0 };
+    const tableGet = Map.prototype.get;
+    const tableHas = Map.prototype.has;
+    const spyGet = vi.spyOn(Map.prototype, 'get').mockImplementation(function (this: Map<unknown, unknown>, key: unknown) {
+      if (key === text) lookups.count += 1;
+      return tableGet.call(this, key);
+    });
+    const spyHas = vi.spyOn(Map.prototype, 'has').mockImplementation(function (this: Map<unknown, unknown>, key: unknown) {
+      if (key === text) lookups.count += 1;
+      return tableHas.call(this, key);
+    });
+    try {
+      for (const slot of ['ascii', 'eastAsia', 'complexScript'] as const) {
+        for (const fonts of [{ [slot]: 'Absent' }, { [slot]: 'Scoped Face' }]) {
+          scanned.units = 0;
+          service.resolve({ text, slot, fonts, eastAsiaLanguage: 'zh-cn', weight: 400, style: 'normal' });
+          // Re-resolving the text scans it again: no retained fact answers it.
+          const first = scanned.units;
+          service.resolve({ text, slot, fonts, eastAsiaLanguage: 'zh-cn', weight: 400, style: 'normal' });
+          expect(scanned.units).toBe(2 * first);
+        }
+      }
+      // Untagged shaping (no faceText) resolves its groups the same way. (A
+      // scoped face would add main's per-run scope cache, keyed by its run.)
+      service.shape({ text, fontSizePt: 10, eastAsiaLanguage: 'zh-cn', clusterGeometry: false as const,
+        measure: false as const, fonts: { eastAsia: 'Absent', complexScript: 'Absent' } });
+      expect(lookups.count).toBe(0);
+      // The probe sees the table a tagged piece's fragments use.
+      service.shape(sliceTextShapeRequest({ text, fontSizePt: 10, eastAsiaLanguage: 'zh-cn',
+        clusterGeometry: false as const, measure: false as const, faceText: text,
+        fonts: { eastAsia: 'Absent' } }, 0, 1));
+      expect(lookups.count).toBeGreaterThan(0);
+    } finally {
+      spyGet.mockRestore();
+      spyHas.mockRestore();
+    }
   });
 
   it('selects the Canvas language of a script-class run independently of the slot table', () => {
