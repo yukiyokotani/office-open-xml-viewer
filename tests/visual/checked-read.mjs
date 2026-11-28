@@ -21,6 +21,23 @@ export function readRegularFile(path) {
   }
 }
 
+/** Fail unless `path` is absent or a regular file with no other hard link.
+ * Only lstat is used, so callers can check every destination of a multi-file
+ * operation before they write or remove anything. */
+export function assertWritableLeaf(path) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!stat.isFile()) {
+    throw new Error(`refusing to write over a symlink or non-regular file: ${path}`);
+  }
+  if (stat.nlink > 1) throw new Error(`refusing to write over a hard-linked file: ${path}`);
+}
+
 /** Write a harness output file. An existing leaf must be a regular file with
  * no other hard link (a symlink or a named pipe there is refused before
  * anything is opened; a hard link would change the file it shares an inode
@@ -28,15 +45,7 @@ export function readRegularFile(path) {
  * nothing: the descriptor is checked first. Callers check the directory
  * components separately. */
 export function writeRegularFile(path, data) {
-  let stat;
-  try {
-    stat = lstatSync(path);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  if (stat && !stat.isFile()) {
-    throw new Error(`refusing to write over a symlink or non-regular file: ${path}`);
-  }
+  assertWritableLeaf(path);
   const fd = openSync(
     path,
     constants.O_WRONLY | constants.O_CREAT | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),

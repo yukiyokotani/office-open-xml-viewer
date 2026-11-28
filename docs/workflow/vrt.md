@@ -74,8 +74,8 @@ git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
 node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
 # Only if that command copied at least one specimen:
 export VRT_ALLOW_CORPUS_INPUT_CHANGES=1
-# Only when $base predates the harness (Harness bootstrap below), after copying
-# the harness files into the baseline worktree:
+# Only when the harness at $base differs from the candidate's (Harness
+# bootstrap below), after copying the harness files into the baseline worktree:
 # export VRT_ALLOW_HARNESS_CHANGES=1
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm
@@ -142,8 +142,14 @@ user decision covers is reported as unadjudicated, never as a pass.
 
 ## Harness bootstrap
 
-For the one-time bootstrap of a harness change against a baseline revision that
-predates it, copy only the allowlisted VRT harness files listed in
+The baseline must be captured by the same harness that compares it. Its
+manifests record the SHA-256 of each input as the harness served it to the
+fixture; an older harness writes no such `input` record, and the comparison
+then fails with a message that names this step. So bootstrap whenever the
+baseline revision's harness differs from the candidate's, and in particular
+when its `tests/visual/private-corpus.mjs` has no `routeSelfVrtInput`.
+
+For the one-time bootstrap, copy only the allowlisted VRT harness files listed in
 `tests/visual/private-corpus.mjs` (with `tests/visual/checked-read.mjs`) into the baseline worktree and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run.
 Renderer and parser changes remain forbidden.

@@ -49,7 +49,7 @@ import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
 import {
-  isCorpusInput, isCorpusInputPath, readRegularFile, writeRegularFile,
+  assertWritableLeaf, isCorpusInput, isCorpusInputPath, readRegularFile, writeRegularFile,
 } from './checked-read.mjs';
 
 const SCHEMA_VERSION = 2;
@@ -486,11 +486,34 @@ function assertNoSymlinkBelowCheckout(path) {
   }
 }
 
+/** Fail unless the harness may write `path`: below this checkout, reached
+ * without a symlink, and absent or a regular file with no other hard link.
+ * Operations that remove files before they write call it first, so that a
+ * destination they cannot write stops them before anything is removed. */
+function assertOutputWritable(path) {
+  assertNoSymlinkBelowCheckout(path);
+  assertWritableLeaf(path);
+}
+
 /** The one way the harness writes a manifest or an image. */
 function writeOutput(path, data) {
-  assertNoSymlinkBelowCheckout(path);
+  assertOutputWritable(path);
   mkdirSync(dirname(path), { recursive: true });
   writeRegularFile(path, data);
+}
+
+/** Entries of `directory` whose names match `pattern`, all of them regular
+ * files: only those are the harness's to remove, so anything else under such
+ * a name fails before a caller removes the first one. */
+function generatedFiles(directory, pattern) {
+  const matching = readdirSync(directory, { withFileTypes: true }).filter((file) => pattern.test(file.name));
+  const foreign = matching.find((file) => !file.isFile());
+  if (foreign) {
+    throw new Error(
+      `refusing to remove a self-VRT output that is not a regular file: ${join(directory, foreign.name)}`,
+    );
+  }
+  return matching.map((file) => file.name);
 }
 
 const ITEM_IMAGE = /^(page|sheet|slide)-\d+\.png$/;
@@ -503,7 +526,20 @@ const ITEM_IMAGE_OR_MANIFEST = /^(?:(page|sheet|slide)-\d+\.png|manifest\.json)$
  * file, fails the run instead of being skipped or removed. */
 function removeStaleDocuments(tree, files, directory, generated) {
   assertNoSymlinkBelowCheckout(tree);
-  const listed = new Set(files.map((file) => file.slice(directory.length + 1, file.lastIndexOf('.'))));
+  // A listed document's directory is recognized by file identity, not by its
+  // spelling: on a case-insensitive file system `Deck.pptx` writes into an
+  // existing `deck/`.
+  const identity = (path) => {
+    try {
+      const { dev, ino } = lstatSync(path);
+      return `${dev}:${ino}`;
+    } catch {
+      return null;
+    }
+  };
+  const listed = new Set(files.map(
+    (file) => identity(join(tree, file.slice(directory.length + 1, file.lastIndexOf('.')))),
+  ));
   let entries;
   try {
     entries = readdirSync(tree, { withFileTypes: true });
@@ -519,17 +555,11 @@ function removeStaleDocuments(tree, files, directory, generated) {
     if (entry.isSymbolicLink()) {
       throw new Error(`refusing to use a symlinked self-VRT output path: ${path}`);
     }
-    if (!entry.isDirectory() || listed.has(entry.name)) continue;
-    const stale = readdirSync(path, { withFileTypes: true }).filter((file) => generated.test(file.name));
-    // Only regular files are the harness's.
-    const foreign = stale.find((file) => !file.isFile());
-    if (foreign) {
-      throw new Error(`refusing to remove a self-VRT output that is not a regular file: ${join(path, foreign.name)}`);
-    }
-    removals.push({ path, stale });
+    if (!entry.isDirectory() || listed.has(identity(path))) continue;
+    removals.push({ path, stale: generatedFiles(path, generated) });
   }
   for (const { path, stale } of removals) {
-    for (const file of stale) unlinkSync(join(path, file.name));
+    for (const file of stale) unlinkSync(join(path, file));
     try {
       rmdirSync(path);
     } catch {
@@ -679,6 +709,8 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
   const { outputPrefix, directory: configured } = corpusConfig(corpus);
   const directory = configured ?? format;
   if (snapshot) {
+    // Before the cleanup removes anything.
+    assertOutputWritable(path);
     removeStaleDocuments(
       join(location.directory, `${outputPrefix}${directory}`), files, directory, ITEM_IMAGE_OR_MANIFEST,
     );
@@ -717,10 +749,7 @@ export function clearSelfVrtCandidateOutput({
     }
   }
   if (!existsSync(directory)) return;
-  const item = new RegExp(`^${itemKind}-\\d+\\.png$`);
-  for (const file of readdirSync(directory)) {
-    if (item.test(file)) unlinkSync(`${directory}/${file}`);
-  }
+  for (const file of generatedFiles(directory, itemPattern(itemKind))) unlinkSync(join(directory, file));
 }
 
 function itemPattern(itemKind) {
@@ -774,17 +803,21 @@ export function verifySelfVrtItemManifest({
     itemCount,
   };
   if (snapshot) {
-    assertNoSymlinkBelowCheckout(directory);
-    // A previous snapshot in this checkout may have rendered more items.
-    for (const stale of sortedItems(readdirSync(directory), itemKind)) {
-      if (!names.includes(stale)) unlinkSync(join(directory, stale));
-    }
-    const present = sortedItems(readdirSync(directory), itemKind);
-    if (JSON.stringify(present) !== JSON.stringify(names)) {
+    // Everything is checked before the first removal: the manifest
+    // destination, the type of every item image, and that this run captured
+    // every expected item.
+    assertOutputWritable(path);
+    const present = sortedItems(generatedFiles(directory, itemPattern(itemKind)), itemKind);
+    const missing = names.filter((name) => !present.includes(name));
+    if (missing.length > 0) {
       throw new Error(
         `snapshot item set mismatch at ${directory}\n`
         + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
       );
+    }
+    // A previous snapshot in this checkout may have rendered more items.
+    for (const stale of present) {
+      if (!names.includes(stale)) unlinkSync(join(directory, stale));
     }
     const items = names.map((name) => ({ name, sha256: sha256(readRegularFile(join(directory, name))) }));
     writeOutput(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
@@ -792,6 +825,13 @@ export function verifySelfVrtItemManifest({
   }
   const recorded = readBaselineJson(location, path);
   const { items: recordedItems, ...recordedHeader } = recorded;
+  if (recordedHeader.input === undefined) {
+    throw new Error(
+      `${path} has no "input" record: the baseline was captured by a harness without input binding. `
+      + 'Bootstrap the baseline worktree with this harness (docs/workflow/vrt.md, "Harness bootstrap"), '
+      + 'set VRT_ALLOW_HARNESS_CHANGES=1 for both runs and capture the snapshot again',
+    );
+  }
   assertExactManifest(recordedHeader, header, path);
   if (!Array.isArray(recordedItems)
     || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)) {

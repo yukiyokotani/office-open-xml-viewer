@@ -61,17 +61,25 @@ node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
 The command (built-ins only, run from the root of the candidate checkout)
 requires the destination to be the root of another Git checkout whose HEAD is
 `$base`. It copies the tracked specimens that the candidate's working tree
-adds or modifies relative to `$base`, creates a missing corpus folder, and
-refuses to write through a symlink. When the candidate deletes or renames a
-specimen it stops before writing anything: the two sides would render
-different input sets, which the self-VRT cannot compare.
+adds or modifies relative to `$base`, and creates a missing corpus folder.
+Every destination is checked before the first write, and any of these stops
+the copy with nothing written:
+
+- the candidate deletes or renames a specimen (the two sides would render
+  different input sets, which the self-VRT cannot compare);
+- a destination is a symlink, a hard link or not a regular file, or lies
+  below a symlinked folder;
+- a destination file is neither the base revision's nor already the
+  candidate's, that is, someone edited it. `--force` overwrites such files.
 
 The flag admits only a `.docx`/`.xlsx`/`.pptx` present directly in its own
 package's corpus folder. Any other file, a specimen deleted from the baseline
 and any renderer change still fail. The copies need no check of their own:
 the manifests bind every input by SHA-256 (threat model above), so a
 forgotten, renamed or stale copy fails the comparison. When the baseline
-revision predates this harness, also copy `tests/visual/private-corpus.mjs`,
+revision's harness differs from this one (always when its `private-corpus.mjs`
+has no `routeSelfVrtInput`: it would write manifests without the `input`
+record), also copy `tests/visual/private-corpus.mjs`,
 `tests/visual/checked-read.mjs`, `tests/visual/corpus-features.mjs` and
 `packages/*/tests/visual/visual.spec.ts` and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
