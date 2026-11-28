@@ -93,15 +93,12 @@ export interface DocxRenderedPage {
 }
 
 /**
- * Ready, paginated Node document. DOCX pagination is necessarily sequential and
- * retained because preceding flow determines later pages and total page count.
- * Parsing and transfer are nevertheless bounded: no whole document XML/JSON
- * value crosses the cursor, and only one page canvas is created per pull.
+ * Read-only Node DOCX session for the pictures a document model names. It
+ * needs no canvas factory: nothing is measured, paginated or rendered, so a
+ * process that only extracts content need not load a canvas backend.
  */
-export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
-  readonly pageCount: number;
+export interface DocxPictureSession {
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
-  pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }>;
   /**
    * Raw bytes of one picture the document model names (an image run's
    * `imagePath`), as a Blob of `mimeType` (default
@@ -110,14 +107,31 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
    * for an application model source, the picture keys its model assigns.
    * Another path rejects with a `TypeError` (or the archive's not-found
    * error) and leaves the session usable. Reads charge the session's archive
-   * budgets, results share the session's bounded raw-part cache with page
-   * rendering, a resource-limit failure fails the session, and the call
-   * rejects after `close()`.
+   * budgets, results are kept in a bounded raw-part cache (shared with page
+   * rendering in a {@link DocxDocumentSession}), a resource-limit failure
+   * fails the session, and the call rejects after `close()`.
    */
   getImage(path: string, mimeType?: string): Promise<Blob>;
+  close(): Promise<void>;
+}
+
+/** Options for {@link openDocxPictures}: those of `openDocxDocument` that do
+ * not concern measurement, pagination or rendering. */
+export type OpenDocxPicturesOptions =
+  OoxmlNodeSessionOptions & Pick<OpenDocxDocumentOptions, 'legacyDoc' | 'odt'>;
+
+/**
+ * Ready, paginated Node document. DOCX pagination is necessarily sequential and
+ * retained because preceding flow determines later pages and total page count.
+ * Parsing and transfer are nevertheless bounded: no whole document XML/JSON
+ * value crosses the cursor, and only one page canvas is created per pull.
+ */
+export interface DocxDocumentSession
+  extends DocxPictureSession, AsyncIterable<DocxRenderedPage> {
+  readonly pageCount: number;
+  pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }>;
   renderPage(pageIndex: number, options?: DocxPageRenderOptions): Promise<NodeCanvasLike>;
   pages(options?: DocxPageRenderOptions): AsyncGenerator<DocxRenderedPage, void, void>;
-  close(): Promise<void>;
 }
 
 /**
@@ -129,7 +143,9 @@ export async function openDocxDocument(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
-  if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
+  if (!options?.factory) throw new TypeError(
+    'openDocxDocument requires a canvas factory; openDocxPictures reads pictures without one',
+  );
   if (__OOXML_MODEL_SOURCES__ && (options.legacyDoc !== undefined || options.odt !== undefined)) {
     const { openDocxSource } = await import('./docx-model-source.ts');
     return openDocxSource(buffer, options, getDocxWasmModule);
@@ -235,6 +251,67 @@ export async function materializeDocxDocument(
   );
 }
 
+/**
+ * Open a read-only session over the pictures of a DOCX document (or of a
+ * `legacyDoc` / `odt` source) without a canvas factory. The document is parsed
+ * through the same acknowledged body cursor and archive budgets as
+ * {@link openDocxDocument}, which validates it and lets a model source build
+ * its picture store, but no layout state is created. Pair it with
+ * {@link materializeDocxDocument} for the `imagePath`s to read.
+ */
+export async function openDocxPictures(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenDocxPicturesOptions = {},
+): Promise<DocxPictureSession> {
+  if (__OOXML_MODEL_SOURCES__ && (options.legacyDoc !== undefined || options.odt !== undefined)) {
+    const { openDocxPicturesSource } = await import('./docx-model-source.ts');
+    return openDocxPicturesSource(buffer, options, getDocxWasmModule);
+  }
+  const acquired = await acquireDocxNodeDocument(
+    toUint8(buffer),
+    getDocxWasmModule(),
+    options,
+    (transport, identity, pullOptions) =>
+      materializeDocumentPullSession(transport, identity, pullOptions),
+  );
+  return admitDocxPictureSession(acquired, options.signal);
+}
+
+/** Wrap an acquired (already parsed) document in a picture session that owns
+ * its archive from here on, including on failure. */
+export function admitDocxPictureSession(
+  acquired: Readonly<{
+    archive: unknown;
+    usage: OoxmlResourceUsageSnapshot | undefined;
+    metrics: OoxmlResourceMetricsSession;
+    closeArchive(): void;
+  }>,
+  signal: AbortSignal | undefined,
+): DocxPictureSession {
+  try {
+    throwIfAborted(signal, ABORT_MESSAGE);
+    const session = new DocxPictureSessionImpl(
+      acquired.closeArchive,
+      acquired.archive as DocxNodeArchive,
+      acquired.usage,
+      acquired.metrics,
+      signal,
+    );
+    acquired.metrics.observeUsage(session.resourceUsage);
+    acquired.metrics.checkpoint('pictures ready');
+    return session;
+  } catch (error) {
+    try {
+      acquired.closeArchive();
+    } catch {
+      // Preserve the admission failure.
+    }
+    const normalized = parseResourceLimitError(error) ?? error;
+    acquired.metrics.fail(normalized);
+    throw normalized;
+  }
+}
+
 type SessionState = Readonly<{
   source: Awaited<ReturnType<typeof materializeDocumentPullLayoutSession>>;
   services: ReturnType<typeof createLayoutServices>;
@@ -243,15 +320,18 @@ type SessionState = Readonly<{
 type DefaultDocumentLayout =
   ReturnType<typeof retainRenderWorkerDocumentLayout>['layoutVariants']['defaultLayout'];
 
-export class DocxDocumentSessionImpl implements DocxDocumentSession {
-  readonly pageCount: number;
-  private readonly sizes: ReadonlyArray<Readonly<{ widthPt: number; heightPt: number }>>;
-  private lastResourceUsage: OoxmlResourceUsageSnapshot | undefined;
-  private state: SessionState | null;
-  private renderTail: Promise<void> = Promise.resolve();
-  private pagesStarted = false;
-  private closed = false;
+/**
+ * Picture reads, resource accounting and archive ownership. Used alone for a
+ * factory-less {@link DocxPictureSession} and as the base of the rendering
+ * {@link DocxDocumentSessionImpl}, so both serve `getImage()` identically.
+ */
+export class DocxPictureSessionImpl implements DocxPictureSession {
+  protected lastResourceUsage: OoxmlResourceUsageSnapshot | undefined;
+  protected closed = false;
   private closePromise: Promise<void> | undefined;
+  /** Set just before the archive is freed: an accepted render may still read,
+   * but nothing reaches a freed archive. */
+  private released = false;
   private resourceFailure: OoxmlResourceLimitError | null = null;
   /** Page rendering and getImage() share one retained byte owner per part,
    * bounded like the PPTX session's raw-part cache. */
@@ -259,11 +339,9 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
     maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
     maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
   });
-  private readonly fetchImage = (path: string, mimeType: string): Promise<Blob> =>
+  protected readonly fetchImage = (path: string, mimeType: string): Promise<Blob> =>
     this.rawParts.get(path, mimeType, () => {
-      // `state` is released just before the archive: an accepted render may
-      // still read, but nothing reaches a freed archive.
-      if (!this.state) throw new Error('DOCX document session is closed');
+      if (this.released) throw new Error('DOCX document session is closed');
       throwIfAborted(this.signal, ABORT_MESSAGE);
       const bytes = this.archive.extract_image(path);
       this.refreshResourceUsage();
@@ -273,22 +351,11 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
   constructor(
     private readonly closeArchive: () => void,
     private readonly archive: DocxNodeArchive,
-    source: SessionState['source'],
-    services: SessionState['services'],
-    layout: DefaultDocumentLayout,
-    private readonly factory: NodeCanvasFactory,
-    private readonly defaultCurrentDateMs: number,
     usage: OoxmlResourceUsageSnapshot | undefined,
-    private readonly metrics: OoxmlResourceMetricsSession,
-    private readonly signal?: AbortSignal,
+    protected readonly metrics: OoxmlResourceMetricsSession,
+    protected readonly signal?: AbortSignal,
   ) {
-    this.state = { source, services };
-    this.pageCount = layout.pages.length;
     this.lastResourceUsage = usage;
-    this.sizes = Object.freeze(layout.pages.map((page) => Object.freeze({
-      widthPt: page.geometry.widthPt,
-      heightPt: page.geometry.heightPt,
-    })));
   }
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
@@ -307,16 +374,6 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
     return this.lastResourceUsage;
   }
 
-  pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }> {
-    const size = this.sizes[pageIndex];
-    if (!size) throw new RangeError(`DOCX page index ${pageIndex} out of range`);
-    return size;
-  }
-
-  [Symbol.asyncIterator](): AsyncGenerator<DocxRenderedPage, void, void> {
-    return this.pages();
-  }
-
   async getImage(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
     try {
@@ -333,6 +390,88 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
       if (normalized instanceof OoxmlResourceLimitError) this.failOperation(normalized);
       throw normalized;
     }
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.refreshResourceUsage();
+    this.closed = true;
+    this.closePromise = this.release();
+    return this.closePromise;
+  }
+
+  /** Terminal outcome reported to the resource metrics on a clean close. */
+  protected outcome(): Readonly<Record<string, number>> {
+    return { documents: 1 };
+  }
+
+  protected async release(): Promise<void> {
+    dropDecodedBitmapCache(this.fetchImage);
+    dropSvgImageCache(this.fetchImage);
+    this.rawParts.clear();
+    this.released = true;
+    try {
+      this.closeArchive();
+    } catch (error) {
+      const normalized = parseResourceLimitError(error) ?? error;
+      this.metrics.fail(normalized);
+      throw normalized;
+    }
+    this.metrics.checkpoint('document session closed', this.lastResourceUsage);
+    this.metrics.succeed(this.outcome());
+  }
+
+  protected assertOpen(): void {
+    if (this.closed) throw new Error('DOCX document session is closed');
+    if (this.resourceFailure) throw this.resourceFailure;
+  }
+
+  protected failOperation(error: unknown): never {
+    const normalized = parseResourceLimitError(error) ?? error;
+    if (normalized instanceof OoxmlResourceLimitError) {
+      this.resourceFailure ??= normalized;
+    }
+    this.metrics.fail(normalized);
+    throw normalized;
+  }
+}
+
+export class DocxDocumentSessionImpl extends DocxPictureSessionImpl implements DocxDocumentSession {
+  readonly pageCount: number;
+  private readonly sizes: ReadonlyArray<Readonly<{ widthPt: number; heightPt: number }>>;
+  private state: SessionState | null;
+  private renderTail: Promise<void> = Promise.resolve();
+  private pagesStarted = false;
+
+  constructor(
+    closeArchive: () => void,
+    archive: DocxNodeArchive,
+    source: SessionState['source'],
+    services: SessionState['services'],
+    layout: DefaultDocumentLayout,
+    private readonly factory: NodeCanvasFactory,
+    private readonly defaultCurrentDateMs: number,
+    usage: OoxmlResourceUsageSnapshot | undefined,
+    metrics: OoxmlResourceMetricsSession,
+    signal?: AbortSignal,
+  ) {
+    super(closeArchive, archive, usage, metrics, signal);
+    this.state = { source, services };
+    this.pageCount = layout.pages.length;
+    this.sizes = Object.freeze(layout.pages.map((page) => Object.freeze({
+      widthPt: page.geometry.widthPt,
+      heightPt: page.geometry.heightPt,
+    })));
+  }
+
+  pageSize(pageIndex: number): Readonly<{ widthPt: number; heightPt: number }> {
+    const size = this.sizes[pageIndex];
+    if (!size) throw new RangeError(`DOCX page index ${pageIndex} out of range`);
+    return size;
+  }
+
+  [Symbol.asyncIterator](): AsyncGenerator<DocxRenderedPage, void, void> {
+    return this.pages();
   }
 
   renderPage(pageIndex: number, options: DocxPageRenderOptions = {}): Promise<NodeCanvasLike> {
@@ -386,49 +525,20 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
     }
   }
 
-  close(): Promise<void> {
-    if (this.closePromise) return this.closePromise;
-    this.refreshResourceUsage();
-    this.closed = true;
-    this.closePromise = this.release();
-    return this.closePromise;
+  protected override outcome(): Readonly<Record<string, number>> {
+    return { pages: this.pageCount };
+  }
+
+  protected override async release(): Promise<void> {
+    await this.renderTail;
+    this.state = null;
+    return super.release();
   }
 
   private enqueueRender<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.renderTail.then(operation, operation);
     this.renderTail = result.then(() => undefined, () => undefined);
     return result;
-  }
-
-  private async release(): Promise<void> {
-    await this.renderTail;
-    dropDecodedBitmapCache(this.fetchImage);
-    dropSvgImageCache(this.fetchImage);
-    this.rawParts.clear();
-    this.state = null;
-    try {
-      this.closeArchive();
-    } catch (error) {
-      const normalized = parseResourceLimitError(error) ?? error;
-      this.metrics.fail(normalized);
-      throw normalized;
-    }
-    this.metrics.checkpoint('document session closed', this.lastResourceUsage);
-    this.metrics.succeed({ pages: this.pageCount });
-  }
-
-  private assertOpen(): void {
-    if (this.closed) throw new Error('DOCX document session is closed');
-    if (this.resourceFailure) throw this.resourceFailure;
-  }
-
-  private failOperation(error: unknown): never {
-    const normalized = parseResourceLimitError(error) ?? error;
-    if (normalized instanceof OoxmlResourceLimitError) {
-      this.resourceFailure ??= normalized;
-    }
-    this.metrics.fail(normalized);
-    throw normalized;
   }
 
   private requireState(): SessionState {

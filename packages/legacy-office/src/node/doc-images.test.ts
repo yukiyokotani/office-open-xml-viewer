@@ -3,7 +3,8 @@
 import { expect, it } from 'vitest';
 import { buildDocFixture, concat, little16, little32 } from '../test-fixtures.js';
 import { testDocSource } from '../test-sources.js';
-import { materializeDocxDocument, openDocxDocument, skia, skiaFactory } from './node-facade.js';
+import { picturePng } from '../xls-pictures-fixture.js';
+import { materializeDocxDocument, openDocxDocument, openDocxPictures, skia, skiaFactory } from './node-facade.js';
 
 type Pixels = { width: number; height: number; getContext(kind: '2d'): { getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray } } };
 function record(kind: number, options: number, bytes: Uint8Array): Uint8Array {
@@ -68,6 +69,25 @@ it.skipIf(!skia)('returns the picture bytes for a synthetic legacy-doc image pat
     const image = await session.getImage(imagePath, mimeType);
     expect(image.type).toBe('image/png');
     expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
+  } finally { await session.close(); }
+  await expect(session.getImage(imagePath, mimeType)).rejects.toThrow(/closed/);
+});
+
+it('reads a legacy-doc picture without a canvas factory', async () => {
+  const bytes = buildDocFixture({ text: '\u0001', data: inlinePicture(picturePng, 0), characterProperties: concat(little16(0x0855), new Uint8Array([1]), little16(0x6a03), little32(0)) });
+  type Run = { type: string; imagePath?: string; mimeType?: string };
+  const model = await materializeDocxDocument(bytes, { legacyDoc: testDocSource() }) as unknown as { body: { runs?: Run[] }[] };
+  const [run] = model.body.flatMap(block => block.runs ?? []).filter(item => item.type === 'image');
+  const { imagePath, mimeType } = run as Required<Run>;
+
+  await expect(openDocxDocument(bytes, { legacyDoc: testDocSource() } as never))
+    .rejects.toThrow(/requires a canvas factory; openDocxPictures/);
+  const session = await openDocxPictures(bytes, { legacyDoc: testDocSource() });
+  try {
+    const image = await session.getImage(imagePath, mimeType);
+    expect(image.type).toBe('image/png');
+    expect(new Uint8Array(await image.arrayBuffer())).toEqual(picturePng);
+    await expect(session.getImage('legacy-doc/image/999')).rejects.toBeDefined();
   } finally { await session.close(); }
   await expect(session.getImage(imagePath, mimeType)).rejects.toThrow(/closed/);
 });

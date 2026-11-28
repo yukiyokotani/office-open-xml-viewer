@@ -79,7 +79,11 @@ export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions & {
    * nothing extra.
    */
   readonly ods?: ModelSource<'xlsx'>;
-  /** Canvas for a selected model source's Normal-font measurement. */
+  /**
+   * Canvas for a selected model source's Normal-font measurement. Without it,
+   * cell-anchored drawings of such a source are placed with the grid's
+   * fallback maximum digit width (8 px) instead of a measured one.
+   */
   readonly factory?: import('./render.ts').NodeCanvasFactory;
 };
 

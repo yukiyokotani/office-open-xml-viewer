@@ -58,6 +58,7 @@ export async function acquireXlsxInput(
   const {
     acquireXlsxSessionFromArchive,
     configureHostLayout,
+    MDW_FALLBACK,
     validateXlsxModelSourceArchive,
     validateXlsxModelSourceViewDefaults,
   } = await import('@silurus/ooxml-xlsx/internal/model-source-session');
@@ -72,7 +73,15 @@ export async function acquireXlsxInput(
   try {
     validateXlsxModelSourceViewDefaults(opened.viewDefaults);
     maximumDigitWidth = await configureHostLayout(opened.archive, async (font) => {
-      if (!options.factory) return undefined;
+      // Library policy, not an Office rule: without a canvas factory nothing
+      // in this realm can measure the Normal font, and this session renders
+      // nothing. Resolve cell anchors with the grid's own §18.3.1.13 fallback
+      // width instead of omitting the drawings, so their models (and their
+      // getImage() bytes) stay readable. The width is recorded in
+      // `layoutMetrics`, so a later render sizes the grid with the same width
+      // and drawings stay aligned with it; column positions are approximate
+      // when the Normal font's measured digit width differs.
+      if (!options.factory) return MDW_FALLBACK;
       const { measureHostLayoutFont } = await import('@silurus/ooxml-xlsx/internal/host-layout-measure');
       const context = options.factory.createCanvas(1, 1).getContext('2d');
       return context

@@ -5,6 +5,7 @@ export {
   materializePptxPresentation,
   materializeXlsxWorkbook,
   openDocxDocument,
+  openDocxPictures,
   openPptxPresentation,
   openXlsxWorkbook,
   renderSlideNode,

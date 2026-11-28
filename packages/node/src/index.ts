@@ -12,10 +12,13 @@ export {
 export {
   materializeDocxDocument,
   openDocxDocument,
+  openDocxPictures,
   type DocxDocumentSession,
   type DocxPageRenderOptions,
+  type DocxPictureSession,
   type DocxRenderedPage,
   type OpenDocxDocumentOptions,
+  type OpenDocxPicturesOptions,
 } from './docx';
 export {
   materializeXlsxWorkbook,

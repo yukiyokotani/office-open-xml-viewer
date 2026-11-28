@@ -5,6 +5,7 @@ export {
   type XlsxModelSourceArchive,
 } from './worker-worksheet-source.js';
 export { configureHostLayout, type HostLayoutFont } from './host-layout.js';
+export { MDW_FALLBACK } from './grid-metrics.js';
 export {
   acquireXlsxSessionFromArchive,
   type XlsxOwnedArchiveSource,
