@@ -183,6 +183,15 @@ describe('text that stands in for content that is not laid out', () => {
     expect(resolveRevisionAnchorRuns(meta.revisionAnchorRanges![0]!, runs).map((run) => run.text)).toEqual(['After']);
   });
 
+  it('is text for a deletion in a main-mode document as well', async () => {
+    const { layout, model } = await paintedDocument(body, parts);
+    const { doc } = documentOf(model, layout);
+    Object.assign(doc, { _revisionAnchorRanges: null });
+    const ranges = doc.revisionAnchorRanges();
+    expect(ranges).toHaveLength(1);
+    expect(resolveRevisionAnchorRuns(ranges[0]!, await doc.collectPageRuns(0)).map((run) => run.text)).toEqual(['After']);
+  });
+
   it('is text for a comment on that deletion too', async () => {
     const { layout, model, runs } = await paintedDocument(body, parts);
     const anchors = placedAnchors(layout, model);
@@ -202,6 +211,23 @@ describe('a comment range an application makes itself', () => {
     };
     expect(resolveCommentAnchorRuns(anchor, runs)).toEqual([word]);
     expect(resolveDocxCommentThreads([{ id: 'app-1', text: 'mine' }], [anchor], runs)).toHaveLength(1);
+  });
+});
+
+describe('a copy of a document\'s comment range', () => {
+  it('is the application\'s own: it is joined as given, without the document\'s placement', async () => {
+    // A reference-only comment after a run that crosses onto page two: the
+    // document's range stands on page two; a copy of it carries no
+    // placement and marks the fragment of the run on each page.
+    const { layout, model } = await paintedDocument(
+      `<w:p>${EXACT_12PT}${sized(`${'word '.repeat(910)}end`)}${REFERENCE}</w:p>`, COMMENT_PART);
+    const { doc } = documentOf(model, layout);
+    const [anchor] = doc.commentAnchorRanges();
+    const first = await doc.collectPageRuns(0);
+    expect(resolveCommentAnchorRuns(anchor!, first)).toEqual([]);
+    const copy = { ...anchor! };
+    expect(resolveCommentAnchorRuns(copy, first).length).toBeGreaterThan(0);
+    expect(resolveDocxCommentThreads(doc.comments, [copy], first)).toHaveLength(1);
   });
 });
 

@@ -1966,7 +1966,8 @@ export class DocxDocument {
       revisions,
       this._source,
       this._reviewProjectionIndex.renderedRunIndex,
-      projectionOptions,
+      // A deletion's stand-in is text, as in the worker's projection.
+      { ...projectionOptions, textRunIndex: this._reviewProjectionIndex.textRunIndex },
     );
     return this._revisionAnchorRanges;
   }

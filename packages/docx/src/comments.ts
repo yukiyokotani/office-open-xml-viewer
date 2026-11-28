@@ -104,6 +104,10 @@ function anchorOfRunsLayout(
   anchor: Readonly<CommentAnchorRange>,
   origin: CollectedRunsOrigin | undefined,
 ): Readonly<CommentAnchorRange> | undefined {
+  // A range the application made itself (a copy of a document's range
+  // included) is no part of any layout's projection: it is joined as given,
+  // whatever range of the projection has the same bounds.
+  if (!DOCUMENT_ANCHORS.has(anchor)) return anchor;
   const anchors = origin?.anchors;
   if (!anchors) return anchor;
   let counterparts = COUNTERPARTS.get(anchors);
@@ -111,9 +115,7 @@ function anchorOfRunsLayout(
     counterparts = new Map(anchors.map((own) => [anchorKey(own), own]));
     COUNTERPARTS.set(anchors, counterparts);
   }
-  // A range the application made itself is no part of any layout's
-  // projection: it is joined as given.
-  return counterparts.get(anchorKey(anchor)) ?? (DOCUMENT_ANCHORS.has(anchor) ? undefined : anchor);
+  return counterparts.get(anchorKey(anchor));
 }
 
 /** The placement of an anchor in the layout it was collected against;
