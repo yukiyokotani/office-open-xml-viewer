@@ -33,6 +33,10 @@ interface CommentThread {
 export interface DocxCommentMarginModel {
   readonly comments: readonly DocComment[];
   readonly anchors: readonly CommentAnchorRange[];
+  /** The page the margin is built for. A range decided for the whole
+   * document (CommentAnchorRange.cardOwner) carries its card only on its
+   * `cardPageIndex`; without a page index every page that shows it does. */
+  readonly pageIndex?: number;
 }
 
 interface ResolvedPageCommentAnchor {
@@ -184,9 +188,13 @@ export function buildDocxCommentMargin(
   const cardAnchor = new Map<string, CommentAnchorRange>();
   const cardElsewhere = new Set<string>();
   // A range decided for the whole document (CommentAnchorRange.cardOwner)
-  // carries its thread's card on every page; nothing is decided per page.
+  // carries its thread's card on its first page that shows it, and no
+  // other page draws the card; nothing is decided per page.
   for (const anchor of model.anchors) {
-    if (anchor.cardOwner && visibleThreadIds.has(anchor.commentId)) cardAnchor.set(anchor.commentId, anchor);
+    if (!anchor.cardOwner || !visibleThreadIds.has(anchor.commentId)) continue;
+    if (model.pageIndex === undefined || anchor.cardPageIndex === undefined
+      || anchor.cardPageIndex === model.pageIndex) cardAnchor.set(anchor.commentId, anchor);
+    else cardElsewhere.add(anchor.commentId);
   }
   for (const anchor of model.anchors) {
     const id = anchor.commentId;

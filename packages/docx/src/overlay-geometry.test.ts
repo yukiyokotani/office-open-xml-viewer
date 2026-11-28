@@ -763,6 +763,45 @@ describe('the card of a comment that starts in clipped text and ends on a later 
   });
 });
 
+describe('the card of a comment whose paragraph crosses a page break', () => {
+  const crossing = (lines: number) => '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>'
+    + '<w:commentRangeStart w:id="1"/>'
+    + Array.from({ length: lines }, (_, line) => `${line > 0 ? '<w:r><w:br/></w:r>' : ''}${sized(`L${line}`)}`).join('')
+    + '</w:p>';
+  const cardsPerPage = (layout: Awaited<ReturnType<typeof paintedDocument>>['layout'],
+    model: Awaited<ReturnType<typeof paintedDocument>>['model']) => {
+    const index = reviewProjectionIndexForDocument(layout);
+    const anchors = collectLayoutSourceCommentRangesIfPresent(model.comments, layoutSourceStore(model), index.renderedRunIndex,
+      { cardOwners: { sourcePages: index.sourcePages, runsForPage: (page) => textRunsForPage(layout, page, { scale: 1 }) } });
+    installDom();
+    return layout.pages.map((_, pageIndex) => {
+      const tint = makeEl('div');
+      const margin = makeEl('div');
+      margin.clientHeight = 800;
+      buildDocxCommentMargin(tint as never, margin as never, textRunsForPage(layout, pageIndex, { scale: 1 }),
+        { comments: model.comments ?? [], anchors, pageIndex }, 612, 792, null, () => undefined, 1, 260, false);
+      return [margin.children.length, tint.children.length > 0];
+    });
+  };
+
+  it('stands on the first page that shows the owner range only, the range tinted on every page', async () => {
+    // The comment starts before the first line of a 70-line paragraph that
+    // crosses into page two and ends in a paragraph that starts page three.
+    const { layout, model } = await paintedDocument(crossing(70)
+      + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${sized('Tail')}<w:commentRangeEnd w:id="1"/>`
+      + '<w:r><w:commentReference w:id="1"/></w:r></w:p>', COMMENT_PART);
+    expect(layout.pages).toHaveLength(3);
+    expect(cardsPerPage(layout, model)).toEqual([[1, true], [0, true], [0, true]]);
+  });
+
+  it('stands on the first page of a single range that crosses a page break', async () => {
+    const { layout, model } = await paintedDocument(crossing(70).replace('</w:p>',
+      '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>'), COMMENT_PART);
+    expect(layout.pages).toHaveLength(2);
+    expect(cardsPerPage(layout, model)).toEqual([[1, true], [0, true]]);
+  });
+});
+
 describe('a comment that starts at the end of a paragraph', () => {
   it('marks the commented paragraph only, not the run before the range', async () => {
     const { layout, model, runs } = await paintedDocument(

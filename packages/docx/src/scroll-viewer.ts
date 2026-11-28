@@ -1250,7 +1250,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       slot.commentTintLayer,
       slot.commentMargin,
       slot.commentRuns,
-      { comments: this._doc.comments, anchors: this._doc.commentAnchorRanges() },
+      { comments: this._doc.comments, anchors: this._doc.commentAnchorRanges(), pageIndex: page },
       this._pageWidthPx(page),
       this._pageHeightPx(page),
       this._activeCommentId,

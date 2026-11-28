@@ -27,12 +27,16 @@ export interface CommentAnchorRange {
    * earlier page of the same paragraph, shows nothing of it and does not
    * resolve it from the reference boundary. */
   readonly coveredGeometry?: true;
-  /** Set on the one range of a comment with several ranges that carries the
-   * comment's margin card and marker: the first, in document order, of which
-   * a page shows something (assignCommentCardOwners). Absent for a comment
-   * with one range, and for ranges not decided against a laid-out document;
-   * the card then stands with the first range a page shows. */
+  /** Set on the one range of a comment that carries the comment's margin
+   * card and marker: the first, in document order, of which a page shows
+   * something (assignCommentCardOwners). Absent for ranges not decided
+   * against a laid-out document; the card then stands with the first range
+   * a page shows. */
   readonly cardOwner?: true;
+  /** With `cardOwner`: the first page that shows something of this range,
+   * where the card and marker stand. Later pages that show the range, such
+   * as the next page of a paragraph that crosses a page break, tint it only. */
+  readonly cardPageIndex?: number;
 }
 
 export interface CommentAnchorPoint {
@@ -226,12 +230,13 @@ function nearestProjectedText(
     : preceding ?? following;
 }
 
-/** Decide, once for a laid-out document, which range of each comment with
- * several ranges carries its margin card: the first range, in document
- * order, of which some page shows something (its runs have geometry inside
- * their clips there). Every page then draws the card with that range and no
- * other, so a comment whose first paragraph is clipped away, on this page or
- * on another, still has one card. `sourcePages` names the pages that hold
+/** Decide, once for a laid-out document, which range of each comment
+ * carries its margin card: the first range, in document order, of which some
+ * page shows something (its runs have geometry inside their clips there),
+ * and the first page that shows it. That page draws the card with that
+ * range and no other page or range does, so a comment has one card when its
+ * first paragraph is clipped away, on this page or on another, and when a
+ * range crosses a page break. `sourcePages` names the pages that hold
  * runs of each paragraph source and `runsForPage` projects a page; only the
  * pages of undecided ranges are projected, each once. Ranges are returned in
  * their order, the owners marked (`cardOwner`). */
@@ -247,9 +252,8 @@ export function assignCommentCardOwners(
     else byComment.set(anchor.commentId, [index]);
   });
   const projected = new Map<number, readonly Readonly<DocxTextRunInfo>[]>();
-  const owners = new Set<number>();
+  const owners = new Map<number, number>();
   for (const indices of byComment.values()) {
-    if (indices.length < 2) continue;
     owner: for (const index of indices) {
       const anchor = anchors[index]!;
       const pages = new Set<number>();
@@ -260,7 +264,7 @@ export function assignCommentCardOwners(
         let runs = projected.get(page);
         if (!runs) projected.set(page, runs = runsForPage(page));
         if (overlayBoxes(resolveCommentAnchorRuns(anchor, runs)).length > 0) {
-          owners.add(index);
+          owners.set(index, page);
           break owner;
         }
       }
@@ -268,7 +272,9 @@ export function assignCommentCardOwners(
   }
   if (owners.size === 0) return anchors;
   return Object.freeze(anchors.map((anchor, index) => (
-    owners.has(index) ? Object.freeze({ ...anchor, cardOwner: true as const }) : anchor)));
+    owners.has(index)
+      ? Object.freeze({ ...anchor, cardOwner: true as const, cardPageIndex: owners.get(index)! })
+      : anchor)));
 }
 
 /** Resolve one document story's §17.13.4 marks. Kept module-public for focused
