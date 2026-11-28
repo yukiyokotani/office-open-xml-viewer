@@ -1,9 +1,10 @@
 // Tables of an `odp` source keep the ODF row-height rule in the Node session
-// renderer by the option that claimed the input, not by a model field: a
-// provider whose tables omit `odfRowHeights` paints them the same way.
+// renderer by the option that claimed the input: a provider whose tables omit
+// `odfRowHeights` gets the field set on the model it is given, as data, so a
+// copy of the model (structuredClone) keeps it.
 import { describe, expect, it, vi } from 'vitest';
 import { buildOdpFixture } from '../odp-fixture.js';
-import { testOdpSource } from '../test-sources.js';
+import { createOdp } from '../odp.js';
 import { materializePptxPresentation, openPptxPresentation, renderSlideNode } from './node-facade.js';
 import type { NodeCanvasFactory, NodeCanvasLike } from '../../../node/src/index.ts';
 
@@ -62,10 +63,14 @@ function fakeFactory(): NodeCanvasFactory {
   return { createCanvas: vi.fn(() => fake()), loadImage: vi.fn(async () => ({ width: 1, height: 1 })) };
 }
 
-/** Drop the parser's marker, as an application provider might. */
-function unmark(slide: SlideModel): void {
-  for (const element of slide.elements) if (element.type === 'table') delete element.odfRowHeights;
-}
+/** The ODP source with `odfRowHeights` stripped from every pulled slide, as
+ * an application provider might supply it. */
+const unmarkedOdpSource = () => createOdp({
+  wasmUrl: new URL('../wasm-odp/opendocument_odp_bg.wasm', import.meta.url).href,
+  moduleUrl: new URL('./odp-unmarked-source-module.ts', import.meta.url).href,
+});
+
+const tables = (slide: unknown) => (slide as SlideModel).elements.filter((element) => element.type === 'table');
 
 const WIDTH = 960;
 // 28cm slide = 793.7pt.
@@ -73,10 +78,10 @@ const PX_PER_PT = WIDTH / (28 / 2.54 * 72);
 
 describe('ODP table sizing in the Node session renderer', () => {
   it('keeps the ODF rule for an unmarked table from the odp option', async () => {
-    const session = await openPptxPresentation(deck(), { odp: testOdpSource() });
+    const session = await openPptxPresentation(deck(), { odp: unmarkedOdpSource() });
     try {
       for await (const slide of session) {
-        unmark(slide as unknown as SlideModel);
+        expect(tables(slide).map((table) => table.odfRowHeights)).toEqual([true]);
         const { canvas, rows } = strokeCanvas(PX_PER_PT);
         await session.renderSlide(canvas, slide, { width: WIDTH, dpr: 1, factory: fakeFactory() });
         expect(rows()).toEqual([0, 10, 20]);
@@ -86,19 +91,20 @@ describe('ODP table sizing in the Node session renderer', () => {
     }
   });
 
-  it('keeps it for a materialized slide too', async () => {
-    const presentation = await materializePptxPresentation(deck(), { odp: testOdpSource() });
-    unmark(presentation.slides[0] as unknown as SlideModel);
-    const { canvas, rows } = strokeCanvas(PX_PER_PT);
-    await renderSlideNode(canvas, presentation, 0, { width: WIDTH, dpr: 1, factory: fakeFactory() });
-    expect(rows()).toEqual([0, 10, 20]);
+  it('keeps it for a materialized slide and for a structured clone of it', async () => {
+    const presentation = await materializePptxPresentation(deck(), { odp: unmarkedOdpSource() });
+    for (const model of [presentation, structuredClone(presentation)]) {
+      const { canvas, rows } = strokeCanvas(PX_PER_PT);
+      await renderSlideNode(canvas, model, 0, { width: WIDTH, dpr: 1, factory: fakeFactory() });
+      expect(rows()).toEqual([0, 10, 20]);
+    }
   });
 
   it('follows the claiming option when one provider fills both', async () => {
     // legacyPpt claims first: its unmarked table takes PowerPoint growth.
-    const source = testOdpSource();
+    const source = unmarkedOdpSource();
     const presentation = await materializePptxPresentation(deck(), { legacyPpt: source as never, odp: source });
-    unmark(presentation.slides[0] as unknown as SlideModel);
+    expect(tables(presentation.slides[0]).map((table) => table.odfRowHeights)).toEqual([undefined]);
     const { canvas, rows } = strokeCanvas(PX_PER_PT);
     await renderSlideNode(canvas, presentation, 0, { width: WIDTH, dpr: 1, factory: fakeFactory() });
     expect(rows()[1]).toBeGreaterThan(10);

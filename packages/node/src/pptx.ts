@@ -31,7 +31,7 @@ import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { toUint8 } from './input-normalization.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
-import { markOdfPptxSlide, markParsedPptxSlide } from './pptx-parsed-slides.ts';
+import { markOdfPptxTables, markParsedPptxSlide } from './pptx-parsed-slides.ts';
 import { throwIfAborted } from '@silurus/ooxml-core/internal/abort';
 
 const ABORT_MESSAGE = 'PPTX presentation session was aborted';
@@ -159,7 +159,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
      * chains are fully resolved (issue #1989). A model source passes false
      * and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
     private readonly parsedTextChain = true,
-    /** Slides come from the `odp` source option (markOdfPptxSlide). */
+    /** Slides come from the `odp` source option (markOdfPptxTables). */
     private readonly odfTables = false,
   ) {
     this.slideCount = bootstrap.slideCount;
@@ -266,7 +266,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         this.metrics.observeUsage(this.usage);
         this.consumedSlides = index + 1;
         if (this.parsedTextChain) markParsedPptxSlide(slide);
-        if (this.odfTables) markOdfPptxSlide(slide);
+        if (this.odfTables) markOdfPptxTables(slide);
         yield slide;
       }
     } catch (error) {

@@ -5100,11 +5100,13 @@ export function renderTextBody(
   tableCell?: TableCellText,
 ): number | void {
   const tableLayouts = tableCell?.layouts;
-  // A growth-rule table measure takes every line by the painted line box.
+  // A growth-rule table cell is sized and painted by the painted line box.
   // spAutoFit's allowance for the resolved font's design box (#1473) is
   // shape autofit: it resizes a shape, and the host font's bounding box is
-  // not the line advance paint uses, so it stays out of table row sizing.
-  const paintedLineBoxMeasure = measureOnly && tableCell?.paintedLineBox === true;
+  // not the line advance, so it stays out of table cells on the growth rule,
+  // in measurement and in paint alike (baseline and vertical anchor), so the
+  // row sizing and the glyph placement use one geometry.
+  const paintedLineBoxMeasure = tableCell?.paintedLineBox === true;
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
   // above another in columns; see stacked-text.ts and core layoutStackedText.
   if (body.vert === 'wordArtVert' || body.vert === 'wordArtVertRtl') {
@@ -7816,7 +7818,7 @@ export interface TableLayoutMemo {
 interface TableCellText {
   /** Measured layouts for reuse (TableLayoutAccess). */
   layouts?: TableLayoutAccess;
-  /** Row sizing on the growth rule: measure by the painted line box. */
+  /** A growth-rule cell: size and paint by the painted line box. */
   paintedLineBox?: boolean;
 }
 
@@ -7969,12 +7971,28 @@ export function renderTable(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
-) {
-  renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
+): number {
+  return renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
+}
+
+/**
+ * The height (EMU) renderTable paints for `el`: the sum of its rows after
+ * content growth, computed by the same row sizing without painting. Hit
+ * testing uses it when no paint reported the extent.
+ */
+export function measureTableExtent(
+  ctx: CanvasRenderingContext2D,
+  el: TableElement,
+  scale: number,
+  slideNumber: number | undefined,
+  rc: RenderContext,
+): number {
+  return renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, undefined, true);
 }
 
 /** renderTable with a caller-owned layout memo; exported for tests, which
- * observe its retention. Not re-exported from index.ts. */
+ * observe its retention. Not re-exported from index.ts. Returns the painted
+ * height in EMU (the grown row sum); `sizeOnly` stops after row sizing. */
 export function renderTableWithLayoutMemo(
   memo: TableLayoutMemo,
   ctx: CanvasRenderingContext2D,
@@ -7983,7 +8001,8 @@ export function renderTableWithLayoutMemo(
   slideNumber: number | undefined,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
-) {
+  sizeOnly = false,
+): number {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
   const x0 = emuToPx(el.x, scale);
@@ -8065,7 +8084,10 @@ export function renderTableWithLayoutMemo(
   // (tableParagraphLayout).
   const sizingInput = (earlierRule: boolean): TableCellText | undefined =>
     earlierRule ? undefined : { layouts: { memo, record: true }, paintedLineBox: true };
-  const paintInput: TableCellText = { layouts: { memo, record: false } };
+  const paintInput = (body: TextBody): TableCellText => ({
+    layouts: { memo, record: false },
+    ...(keepsEarlierRule(body) ? {} : { paintedLineBox: true }),
+  });
   const sizingTextColor = (cell: TableCell, earlierRule: boolean): string | null =>
     !earlierRule && cell.textColor ? hexToRgba(cell.textColor) : null;
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
@@ -8147,6 +8169,14 @@ export function renderTableWithLayoutMemo(
     } else {
       rowHeights[last] += needed - have;
     }
+  }
+
+  // The extent paint covers, in EMU: hit testing extends the authored frame
+  // to it (element-selection).
+  const paintedHeightEmu = rowHeights.reduce((sum, h) => sum + h, 0) / scale;
+  if (sizeOnly) {
+    ctx.restore();
+    return paintedHeightEmu;
   }
 
   // ── Column x-positions ────────────────────────────────────────────────────
@@ -8353,7 +8383,7 @@ export function renderTableWithLayoutMemo(
           undefined,
           false,
           false,
-          paintInput,
+          paintInput(cell.textBody),
         );
       } finally {
         // The cell is painted: its measured layouts are not needed again.
@@ -8557,6 +8587,7 @@ export function renderTableWithLayoutMemo(
     ctx.restore();
   }
   ctx.restore();
+  return paintedHeightEmu;
 }
 
 // ===== Public API =====
@@ -8637,6 +8668,12 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
    *  (LoadOptions.odp): every table keeps the ODF row-height rule
    *  (RenderContext.odfTables), whether or not the source marks it. */
   odfTables?: boolean;
+  /** Receives the painted height (EMU) of each source table element, by
+   *  its index in the slide model, for hit testing (element-selection). */
+  onTableExtent?: (elementIndex: number, heightEmu: number) => void;
+  /** Size the slide's tables (reporting them to onTableExtent) without
+   *  painting, loading images or touching the canvas backing store. */
+  measureTablesOnly?: boolean;
 };
 
 /**
@@ -8833,6 +8870,68 @@ async function renderSlideLeased(
     slide = { ...slide, elements };
   }
 
+  const defaultTextColor = slide.theme ? slide.theme.defaultTextColor : opts.defaultTextColor;
+  const themeDefaultColor = defaultTextColor
+    ? `#${defaultTextColor}`
+    : '#000000';
+  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
+  // default, literal black, not the theme dk1 (issue #1989;
+  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
+  // resolves every inherited colour, including the default-template tx1 of a
+  // master without txStyles. Only this package's own paths (presentation,
+  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
+  // to the public `renderSlide` has no proven parsed chain, with or without a
+  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
+  // 0.89.7. The theme colour above also colours the synthetic SmartArt
+  // fallback shape, which has no PowerPoint counterpart.
+  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
+
+  const pictureBulletImages = new Map<string, SvgImageSource | null>();
+  const shapeFillImages = new Map<string, PreparedShapeFill | null>();
+  const rc: RenderContext = {
+    cjkFallback: opts.cjkFallback ? pptxSlideCjkFallback(slide, slide.theme ? slide.theme.majorFont : opts.majorFont ?? null, slide.theme ? slide.theme.minorFont : opts.minorFont ?? null, opts.cjkFallback) : undefined,
+    themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
+    themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
+    themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
+    ...(opts.odfTables ? { odfTables: true } : {}),
+    embeddedFontAliases: opts.embeddedFontAliases,
+    embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
+    embeddedFontTuples: opts.embeddedFontTuples,
+    officeFontRoutes: opts.officeFontRoutes,
+    officeInstalledFamilies: opts.officeInstalledFamilies,
+    fontSources: opts.fontSources,
+    // Symbol-font codes are judged in the realm of this render's painting
+    // context: by the presentation's oracle, kept while the realm's faces are
+    // unchanged, or by one of this render alone (core symbol-face.ts).
+    symbolFaces: opts.symbolFaces
+      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
+      : createSymbolFaceOracle(
+        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
+      ),
+    // The backing store may have been clamped below `canvasSize × dpr`; downstream
+    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
+    dpr: effectiveDpr,
+    // Issue #805 — legible default for the synthetic SmartArt fallback shape's
+    // null-colour runs, derived once per slide from the background luminance.
+    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor)
+      ?? themeDefaultColor,
+    pictureBulletImages,
+    shapeFillImages,
+  };
+
+  if (opts.measureTablesOnly) {
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!ctx) throw new Error('Could not get 2D context');
+    for (const [elementIndex, el] of slide.elements.entries()) {
+      if (el.type !== 'table') continue;
+      const sourceIndex = sourceIndices ? sourceIndices[elementIndex] : elementIndex;
+      if (sourceIndex === undefined) continue;
+      opts.onTableExtent?.(sourceIndex, measureTableExtent(ctx, el, scale, slide.slideNumber, rc));
+    }
+    return canvas;
+  }
+
   const plannedImages = planSlideImages(
     slide,
     canvasW,
@@ -8892,56 +8991,6 @@ async function renderSlideLeased(
     );
     return canvas;
   }
-
-  const defaultTextColor = slide.theme ? slide.theme.defaultTextColor : opts.defaultTextColor;
-  const themeDefaultColor = defaultTextColor
-    ? `#${defaultTextColor}`
-    : '#000000';
-  // A parsed run whose whole chain authors no fill paints PowerPoint's hard
-  // default, literal black, not the theme dk1 (issue #1989;
-  // `HARD_DEFAULT_TEXT_COLOR` in the parser records the controls); the parser
-  // resolves every inherited colour, including the default-template tx1 of a
-  // master without txStyles. Only this package's own paths (presentation,
-  // render worker, Node parsed slides) pass `parsedTextChain`. A model passed
-  // to the public `renderSlide` has no proven parsed chain, with or without a
-  // slide theme, so it keeps the theme or caller `defaultTextColor`, as in
-  // 0.89.7. The theme colour above also colours the synthetic SmartArt
-  // fallback shape, which has no PowerPoint counterpart.
-  const hardDefaultTextColor = opts.parsedTextChain ? '#000000' : themeDefaultColor;
-
-  const pictureBulletImages = new Map<string, SvgImageSource | null>();
-  const shapeFillImages = new Map<string, PreparedShapeFill | null>();
-  const rc: RenderContext = {
-    cjkFallback: opts.cjkFallback ? pptxSlideCjkFallback(slide, slide.theme ? slide.theme.majorFont : opts.majorFont ?? null, slide.theme ? slide.theme.minorFont : opts.minorFont ?? null, opts.cjkFallback) : undefined,
-    themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
-    themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
-    themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
-    ...(opts.odfTables ? { odfTables: true } : {}),
-    embeddedFontAliases: opts.embeddedFontAliases,
-    embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
-    embeddedFontTuples: opts.embeddedFontTuples,
-    officeFontRoutes: opts.officeFontRoutes,
-    officeInstalledFamilies: opts.officeInstalledFamilies,
-    fontSources: opts.fontSources,
-    // Symbol-font codes are judged in the realm of this render's painting
-    // context: by the presentation's oracle, kept while the realm's faces are
-    // unchanged, or by one of this render alone (core symbol-face.ts).
-    symbolFaces: opts.symbolFaces
-      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
-      : createSymbolFaceOracle(
-        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
-        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
-      ),
-    // The backing store may have been clamped below `canvasSize × dpr`; downstream
-    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
-    dpr: effectiveDpr,
-    // Issue #805 — legible default for the synthetic SmartArt fallback shape's
-    // null-colour runs, derived once per slide from the background luminance.
-    smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor)
-      ?? themeDefaultColor,
-    pictureBulletImages,
-    shapeFillImages,
-  };
 
   // Steps painted before the slide's elements, in paint order. A step with a
   // failure stops further preparation, exactly as the former interleaved paint
@@ -9471,8 +9520,11 @@ async function renderSlideLeased(
         if (step.failure) throw step.failure.error;
       }
     } else if (el.type === 'table') {
-      withPatternCoordinateSpace(ctx, slidePatternFrame, () =>
-        renderTable(ctx, el, scale, slideNumber, rc, elementTextRun));
+      withPatternCoordinateSpace(ctx, slidePatternFrame, () => {
+        const heightEmu = renderTable(ctx, el, scale, slideNumber, rc, elementTextRun);
+        const sourceIndex = sourceIndices ? sourceIndices[elementIndex] : elementIndex;
+        if (sourceIndex !== undefined) opts.onTableExtent?.(sourceIndex, heightEmu);
+      });
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
       // so PT_TO_EMU * scale gives pixels-per-point at the current display size.

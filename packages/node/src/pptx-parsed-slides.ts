@@ -13,15 +13,16 @@ export function isParsedPptxSlide(slide: object): boolean {
   return parsedSlides.has(slide);
 }
 
-/** Slides an ODP model source (`odp`) decoded. Their tables keep the ODF
- * row-height rule whether or not the provider marks them (the renderer's
- * `odfTables`). Identity, like the parsed marker. */
-const odfSlides = new WeakSet<object>();
-
-export function markOdfPptxSlide(slide: object): void {
-  odfSlides.add(slide);
-}
-
-export function isOdfPptxSlide(slide: object): boolean {
-  return odfSlides.has(slide);
+/** Record on a slide decoded by the `odp` source option that its tables
+ * keep the ODF row-height rule, as data (TableElement.odfRowHeights), so a
+ * copy of the model (structuredClone, JSON) keeps it and a provider that
+ * omits the field gets it. Covers tables in equation-branch fallbacks too. */
+export function markOdfPptxTables(slide: { elements: readonly object[] }): void {
+  const visit = (elements: readonly object[]): void => {
+    for (const element of elements as readonly { type?: string; odfRowHeights?: boolean; mathFallback?: { elements: readonly object[] } }[]) {
+      if (element.type === 'table') element.odfRowHeights = true;
+      if (element.mathFallback) visit(element.mathFallback.elements);
+    }
+  };
+  visit(slide.elements);
 }

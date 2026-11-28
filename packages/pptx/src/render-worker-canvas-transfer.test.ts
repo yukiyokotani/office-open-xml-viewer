@@ -13,6 +13,7 @@ import type { RenderWorkerResponse } from './worker-protocol.js';
 
 const mocks = vi.hoisted(() => ({
   render: vi.fn(async (..._args: unknown[]) => undefined),
+  elements: [] as unknown[],
 }));
 
 class FakePptxArchive {
@@ -28,7 +29,7 @@ class FakePptxArchive {
   pull_slide(): Uint8Array {
     return new TextEncoder().encode(JSON.stringify({
       index: 0, slideNumber: 1, partName: 'ppt/slides/slide1.xml',
-      background: null, elements: [], notes: null, hidden: false,
+      background: null, elements: mocks.elements, notes: null, hidden: false,
     }));
   }
   slide_cursor_resource_usage(): Uint8Array {
@@ -140,7 +141,9 @@ function expectCallerSurface(worker: LoopbackWorker, kind: string): FakeOffscree
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  mocks.render.mockClear();
+  mocks.render.mockReset();
+  mocks.render.mockImplementation(async () => undefined);
+  mocks.elements = [];
   FakeOffscreenCanvas.created = [];
 });
 
@@ -215,4 +218,46 @@ describe('PPTX render worker parsed text-colour chain', () => {
       }
     },
   );
+});
+
+describe('PPTX render worker table hit testing', () => {
+  // A table whose rows grow paints beyond its authored frame; the worker hit
+  // tests against the extent its last render reported, and sizes the tables
+  // without painting when the slide was never rendered.
+  const EMU = 12700;
+  const table = {
+    type: 'table', x: 0, y: 0, width: 100 * EMU, height: 20 * EMU, rotation: 0, flipH: false, flipV: false,
+    cols: [100 * EMU], rows: [{ height: 20 * EMU, cells: [] }],
+  };
+  const reportGrownRow = async (...args: unknown[]): Promise<undefined> => {
+    (args[4] as { onTableExtent?: (index: number, height: number) => void }).onTableExtent?.(0, 24 * EMU);
+    return undefined;
+  };
+  const hitAt = async (dispatch: (data: unknown) => Promise<void>, worker: LoopbackWorker, id: number, y: number) => {
+    await dispatch({ kind: 'hitTestElement', id, slideIndex: 0, point: { x: 10 * EMU, y }, options: {} });
+    const reply = worker.received.find((message) => (message as { id?: number }).id === id) as
+      { context: { elementType: string; bounds: { height: number } } | null };
+    return reply.context;
+  };
+
+  it('hits the painted extent of a grown table after a render', async () => {
+    mocks.elements = [table];
+    mocks.render.mockImplementation(reportGrownRow);
+    const { worker, dispatch } = await loadWorker();
+    await dispatch({ kind: 'renderSlide', id: 7, slideIndex: 0, width: 320, dpr: 1 });
+    const hit = await hitAt(dispatch, worker, 8, 22 * EMU);
+    expect(hit?.elementType).toBe('table');
+    expect(hit?.bounds.height).toBe(20 * EMU);
+    expect(await hitAt(dispatch, worker, 9, 25 * EMU)).toBeNull();
+    expect(mocks.render).toHaveBeenCalledOnce();
+  });
+
+  it('sizes the tables without painting when the slide was never rendered', async () => {
+    mocks.elements = [table];
+    mocks.render.mockImplementation(reportGrownRow);
+    const { worker, dispatch } = await loadWorker();
+    expect((await hitAt(dispatch, worker, 8, 22 * EMU))?.elementType).toBe('table');
+    expect(mocks.render).toHaveBeenCalledOnce();
+    expect((mocks.render.mock.calls[0]![4] as { measureTablesOnly?: boolean }).measureTablesOnly).toBe(true);
+  });
 });

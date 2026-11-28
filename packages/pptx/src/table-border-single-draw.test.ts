@@ -861,6 +861,39 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(edges(40, 10)).toEqual([24, 48]);
   });
 
+  it('places a growth-rule spAutoFit cell\'s glyphs by the same line box it was sized by', () => {
+    // One 20pt line in a 10pt row grows the row to 24pt. Paint must seat the
+    // glyph in that box (baseline 0.8 x 24pt = 19.2pt) for every anchor,
+    // whatever font bounding box the canvas reports: the design-box
+    // allowance of spAutoFit stays out of table cells in paint too.
+    for (const anchor of ['t', 'ctr', 'b']) {
+      for (const box of [{ ascent: 8, descent: 2 }, { ascent: 40, descent: 10 }]) {
+        const textBody = {
+          verticalAnchor: anchor,
+          paragraphs: [{
+            alignment: 'l', marL: 0, marR: 0, indent: 0,
+            spaceBefore: null, spaceAfter: null, spaceLine: null,
+            runs: [{ type: 'text', text: 'fit', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+            bullet: { type: 'none' }, eaLnBrk: true,
+          }],
+          defaultFontSize: null, defaultBold: null, defaultItalic: null,
+          lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+          wrap: 'square', vert: 'horz', autoFit: 'sp',
+        } as unknown as TextBody;
+        const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+        t.rows[0].height = 10 * EMU;
+        t.height = 10 * EMU;
+        const recording = makeRecordingCtx(undefined, box);
+        renderTable(recording.ctx, t, SCALE);
+        const label = `${anchor} ${box.ascent}/${box.descent}`;
+        expect(recording.strokes.filter((st) => Math.abs(st.y1 - st.y2) < 0.5).map((st) => Math.floor(st.y1)), label)
+          .toEqual([24]);
+        expect(recording.texts.map(({ text }) => text), label).toEqual(['fit']);
+        expect(recording.texts[0]!.y, label).toBeCloseTo(19.2, 5);
+      }
+    }
+  });
+
   it('measures an earlier-rule cell with the earlier sizing input', () => {
     // A two-column body (numCol=2) keeps the earlier rule. Its runs
     // alternate an explicit red "A" with a "V " that inherits the cell's

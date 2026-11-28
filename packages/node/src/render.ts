@@ -17,7 +17,7 @@ import { resolveCjkFallback, type CjkFallback } from '@silurus/ooxml-core';
  */
 
 import type { Presentation } from '@silurus/ooxml-pptx';
-import { isOdfPptxSlide, isParsedPptxSlide } from './pptx-parsed-slides.ts';
+import { isParsedPptxSlide } from './pptx-parsed-slides.ts';
 
 let nodeCanvasRuntimeTail: Promise<void> = Promise.resolve();
 
@@ -297,7 +297,6 @@ export async function renderSlideNode(
         // Symbol colour probes draw on the caller's own canvas backend.
         ...(opts.factory ? { createCanvas: (w: number, h: number) => opts.factory!.createCanvas(w, h) } : {}),
         ...(isParsedPptxSlide(slide) ? { parsedTextChain: true } : {}),
-        ...(isOdfPptxSlide(slide) ? { odfTables: true } : {}),
       },
     );
   };

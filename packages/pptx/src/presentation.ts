@@ -278,6 +278,16 @@ export class PptxPresentation {
   private _parsedTextChain = true;
   /** Slides come from LoadOptions.odp (set by the model-source loader). */
   private _odfTables = false;
+  /** Painted table heights (EMU) by slide and element index from the last
+   * main-mode render of each slide; hit testing extends table frames to
+   * them. Keyed by index, so they outlive slide-repository eviction. */
+  private _tableExtentsBySlide?: Map<number, Map<number, number>>;
+  /** Width of the last main-mode render, for measuring an unrendered slide. */
+  private _lastRenderWidth?: number;
+
+  private get _tableExtents(): Map<number, Map<number, number>> {
+    return this._tableExtentsBySlide ??= new Map();
+  }
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -1264,6 +1274,21 @@ export class PptxPresentation {
       }
       this._assertSlideIndex(slideIndex);
       await this._waitForSlide(slideIndex);
+      await this._paintSlide(canvas, slideIndex, opts, false);
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /** Main-mode paint, or with `measureTablesOnly` the sizing of the slide's
+   * tables alone (recording their extents) with the same render options. */
+  private async _paintSlide(
+    canvas: HTMLCanvasElement | OffscreenCanvas,
+    slideIndex: number,
+    opts: RenderSlideOptions,
+    measureTablesOnly: boolean,
+  ): Promise<void> {
+    {
       if (this._destroyed) throw new Error('Presentation destroyed');
       const compact = this._preflight;
       const repository = this._slides;
@@ -1271,6 +1296,9 @@ export class PptxPresentation {
       const errorPlaceholderText = this._errorPlaceholderText(slideIndex, opts.errorPlaceholder);
       const dpr = opts.dpr ?? defaultDpr();
       const width = opts.width ?? ((isHTMLCanvas(canvas) ? canvas.offsetWidth : 0) || 960);
+      if (!measureTablesOnly) this._lastRenderWidth = width;
+      const extents = new Map<number, number>();
+      this._tableExtents.set(slideIndex, extents);
       const requests = await repository.withSlide(slideIndex, (slide) =>
         pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
       if (this._destroyed) throw new Error('Presentation destroyed');
@@ -1295,6 +1323,8 @@ export class PptxPresentation {
           {
             width,
             dpr,
+            onTableExtent: (elementIndex, heightEmu) => { extents.set(elementIndex, heightEmu); },
+            ...(measureTablesOnly ? { measureTablesOnly: true } : {}),
             defaultTextColor: compact.defaultTextColor,
             parsedTextChain: this._parsedTextChain,
             odfTables: this._odfTables,
@@ -1324,8 +1354,6 @@ export class PptxPresentation {
           opts.onTextRun,
         );
       });
-    } catch (error) {
-      this._rethrowWithResourceFailure(error);
     }
   }
 
@@ -1452,8 +1480,19 @@ export class PptxPresentation {
         return (response as Extract<RenderWorkerResponse, { kind: 'elementHit' }>).context;
       }
       if (!this._slides) throw new Error('Presentation not loaded');
+      // Tables paint beyond their authored frame when rows grow: hit test
+      // against the extents the last render reported, sizing the tables
+      // (without painting) when this slide has not been rendered.
+      const hasTable = await this._slides.withSlide(slideIndex,
+        (slide) => slide.elements.some((element) => element.type === 'table'));
+      if (hasTable && !this._tableExtents.has(slideIndex)) {
+        const surface = typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(1, 1)
+          : document.createElement('canvas');
+        await this._paintSlide(surface, slideIndex, { width: this._lastRenderWidth ?? 960, dpr: 1 }, true);
+      }
       return await this._slides.withSlide(slideIndex, (slide) =>
-        hitTestPptxSlideContext(slideIndex, slide, point, options));
+        hitTestPptxSlideContext(slideIndex, slide, point, options, this._tableExtents.get(slideIndex)));
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }
