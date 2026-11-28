@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -722,5 +722,57 @@ test('allowance copies recorded at snapshot time must stay present and identical
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a non-regular or symlinked candidate input is rejected without being read', (t) => {
+  const { root, first } = baselineRepository();
+  const candidate = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-candidate-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-outside-'));
+  const rel = 'packages/pptx/public/corpus';
+  const module = new URL('./private-corpus.mjs', import.meta.url).href;
+  // A separate process with a timeout: reading a named pipe would block forever.
+  const verify = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { verifyBaselineCheckout } from ${JSON.stringify(module)};
+    try {
+      verifyBaselineCheckout({ checkout: ${JSON.stringify(root)}, revision: ${JSON.stringify(first)}, candidate: ${JSON.stringify(candidate)} });
+      console.log('accepted');
+    } catch (error) { console.log(error.message); }
+  `], {
+    encoding: 'utf8',
+    timeout: 15000,
+    env: { ...process.env, VRT_ALLOW_CORPUS_INPUT_CHANGES: '1', VRT_ALLOW_HARNESS_CHANGES: '' },
+  });
+  try {
+    mkdirSync(join(root, rel), { recursive: true });
+    mkdirSync(join(candidate, rel), { recursive: true });
+    writeFileSync(join(root, rel, 'deck.pptx'), 'x');
+    const fifo = join(candidate, rel, 'deck.pptx');
+    try {
+      execFileSync('mkfifo', [fifo]);
+    } catch {
+      t.diagnostic('mkfifo unavailable; skipping the named-pipe case');
+    }
+    if (existsSync(fifo)) {
+      const result = verify();
+      assert.equal(result.error, undefined, 'must not block on the pipe');
+      assert.match(result.stdout, /must be a regular file without symlinks at .*candidate/);
+      unlinkSync(fifo);
+    }
+    // A symlinked candidate input, even to identical bytes.
+    writeFileSync(join(outside, 'x.pptx'), 'x');
+    symlinkSync(join(outside, 'x.pptx'), join(candidate, rel, 'deck.pptx'));
+    assert.match(verify().stdout, /must be a regular file without symlinks at .*candidate/);
+    unlinkSync(join(candidate, rel, 'deck.pptx'));
+    // A symlinked directory component.
+    rmSync(join(candidate, rel), { recursive: true });
+    mkdirSync(join(outside, 'dir'));
+    writeFileSync(join(outside, 'dir/deck.pptx'), 'x');
+    symlinkSync(join(outside, 'dir'), join(candidate, rel));
+    assert.match(verify().stdout, /must be a regular file without symlinks at .*candidate/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(candidate, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

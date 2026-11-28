@@ -187,21 +187,39 @@ function copyDigest(path) {
   return digest;
 }
 
+/** True when `path` below `root` is a regular file and no component of it,
+ * from `root` down, is a symlink. Only lstat is used, so a named pipe or other
+ * special file is never opened. */
+function isPlainFile(root, path) {
+  let current = root;
+  for (const component of path.split('/').filter(Boolean)) {
+    current = join(current, component);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink()) return false;
+  }
+  return lstatSync(current).isFile();
+}
+
 function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
   for (const path of paths) {
     const file = join(root, path);
-    let stat;
-    try {
-      stat = lstatSync(file);
-    } catch {
+    if (!existsSync(file) && !isSymlink(file)) {
       throw new Error(`${label} corpus input ${path} is missing at ${root}`);
     }
-    if (!stat.isFile() || realpathSync(file) !== file) {
+    if (!isPlainFile(root, path) || realpathSync(file) !== file) {
       throw new Error(`${label} corpus input ${path} must be a regular file without symlinks at ${root}`);
     }
     if (candidate === root) continue;
     const own = join(candidate, path);
-    if (!existsSync(own) || copyDigest(own) !== copyDigest(file)) {
+    if (!isPlainFile(candidate, path)) {
+      throw new Error(`${label} corpus input ${path} must be a regular file without symlinks at ${candidate}`);
+    }
+    if (copyDigest(own) !== copyDigest(file)) {
       throw new Error(`${label} corpus input ${path} differs from the candidate's ${own}`);
     }
   }
@@ -218,6 +236,7 @@ function allowedCorpusInputs({ tracked, untracked }) {
  * SHA-256, for the corpus manifest. */
 function snapshotCorpusInputs(root) {
   const paths = allowedCorpusInputs(checkoutState(root));
+  assertCandidateCorpusInputs({ root, candidate: root, paths, label: 'self-VRT snapshot' });
   return paths.map((path) => ({ path, sha256: copyDigest(join(root, path)) }));
 }
 
