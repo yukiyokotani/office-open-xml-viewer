@@ -2377,3 +2377,46 @@ fn an_oversized_language_component_bounds_the_class_language_tag() {
         .iter()
         .all(|lang| lang.as_deref() == Some("en-US")));
 }
+
+#[test]
+fn oversized_regional_languages_are_not_copied_to_paragraph_marks_and_fields() {
+    // An Asian language with a 1,024-byte country cannot match a regional
+    // font list: the paragraph marks and the field must not each retain it.
+    let country = "x".repeat(1024);
+    let style = format!(
+        r#"<style:style style:name="P" style:family="paragraph"><style:text-properties style:language-asian="ja" style:country-asian="{country}" style:language-complex="ar" style:country-complex="{country}"/></style:style><style:style style:name="Ok" style:family="paragraph"><style:text-properties style:language-asian="ja" style:country-asian="JP"/></style:style>"#
+    );
+    let body = format!(
+        "{}<text:p text:style-name=\"P\"><text:page-number>1</text:page-number></text:p><text:p text:style-name=\"Ok\"><text:page-number>1</text:page-number></text:p>",
+        "<text:p text:style-name=\"P\"/>".repeat(32)
+    );
+    let document = read_fixture(Fixture {
+        automatic: &style,
+        body: &body,
+        ..Fixture::default()
+    });
+    let paragraphs = paragraphs(&document.body);
+    for paragraph in &paragraphs[..33] {
+        let facts = paragraph.paragraph_mark_font_facts.as_ref().unwrap();
+        assert_eq!(facts.lang_east_asia, None);
+        assert_eq!(facts.lang_bidi, None);
+    }
+    for run in &paragraphs[32].runs {
+        if let DocRun::Field(field) = run {
+            assert_eq!(field.lang_east_asia, None);
+            assert_eq!(field.lang_bidi, None);
+        }
+    }
+    // Valid regional inputs are unchanged.
+    let ok = paragraphs[33].paragraph_mark_font_facts.as_ref().unwrap();
+    assert_eq!(ok.lang_east_asia.as_deref(), Some("ja-JP"));
+    let field = paragraphs[33]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Field(field) => Some(field),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(field.lang_east_asia.as_deref(), Some("ja-JP"));
+}

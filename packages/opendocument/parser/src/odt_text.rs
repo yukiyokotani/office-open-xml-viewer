@@ -1326,8 +1326,8 @@ impl<'a> Reader<'a> {
                     // The field result is text of the same style: its
                     // §17.3.2.20-equivalent language axes too.
                     lang: text.lang.clone(),
-                    lang_east_asia: text.lang_east_asia.clone(),
-                    lang_bidi: text.lang_bidi.clone(),
+                    lang_east_asia: text.lang_east_asia.clone().and_then(admitted_regional_language),
+                    lang_bidi: text.lang_bidi.clone().and_then(admitted_regional_language),
                     lang_script_class: match language {
                         Some(tag) => properties
                             .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty())),
@@ -1965,8 +1965,16 @@ impl RunProperties {
             kerning: self.kerning,
             // The paragraph mark's text style carries its languages as well.
             lang: self.lang.as_deref().map(str::to_string),
-            lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
-            lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
+            lang_east_asia: self
+                .lang_east_asia
+                .as_deref()
+                .filter(|value| regional_language_admitted(value))
+                .map(str::to_string),
+            lang_bidi: self
+                .lang_bidi
+                .as_deref()
+                .filter(|value| regional_language_admitted(value))
+                .map(str::to_string),
             lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..RunFontFacts::default()
         }
@@ -1982,6 +1990,22 @@ impl RunProperties {
 /// Canvas language of the class is `class_language_tag`.
 /// Longest class language retained as a Canvas language, in UTF-16 units.
 const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
+
+/// Whether an East Asian or complex regional value (language-COUNTRY, matched
+/// against the renderer's regional font lists) is short enough to be kept on
+/// the facts this module adds for non-text glyphs (paragraph marks, fields): a
+/// value over the Canvas language limit matches no regional list, and copying
+/// it into every paragraph would multiply an oversized string. Text runs keep
+/// their long-standing values. UTF-16 units never exceed UTF-8 bytes, so short
+/// values skip the count.
+fn regional_language_admitted(value: &str) -> bool {
+    value.len() <= MAX_CANVAS_LANGUAGE_TAG_UNITS
+        || value.encode_utf16().count() <= MAX_CANVAS_LANGUAGE_TAG_UNITS
+}
+
+fn admitted_regional_language(value: String) -> Option<String> {
+    regional_language_admitted(&value).then_some(value)
+}
 
 fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
     // Untagged styles: no language attribute anywhere, so no lookups.
