@@ -342,9 +342,12 @@ pub struct Cascade<'a> {
     /// (namespace, name): the index of its key and value in `order`. The
     /// keys borrow the stored names, so a lookup allocates nothing.
     values: HashMap<(&'a str, &'a str), usize>,
-    /// The keys and values in first-seen order (nearest style first), with
-    /// the position in `styles` of the style that sets each.
-    order: Vec<(&'a Key, &'a str, usize)>,
+    /// The keys and values in first-seen order (nearest style first).
+    order: Vec<(&'a Key, &'a str)>,
+    /// The position in `styles` of the style that sets each resolved
+    /// language attribute (text group only): the only attributes whose
+    /// meaning depends on which alternative is set nearer (§§20.343–20.345).
+    language_depths: Vec<(&'a Key, usize)>,
     /// Whether any style of a text-properties search order sets a language
     /// attribute (`is_language_attribute`), found while the order is
     /// flattened. A cascade without one resolves no language, so language
@@ -378,6 +381,12 @@ fn count_language_lookup(namespace: &str, name: &str) {
 /// script, §20.188/§20.256/§20.257 country and §§20.343–20.345
 /// style:rfc-language-tag (with their -asian and -complex forms).
 fn is_language_attribute(namespace: &str, name: &str) -> bool {
+    // Every language attribute name holds one of these words; testing the
+    // short local name first skips the namespace URI comparison for the
+    // other text properties.
+    if !(name.contains("language") || name.contains("script") || name.contains("country")) {
+        return false;
+    }
     (namespace == NS_FO && matches!(name, "language" | "script" | "country"))
         || (namespace == NS_STYLE
             && matches!(
@@ -412,6 +421,7 @@ impl<'a> Cascade<'a> {
         let mut order = Vec::new();
         let text_group = group == TEXT;
         let mut names_language = false;
+        let mut language_depths = Vec::new();
         for (position, style) in styles.iter().enumerate() {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
@@ -419,8 +429,11 @@ impl<'a> Cascade<'a> {
                         values.entry((key.0.as_str(), key.1.as_str()))
                     {
                         entry.insert(order.len());
-                        order.push((key, value.as_str(), position));
-                        names_language |= text_group && is_language_attribute(&key.0, &key.1);
+                        order.push((key, value.as_str()));
+                        if text_group && is_language_attribute(&key.0, &key.1) {
+                            names_language = true;
+                            language_depths.push((key, position));
+                        }
                     }
                 }
             }
@@ -430,6 +443,7 @@ impl<'a> Cascade<'a> {
             group,
             values,
             order,
+            language_depths,
             names_language,
         })
     }
@@ -453,14 +467,15 @@ impl<'a> Cascade<'a> {
 
     /// The position in the search order (0 = nearest) of the style that sets
     /// the attribute's resolved value, for attributes whose meaning depends
-    /// on which of two alternatives is set nearer.
+    /// on which of two alternatives is set nearer: language attributes
+    /// (`is_language_attribute`) of a text-properties cascade, else `None`.
     pub fn depth(&self, namespace: &str, name: &str) -> Option<usize> {
         #[cfg(test)]
         count_language_lookup(namespace, name);
-        let values: &HashMap<(&str, &str), usize> = &self.values;
-        values
-            .get(&(namespace, name))
-            .map(|index| self.order[*index].2)
+        self.language_depths
+            .iter()
+            .find(|(key, _)| key.0 == namespace && key.1 == name)
+            .map(|(_, position)| *position)
     }
 
     pub fn element(&self, name: &str) -> Option<&'a [Element]> {
@@ -474,10 +489,7 @@ impl<'a> Cascade<'a> {
 
     /// Every attribute key set anywhere in the cascade (for admission).
     pub fn keys(&self) -> Vec<Key> {
-        self.order
-            .iter()
-            .map(|(key, _, _)| (*key).clone())
-            .collect()
+        self.order.iter().map(|(key, _)| (*key).clone()).collect()
     }
 
     /// Every element-valued property name set anywhere in the cascade.
