@@ -267,14 +267,17 @@ export function acquireTextSequences(
   // state (every sequence of a document without languages) records nothing.
   let stretches: LanguageStretch[] | undefined;
   let texts: string[] = [];
-  let displays: string[] = [];
+  // The displayed text of a sequence with a language seam, for its ranges:
+  // collected from the first seam on (the runs before it are displayed
+  // again then), so a sequence of one language state buffers nothing.
+  let displays: string[] | undefined;
   let sources: TextSequenceSource[] = [];
   let optionalHyphens: TextSequence['optionalHyphens'][number][] = [];
   let offset = 0;
   const finish = () => {
     if (first && sources.length > 1) {
       const text = texts.join('');
-      const ranges = stretches ? languageRanges(displays.join(''), stretches, firstLanguages) : undefined;
+      const ranges = stretches && displays ? languageRanges(displays.join(''), stretches, firstLanguages) : undefined;
       sequences.set(start, {
         run: Object.freeze({ ...first, text,
           ...(ranges ? { languageRanges: ranges } : {}),
@@ -290,7 +293,7 @@ export function acquireTextSequences(
     first = undefined;
     stretches = undefined;
     texts = [];
-    displays = [];
+    displays = undefined;
     sources = [];
     optionalHyphens = [];
     offset = 0;
@@ -343,9 +346,15 @@ export function acquireTextSequences(
       if (languages !== stretches.at(-1)!.key) stretches.push({ start: offset, key: languages, run: visible });
     } else if (languages !== firstLanguages) {
       stretches = [{ start: 0, key: firstLanguages, run: first }, { start: offset, key: languages, run: visible }];
+      // The sequence so far, displayed again: every source with displayed
+      // text is a visible run (an optional hyphen has none).
+      displays = sources.filter((source) => source.end > source.start).map((source) => {
+        const prior = visibleTextRun(runs[source.runIndex]!, environment)!;
+        return displayText(prior.text, prior);
+      });
     }
     texts.push(visible.text);
-    displays.push(display);
+    displays?.push(display);
     sources.push(Object.freeze({ runIndex, start: offset, end: offset + display.length }));
     offset += display.length;
   }

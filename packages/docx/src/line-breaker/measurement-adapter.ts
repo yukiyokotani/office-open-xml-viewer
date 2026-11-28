@@ -453,7 +453,7 @@ export class LineMeasurementAdapter {
     const previous = this.selectSegmentKerning(segment);
     const previousLang = this.selectSegmentLanguage(segment);
     try {
-      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement);
+      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement, segment.fontRoute?.lang);
     } finally {
       restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);

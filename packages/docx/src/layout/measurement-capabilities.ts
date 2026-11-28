@@ -23,7 +23,9 @@ export interface MeasurementTextContext {
  * OpenType feature probe mutates and restores font state in one stack frame. */
 export interface VerticalGlyphMeasurementService {
   readonly fingerprint: string;
-  measureRunInkExtra(text: string): number;
+  /** `lang`: the route language the text is measured in
+   * (CanvasFontRoute.lang), passed to the `vert` probe; none for untagged. */
+  measureRunInkExtra(text: string, lang?: string): number;
   planRun(input: Readonly<{
     text: string;
     font: string;

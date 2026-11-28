@@ -232,6 +232,31 @@ describe('vertical OpenType vert feature', () => {
     expect(fixture.paints()).toBe(8);
   });
 
+  it('takes the route language as an argument, never from the caller context', () => {
+    const fixture = fakeHtmlCanvasProbe();
+    fixture.variants.set(0x30fc, 'wide-to-tall');
+    const accesses: string[] = [];
+    const ctx = new Proxy(fixture.ctx, {
+      has(object, key) {
+        if (key === 'lang') accesses.push('has');
+        return Reflect.has(object, key);
+      },
+      get(object, key) {
+        if (key === 'lang') accesses.push('get');
+        return Reflect.get(object, key);
+      },
+    });
+    expect(verticalVertGlyphReachable(ctx, 0x30fc)).toBe(true);
+    expect(fixture.paints()).toBe(4);
+    // A language selects forms of its own: it is probed and cached apart.
+    expect(verticalVertGlyphReachable(ctx, 0x30fc, 'ja-jp')).toBe(true);
+    expect(fixture.paints()).toBe(8);
+    expect(verticalVertGlyphReachable(ctx, 0x30fc, 'ja-jp')).toBe(true);
+    expect(verticalVertGlyphReachable(ctx, 0x30fc)).toBe(true);
+    expect(fixture.paints()).toBe(8);
+    expect(accesses).toEqual([]);
+  });
+
   it('invalidates each glyph result after the FontFace epoch changes', () => {
     const fixture = fakeHtmlCanvasProbe();
 

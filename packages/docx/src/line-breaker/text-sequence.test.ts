@@ -30,6 +30,27 @@ const clusterBoundaries = (text: string): Set<number> => {
 describe('text sequences across §17.3.2.20 language seams', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('displays a sequence again only from its first language seam', () => {
+    const calls: string[] = [];
+    const acquire = (runs: ParagraphLayoutRun[]) => {
+      calls.length = 0;
+      const result = acquireTextSequences(runs, {} as LineLayoutEnvironment, (text) => {
+        calls.push(text);
+        return text.toUpperCase();
+      });
+      return result;
+    };
+    // One language state: each run is displayed once, as before languages,
+    // and no range text is collected.
+    acquire([run('a'), run('b'), run('c')]);
+    expect(calls).toEqual(['a', 'b', 'c']);
+    // A seam displays the runs before it once more; ranges index the
+    // displayed text.
+    const seamed = acquire([run('a'), run('b'), run('c', 'sr-rs'), run('d')]);
+    expect(calls).toEqual(['a', 'b', 'c', 'a', 'b', 'd']);
+    expect(languages(seamed.get(0))).toEqual([[2, undefined], [3, 'sr-rs'], [4, undefined]]);
+  });
+
   it('joins runs that differ only in language and records each stretch', () => {
     const joined = sequences([run('xa', 'sr-rs'), run('́b', 'en-us'), run('c', 'en-us'), run('d', 'sr-rs')]);
     expect([...joined.keys()]).toEqual([0]);

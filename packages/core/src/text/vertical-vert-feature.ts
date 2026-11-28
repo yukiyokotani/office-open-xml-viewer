@@ -284,16 +284,20 @@ const VERT_PROBE_CACHE_LIMIT = 4096;
  * cached by code point, feature settings, and family/weight/style shorthand, and
  * invalidated whenever the document FontFaceSet completes or fails a load.
  */
-export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
+export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number, lang?: string): boolean {
   const target = canvasElementFor(ctx);
   if (target === null || typeof document === 'undefined') return false;
 
   const doc = target.ownerDocument ?? document;
   const state = probeState(doc);
   const sourceFeature = sourceFeatureSettings(target);
-  // The language in effect selects forms (locl) the probe must judge too.
-  const lang = 'lang' in ctx && typeof ctx.lang === 'string' ? ctx.lang : '';
-  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${lang}:${cp}`;
+  // `lang` is the Canvas language the caller draws this text in (HTML canvas
+  // text styles): it selects forms (locl) the probe must judge too. It is
+  // passed, never read from `ctx`, so callers without languages (XLSX, PPTX,
+  // untagged DOCX) probe and key exactly as before.
+  const key = lang === undefined
+    ? `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`
+    : `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}:lang:${lang}`;
   const cached = state.cache.get(key);
   if (cached !== undefined) return cached;
 
@@ -305,7 +309,7 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
   const probe = state.canvas.getContext('2d', { willReadFrequently: true });
   if (probe !== null) {
     const previousFeature = state.canvas.style.fontFeatureSettings;
-    const previousLang = lang ? selectCanvasLanguage(probe, lang) : undefined;
+    const previousLang = selectCanvasLanguage(probe, lang);
     try {
       probe.font = replaceFontSize(ctx.font, `${PROBE_FONT_PX}px`);
       probe.fillStyle = '#000';

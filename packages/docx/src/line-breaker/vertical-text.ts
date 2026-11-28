@@ -6,10 +6,12 @@ export function verticalRunInkExtra(
   text: string,
   verticalRun: boolean,
   measurement?: VerticalGlyphMeasurementService,
+  /** The route language the text is measured in (CanvasFontRoute.lang). */
+  lang?: string,
 ): number {
   if (!verticalRun) return 0;
   if (!measurement) {
     throw new Error('Vertical glyph measurement capability is required for vertical text');
   }
-  return measurement.measureRunInkExtra(text);
+  return measurement.measureRunInkExtra(text, lang);
 }

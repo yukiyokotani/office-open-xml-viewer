@@ -217,13 +217,13 @@ export function createLayoutServices(
       : hasDomVerticalProbe
         ? 'vertical-glyph-measurement:dom-vert-probe-v3'
         : 'vertical-glyph-measurement:no-dom-vert-probe-v2',
-    measureRunInkExtra(text: string): number {
+    measureRunInkExtra(text: string, lang?: string): number {
       if (canvasContext === null || verticalContext === null) {
         throw new Error('Vertical glyph measurement requires a concrete text context');
       }
       return withVertFeatureCanvasScope(
         canvasContext,
-        () => verticalRunInkExtraPx(verticalContext, text),
+        () => verticalRunInkExtraPx(verticalContext, text, lang),
       );
     },
     planRun(input: Parameters<VerticalGlyphMeasurementService['planRun']>[0]) {
@@ -248,7 +248,7 @@ export function createLayoutServices(
             input.letterSpacingPt,
             input.charScale,
             input.growTrRotateInk,
-            (cp) => verticalVertGlyphReachable(view, cp),
+            (cp) => verticalVertGlyphReachable(view, cp, input.lang),
             input.writingMode,
             input.characterGridDeltaPt,
             input.characterAdjustmentPt,
