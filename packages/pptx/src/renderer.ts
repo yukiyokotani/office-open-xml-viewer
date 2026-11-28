@@ -237,6 +237,9 @@ import {
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
   cjkFallback?: CjkLang;
+  /** Tables come from an OpenDocument source (see renderTable's earlier
+   *  rule). Set by this package's ODP source admission, not by the model. */
+  odfTables?: boolean;
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
@@ -5428,8 +5431,9 @@ export function renderTextBody(
       // shapes all keep the same omitted-lnSpc pitch at a given point size.
       // Percentage spacing scales this renderer's PowerPoint-compatible natural
       // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
-      // Office output supplies the line-box compatibility behaviour). A positive
-      // a:tr@h remains a minimum. A PowerPoint table control with 16pt text,
+      // Office output supplies the line-box compatibility behaviour).
+      // PowerPoint grows a positive a:tr@h to its content (observed). A
+      // PowerPoint table control with 16pt text,
       // 120% lnSpc and 8.5pt vertical cell margins grows a 36.85pt row;
       // changing only lnSpc to 100% or the margins to zero does not. Explicit
       // percentage spacing therefore consumes the painted natural line box
@@ -5688,8 +5692,9 @@ export function renderTextBody(
   }
 
   // ── measure-only: return the content height the text body needs ─────────
-  // Used by renderTable to grow rows to fit their tallest cell (ECMA-376
-  // §21.1.3.18: a:tr@h is a minimum). Returns padding + laid-out text height.
+  // Used by renderTable to grow rows to fit their tallest cell (observed
+  // PowerPoint behaviour; ECMA-376 §21.1.3.18 only defines the row height).
+  // Returns padding + laid-out text height.
   if (measureOnly) {
     return tPad + requiredHeight + bPad;
   }
@@ -7776,10 +7781,14 @@ function isHorizontalCellVert(vert: unknown): boolean {
  *   sizing skips (shrink-to-fit) and cells on the earlier rule (rotated,
  *   stacked, warped, multi-column, ODF) store nothing, so trial layouts (a
  *   shrink search at many scales) are never kept.
- * - Retention is bounded: recording stops once TABLE_LAYOUT_RETAINED_LINES
- *   lines are held, and a painted cell drops its paragraphs. A large table
- *   reuses the layouts of its first cells and lays the rest out again, as
- *   it would without the memo. Nothing outlives renderTable, so a font that
+ * - Retention is bounded by payload, not by line count: recording stops
+ *   once TABLE_LAYOUT_RETAINED_PAYLOAD units (segments, metric marks and
+ *   text characters, layoutPayload) are held, and a painted cell drops its
+ *   paragraphs. A large table reuses the layouts of its first cells and lays
+ *   the rest out again, as it would without the memo: past the bound it
+ *   costs a measure and a paint per cell. Matching paint-only cost there
+ *   would mean holding every layout until the table background, which needs
+ *   every row height, is painted. Nothing outlives renderTable, so a font that
  *   loads later is picked up by the next render.
  * - Recorded lines are frozen. Everything a layout pass or paint derives from
  *   them (fontAlgn offsets, resolved tab widths) goes on that pass's own copy,
@@ -7787,8 +7796,8 @@ function isHorizontalCellVert(vert: unknown): boolean {
  */
 export interface TableLayoutMemo {
   layouts: Map<Paragraph, Map<string, readonly LayoutLine[]>>;
-  /** Lines currently held in `layouts`. */
-  lines: number;
+  /** Payload currently held in `layouts` (layoutPayload units). */
+  payload: number;
 }
 
 /** A cell's view of the memo: `record` is true for row sizing of a cell
@@ -7798,9 +7807,21 @@ interface TableLayoutAccess {
   record: boolean;
 }
 
-/** Retention bound of TableLayoutMemo, in laid-out lines. Memory policy
- * only: past it, layouts are computed again and paint is unchanged. */
-const TABLE_LAYOUT_RETAINED_LINES = 2048;
+/** Retention bound of TableLayoutMemo, in layoutPayload units (about one
+ * small object or one UTF-16 unit each). Memory policy only: past it,
+ * layouts are computed again and paint is unchanged. */
+const TABLE_LAYOUT_RETAINED_PAYLOAD = 65_536;
+
+/** What a layout retains: one unit per line, segment and metric mark, and
+ * one per text character. */
+function layoutPayload(lines: readonly LayoutLine[]): number {
+  let payload = 0;
+  for (const line of lines) {
+    payload += 1 + line.segments.length + (line.metricMarks?.length ?? 0);
+    for (const seg of line.segments) payload += seg.text.length;
+  }
+  return payload;
+}
 
 function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
   for (const line of lines) {
@@ -7826,11 +7847,13 @@ function tableParagraphLayout(
   const cached = memo.layouts.get(para)?.get(key);
   if (cached) return cached as LayoutLine[];
   const lines = layoutParagraph(ctx, para, ...rest);
-  if (!record || memo.lines + lines.length > TABLE_LAYOUT_RETAINED_LINES) return lines;
+  if (!record) return lines;
+  const payload = layoutPayload(lines);
+  if (memo.payload + payload > TABLE_LAYOUT_RETAINED_PAYLOAD) return lines;
   let byKey = memo.layouts.get(para);
   if (!byKey) memo.layouts.set(para, byKey = new Map());
   byKey.set(key, freezeLayout(lines));
-  memo.lines += lines.length;
+  memo.payload += payload;
   return lines;
 }
 
@@ -7838,9 +7861,64 @@ function dropTableLayouts(memo: TableLayoutMemo, paragraphs: readonly Paragraph[
   for (const para of paragraphs) {
     const byKey = memo.layouts.get(para);
     if (!byKey) continue;
-    for (const lines of byKey.values()) memo.lines -= lines.length;
+    for (const lines of byKey.values()) memo.payload -= layoutPayload(lines);
     memo.layouts.delete(para);
   }
+}
+
+/** A merged (rowSpan > 1) cell that row sizing resolves. */
+interface TableMerge {
+  ri: number;
+  ci: number;
+  /** Last row it spans. */
+  last: number;
+  earlierRule: boolean;
+  hasAutoHeightRow: boolean;
+}
+
+/**
+ * The order in which row sizing resolves merged cells (given in reading
+ * order). Merges that share no row cannot affect each other, so the order is
+ * set per group of merges linked through shared rows. A group with any cell
+ * on the earlier rule keeps that rule's reading order for every merge in it:
+ * the controls below cover ordinary cells only, and one order for the whole
+ * group keeps the result independent of where a merge that contributes
+ * nothing sits. A group of ordinary merges resolves them by the row they end
+ * on, not in reading order or by span length. Synthetic PowerPoint controls
+ * (four rows, 24pt minima and leading, zero margins) exported from
+ * PowerPoint for Mac, 2026-11-28/29:
+ * - an eight-line merge over rows 1-3 beside a five-line merge over rows
+ *   1-2, in either column order: 24/96/72/24 (reading order: 24/96/144/24);
+ * - eight lines over rows 1-3 beside five over rows 3-4, in either column
+ *   order: 24/24/144/24 (shortest span first: 24/24/144/96);
+ * - five lines over rows 1-2 beside eight over rows 2-4: 24/96/24/72
+ *   (longest first: 24/96/24/144).
+ * Array.prototype.sort is stable: cells ending on the same row keep their
+ * reading order. Exported for tests; linear apart from the sorts.
+ */
+export function orderTableMerges<T extends Pick<TableMerge, 'ri' | 'last' | 'earlierRule'>>(
+  merges: readonly T[],
+): T[] {
+  // Groups of row intervals linked by overlap: sweep by first row.
+  const byFirstRow = [...merges].sort((a, b) => a.ri - b.ri);
+  const groupOf = new Map<T, number>();
+  let group = -1;
+  let groupLast = -1;
+  for (const merge of byFirstRow) {
+    if (merge.ri > groupLast) group++;
+    groupLast = Math.max(groupLast, merge.last);
+    groupOf.set(merge, group);
+  }
+  const members: T[][] = Array.from({ length: group + 1 }, () => []);
+  for (const merge of merges) members[groupOf.get(merge)!].push(merge);
+  const order: T[] = [];
+  for (const cells of members) {
+    const ordered = cells.some((c) => c.earlierRule) ? cells : cells.sort((a, b) => a.last - b.last);
+    // Appended one by one: a spread argument list overflows the stack for a
+    // large group.
+    for (const merge of ordered) order.push(merge);
+  }
+  return order;
 }
 
 export function renderTable(
@@ -7851,7 +7929,7 @@ export function renderTable(
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
 ) {
-  renderTableWithLayoutMemo({ layouts: new Map(), lines: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
+  renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
 }
 
 /** renderTable with a caller-owned layout memo; exported for tests, which
@@ -7891,20 +7969,22 @@ export function renderTableWithLayoutMemo(
     return w;
   };
 
-  // ── Row heights: Office minimum-row semantics ─────────────────────────────
-  // ECMA-376 §21.1.3.18 gives a:tr@h as the row height; [MS-OE376]
-  // §2.1.1347 constrains it to zero or at least a minimum derived from the
-  // cell margins. PowerPoint treats a positive a:tr@h as a minimum too: it
-  // grows a row to fit its tallest cell's laid-out text, and a literal h=0
-  // is content-driven. Each cell's text body is measured at its spanned width
-  // with the renderTextBody machinery (measureOnly).
+  // ── Row heights: content-driven growth ────────────────────────────────────
+  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height, and [MS-OE376]
+  // §2.1.1347 constrains the authored value to zero or at least a minimum
+  // derived from the cell margins. Neither makes the value a minimum: that
+  // rows grow to fit their tallest cell's laid-out text, positive and zero
+  // heights alike, is observed PowerPoint behaviour. Each cell's text body
+  // is measured at its spanned width with the renderTextBody machinery
+  // (measureOnly).
   const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
   const rowHeights = [...authoredRowHeights];
-  // Rows grow whatever the graphic-frame extent says. PowerPoint PDF
-  // controls (Windows and Mac) grow positive and zero minima alike when the
-  // frame extent is below, equal to or above the row sum: decks from
-  // generators such as python-pptx write equal minima that sum to the frame
-  // and rely on that growth (#2345). Each line of text, the last included,
+  // PowerPoint PDF controls (Windows and Mac) grow positive and zero rows in
+  // tables whose graphic-frame extent equals the row sum, the case decks
+  // from generators such as python-pptx write and rely on (#2345). No
+  // control has a frame extent below or above the row sum; growing rows
+  // whatever the frame extent says is renderer policy, so that one rule
+  // covers every frame. Each line of text, the last included,
   // takes its painted line box (measureNaturalLineSpacing). Browser fonts
   // that wrap differently from Office can change the grown height;
   // overflowing into the next row is the worse failure, because it breaks
@@ -7919,7 +7999,9 @@ export function renderTableWithLayoutMemo(
   //   bodies measure by their box width, which is not their laid-out extent,
   //   and the PowerPoint controls cover horizontal text only, so
   //   mongolianVert, padded vertical tokens and unknown values stay too;
-  // - every cell of an ODF table (`odfRowHeights`): ODF row heights are
+  // - every cell of an ODF table (`odfRowHeights` from the parser, or any
+  //   table of a slide from an ODP source, `rc.odfTables`, so an
+  //   application-supplied source need not mark it): ODF row heights are
   //   style:row-height (fixed, OpenDocument 1.3 Part 3 §20.348) or
   //   style:min-row-height, and LibreOffice's growth of either is not
   //   measured here;
@@ -7934,7 +8016,7 @@ export function renderTableWithLayoutMemo(
   const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
   const frameHasSlack = el.height > authoredRowsTotalEmu;
   const keepsEarlierRule = (body: TextBody): boolean =>
-    el.odfRowHeights === true || !isHorizontalCellVert(body.vert)
+    el.odfRowHeights === true || rc.odfTables === true || !isHorizontalCellVert(body.vert)
     || (body.numCol ?? 1) > 1
     || (body.textWarp != null && hasTextWarp(body.textWarp.preset));
 
@@ -7943,6 +8025,8 @@ export function renderTableWithLayoutMemo(
   const sizingLayouts = (earlierRule: boolean): TableLayoutAccess | undefined =>
     earlierRule ? undefined : { memo, record: true };
   const paintLayouts: TableLayoutAccess = { memo, record: false };
+  const sizingTextColor = (cell: TableCell, earlierRule: boolean): string | null =>
+    !earlierRule && cell.textColor ? hexToRgba(cell.textColor) : null;
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -7957,11 +8041,13 @@ export function renderTableWithLayoutMemo(
       const earlierRule = keepsEarlierRule(cell.textBody);
       if (earlierRule && row.height > 0 && !frameHasSlack) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
-      // The cell's own text colour, as in paint, so the paint reuses these
-      // lines (tableParagraphLayout).
+      // A growth-rule cell is measured with its own text colour, as painted,
+      // so paint reuses these lines (tableParagraphLayout). An earlier-rule
+      // cell keeps the earlier input, the black default: the colour takes
+      // part in run coalescing and so in kerning and wrapping.
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
-        cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
+        sizingTextColor(cell, earlierRule), 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false,
         !earlierRule || row.height === 0, sizingLayouts(earlierRule),
       ) as number) || 0;
@@ -7975,14 +8061,9 @@ export function renderTableWithLayoutMemo(
   // 24+48, 24+24 and 48+24 pt (frame equal to the row sum) keep every earlier
   // row at its own height and grow only the last. Merged cells are resolved
   // in the order of the row they end on, so a cell ending lower sees the
-  // growth of every merge nested inside it whatever the column order.
-  // Merges that share no row cannot affect each other, so the order is set
-  // per group of merges linked through shared rows. A group with any cell on
-  // the earlier rule keeps that rule's row-major reading order for every
-  // merge in it: the controls below cover ordinary cells only, and one order
-  // for the whole group keeps the result independent of where a merge that
-  // contributes nothing sits.
-  const spanCells: { ri: number; ci: number; last: number; earlierRule: boolean }[] = [];
+  // growth of every merge nested inside it whatever the column order
+  // (orderTableMerges).
+  const spanCells: TableMerge[] = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     for (let ci = 0; ci < row.cells.length; ci++) {
@@ -7991,53 +8072,24 @@ export function renderTableWithLayoutMemo(
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
       if (cell.textBody.shrinkOnOverflow) continue;
-      spanCells.push({
-        ri, ci, last: Math.min(el.rows.length, ri + span) - 1,
-        earlierRule: keepsEarlierRule(cell.textBody),
-      });
+      const last = Math.min(el.rows.length, ri + span) - 1;
+      const earlierRule = keepsEarlierRule(cell.textBody);
+      let hasAutoHeightRow = false;
+      for (let r = ri; r <= last; r++) if (el.rows[r].height === 0) hasAutoHeightRow = true;
+      // The earlier rule sizes a merge only over a zero-height row or under
+      // frame slack. A merge it skips changes no row, so it is left out
+      // before grouping and cannot link other merges into one group.
+      if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
+      spanCells.push({ ri, ci, last, earlierRule, hasAutoHeightRow });
     }
   }
-  // Interacting merges resolve by the row they end on, not in reading order
-  // or by span length. Synthetic PowerPoint controls (four rows, 24pt minima
-  // and leading, zero margins) exported from PowerPoint for Mac, 2026-11-28/29:
-  // - an eight-line merge over rows 1-3 beside a five-line merge over rows
-  //   1-2, in either column order: 24/96/72/24 (reading order: 24/96/144/24);
-  // - eight lines over rows 1-3 beside five over rows 3-4, in either column
-  //   order: 24/24/144/24 (shortest span first: 24/24/144/96);
-  // - five lines over rows 1-2 beside eight over rows 2-4: 24/96/24/72
-  //   (longest first: 24/96/24/144).
-  // Array.prototype.sort is stable: cells ending on the same row keep their
-  // reading order.
-  const spanOrder: typeof spanCells = [];
-  {
-    // Groups of row intervals linked by overlap: sweep by first row.
-    const byFirstRow = [...spanCells].sort((a, b) => a.ri - b.ri);
-    const groupOf = new Map<(typeof spanCells)[number], number>();
-    let group = -1;
-    let groupLast = -1;
-    for (const c of byFirstRow) {
-      if (c.ri > groupLast) group++;
-      groupLast = Math.max(groupLast, c.last);
-      groupOf.set(c, group);
-    }
-    const members: (typeof spanCells)[] = [];
-    for (const c of spanCells) (members[groupOf.get(c)!] ??= []).push(c);
-    for (const cells of members) {
-      spanOrder.push(...(cells.some((c) => c.earlierRule)
-        ? cells
-        : [...cells].sort((a, b) => a.last - b.last)));
-    }
-  }
-  for (const { ri, ci, last, earlierRule } of spanOrder) {
+  for (const { ri, ci, last, earlierRule, hasAutoHeightRow } of orderTableMerges(spanCells)) {
     const cell = el.rows[ri].cells[ci];
     const textBody = cell.textBody!;
-    const spannedRows = el.rows.slice(ri, last + 1);
-    const hasAutoHeightRow = spannedRows.some((spannedRow) => spannedRow.height === 0);
-    if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
     const cellW = spannedWidth(ci, cell.gridSpan || 1);
     const needed = (renderTextBody(
       ctx, tableTextBody(textBody), 0, 0, cellW, 0, scale,
-      cell.textColor ? hexToRgba(cell.textColor) : null, 0, false, false,
+      sizingTextColor(cell, earlierRule), 0, false, false,
       '#000000', slideNumber, rc, undefined, true, undefined, false,
       !earlierRule || hasAutoHeightRow, sizingLayouts(earlierRule),
     ) as number) || 0;
@@ -8536,6 +8588,10 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
    *  paths), whose colour chain is resolved even when it carries no slide
    *  theme (an unreadable theme part). */
   parsedTextChain?: boolean;
+  /** The slide comes from an OpenDocument presentation source
+   *  (LoadOptions.odp): every table keeps the ODF row-height rule
+   *  (RenderContext.odfTables), whether or not the source marks it. */
+  odfTables?: boolean;
 };
 
 /**
@@ -8815,6 +8871,7 @@ async function renderSlideLeased(
     themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
     themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
     themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
+    ...(opts.odfTables ? { odfTables: true } : {}),
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
     embeddedFontTuples: opts.embeddedFontTuples,

@@ -60,6 +60,8 @@ const host = new WasmParserHost<PptxArchive>(init, {
   reinit,
 });
 let source: WorkerPresentationSourceOwner<PptxArchive> | undefined;
+/** The open source is LoadOptions.odp (RenderContext.odfTables). */
+let sourceOdfTables = false;
 
 function executeArchive<T>(operation: (archive: WorkerCursorArchive) => T): T {
   if (source) return source.execute(operation);
@@ -351,6 +353,7 @@ function executeArchiveFromNew(
       if (!request.sourceOwnerUrl) throw new TypeError('PPTX source owner URL is missing');
       const { WorkerPresentationSourceOwner } = await import(/* @vite-ignore */ request.sourceOwnerUrl) as typeof import('./internal/worker-presentation-source.js');
       source = new WorkerPresentationSourceOwner(host);
+      sourceOdfTables = request.odfTables === true;
       await source.openModelSource(new Uint8Array(request.buffer), descriptor, request.sourceTransfer, {
         resourcePolicy: request.resourcePolicy,
       });
@@ -433,6 +436,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           defaultTextColor: compact.defaultTextColor,
           // A model source's slides have no proven parsed colour chain.
           parsedTextChain: source === undefined,
+          odfTables: source !== undefined && sourceOdfTables,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -481,6 +485,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           defaultTextColor: compact.defaultTextColor,
           // A model source's slides have no proven parsed colour chain.
           parsedTextChain: source === undefined,
+          odfTables: source !== undefined && sourceOdfTables,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,

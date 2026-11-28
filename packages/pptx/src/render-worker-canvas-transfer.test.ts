@@ -92,7 +92,7 @@ class LoopbackWorker implements WorkerLike {
   terminate(): void {}
 }
 
-async function loadWorker(variant: 'parser' | 'model-source' = 'parser') {
+async function loadWorker(variant: 'parser' | 'model-source' | 'odp-source' = 'parser') {
   vi.resetModules();
   const scope = {
     onmessage: null as ((event: MessageEvent) => Promise<void>) | null,
@@ -107,10 +107,11 @@ async function loadWorker(variant: 'parser' | 'model-source' = 'parser') {
   await dispatch({
     kind: 'parse', id: 100, buffer: new ArrayBuffer(1),
     resourcePolicy: { maxArchiveEntryBytes: null, maxTotalInflatedBytes: null, maxArchiveEntries: null },
-    ...(variant === 'model-source' ? {
+    ...(variant !== 'parser' ? {
       source: { protocol: 'ooxml-model-source-module/v2', target: 'pptx', moduleUrl: 'x', config: {} },
       sourceOwnerUrl: new URL('./test-support/worker-source-owner.ts', import.meta.url).href,
     } : {}),
+    ...(variant === 'odp-source' ? { odfTables: true } : {}),
   });
   expect(worker.received).toContainEqual(expect.objectContaining({ kind: 'presentationReady', id: 100 }));
   const bridge = new WorkerBridge<RenderWorkerResponse>(worker, {
@@ -177,6 +178,25 @@ describe('PPTX render worker bitmap surface', () => {
     }));
     expect(worker.received).toContainEqual(expect.objectContaining({ kind: 'runsCollected', id: 8 }));
   });
+});
+
+describe('PPTX render worker ODP table sizing', () => {
+  // The model-source loader marks an LoadOptions.odp parse; the render
+  // worker carries that to every render so the source's tables keep the ODF
+  // row-height rule without a parser-emitted field.
+  it.each([['parser', false], ['model-source', false], ['odp-source', true]] as const)(
+    'passes odfTables for %s slides when painting and collecting runs', async (variant, expected) => {
+      const { presentation } = await loadWorker(variant);
+
+      await presentation.renderSlideToBitmap(0, { width: 320, dpr: 1 });
+      await presentation.collectSlideRuns(0, 320);
+
+      expect(mocks.render).toHaveBeenCalledTimes(2);
+      for (const call of mocks.render.mock.calls) {
+        expect((call[4] as { odfTables?: boolean }).odfTables === true).toBe(expected);
+      }
+    },
+  );
 });
 
 describe('PPTX render worker parsed text-colour chain', () => {

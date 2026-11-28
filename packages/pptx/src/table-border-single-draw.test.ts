@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Stroke } from '@silurus/ooxml-core';
-import { renderTable, renderTableWithLayoutMemo, renderTextBody, type TableLayoutMemo } from './renderer.js';
+import { orderTableMerges, renderTable, renderTableWithLayoutMemo, renderTextBody, type TableLayoutMemo } from './renderer.js';
 import { presentFacesContext } from './test-support/present-faces.js';
 import type { TableCell, TableElement, TableRow, TextBody } from './types';
 
@@ -58,7 +58,9 @@ function makeRecordingCtx(onMeasure?: () => void): { ctx: CanvasRenderingContext
     measureText(text: string) {
       onMeasure?.();
       const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
-      return { width: text.length * sizePx * 0.5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+      // A kerned "AV" pair is a quarter of the size narrower.
+      const kerned = text.split('AV').length - 1;
+      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
     },
     fillText(text: string, _x: number, y: number) { texts.push({ text, y, font: String(this.font) }); }, strokeText() {},
     font: '10px sans-serif',
@@ -326,7 +328,7 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
   });
 
   it('grows a positive row for every painted line box', () => {
-    // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. Every line,
+    // PowerPoint grows a positive row to its content (observed). Every line,
     // the last included, consumes the line box used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
     // 3.6pt top/bottom insets = 72pt.
     const textBody = {
@@ -357,8 +359,8 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
 
   it('grows a positive row even when the row minima already fill the frame', () => {
     // #2345: generators such as python-pptx write equal a:tr@h minima whose
-    // sum equals the graphic-frame extent. PowerPoint still treats each
-    // a:tr@h as a minimum ([MS-OE376] §2.1.1347) and grows the row to its
+    // sum equals the graphic-frame extent. PowerPoint still grows the row
+    // (observed; ECMA-376 §21.1.3.18 only defines the height) to its
     // wrapped text, pushing the next row down; the frame extent is not a
     // reason to let the text overflow into the following row.
     // One unbroken run that must wrap: at 9px per 18px character,
@@ -484,36 +486,60 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
       [cell({ textBody: lines(1) }), cell({ textBody: warped }), cell()],
     ], [COL, COL, COL]);
     t.height = 60 * EMU; // frame slack: the warped cell is measured too
-    const memo: TableLayoutMemo = { layouts: new Map(), lines: 0 };
+    const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
     const sizes: number[] = [];
-    const { ctx, texts } = makeRecordingCtx(() => sizes.push(memo.lines));
+    const { ctx, texts } = makeRecordingCtx(() => sizes.push(memo.layouts.size));
     renderTableWithLayoutMemo(memo, ctx, t, SCALE, undefined);
     expect(texts.some((entry) => entry.text.startsWith('aaaa'))).toBe(true);
     // Three measured one-line cells, never more; each painted cell gives its
     // layout up, so nothing is held once the table is painted.
     expect(Math.max(...sizes)).toBe(3);
-    expect(memo.lines).toBe(0);
+    expect(memo.payload).toBe(0);
     expect(memo.layouts.size).toBe(0);
   });
 
-  it('bounds the layouts a large table retains', () => {
-    // 30 x 30 cells of four lines each: 3600 measured lines. Recording stops
-    // at the retention bound, so the first cells reuse their layouts and the
-    // rest are laid out again, painting the same rows.
-    const rows = Array.from({ length: 30 }, () =>
-      Array.from({ length: 30 }, () => cell({ textBody: lines(4) })));
-    const t = tableOf(rows, Array(30).fill(COL));
-    const memo: TableLayoutMemo = { layouts: new Map(), lines: 0 };
+  it('bounds the layouts a table retains by their payload', () => {
+    // Retention counts what a layout holds (lines, segments, metric marks
+    // and characters), not its lines: one unwrapped line of 2000
+    // alternately coloured runs (2000 segments, 70000 characters) exceeds
+    // the bound on its own and is never retained.
+    const runs = (n: number, text: string) => Array.from({ length: n }, (_, i) => ({
+      type: 'text', text, fontSize: 10, fontFamily: 'Arial', color: i % 2 ? 'FF0000' : '0000FF',
+    }));
+    const body = (n: number, text: string, wrap: string) => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: runs(n, text), bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap, vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const wide = tableOf([[cell({ textBody: body(2000, 'abcdefghijklmnopqrstuvwxyz012345678', 'none') })]], [COL]);
+    const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
     let peak = 0;
-    const { ctx, texts } = makeRecordingCtx(() => { peak = Math.max(peak, memo.lines); });
-    renderTableWithLayoutMemo(memo, ctx, t, SCALE, undefined);
-    expect(peak).toBeGreaterThan(1000);
-    expect(peak).toBeLessThanOrEqual(2048);
-    expect(memo.lines).toBe(0);
+    const one = makeRecordingCtx(() => { peak = Math.max(peak, memo.layouts.size); });
+    renderTableWithLayoutMemo(memo, one.ctx, wide, SCALE, undefined);
+    expect(one.texts.length).toBe(2000);
+    expect(peak).toBe(0);
+
+    // 20 x 20 cells of 30 ten-character runs, one run a line, about 360
+    // units a cell: the first cells are retained up to the bound, the rest
+    // are laid out again and paint the same text.
+    const rows = Array.from({ length: 20 }, () =>
+      Array.from({ length: 20 }, () => cell({ textBody: body(30, 'abcdefghij', 'square') })));
+    const t = tableOf(rows, Array(20).fill(COL));
+    let peakPayload = 0;
+    const many = makeRecordingCtx(() => { peakPayload = Math.max(peakPayload, memo.payload); });
+    renderTableWithLayoutMemo(memo, many.ctx, t, SCALE, undefined);
+    expect(peakPayload).toBeGreaterThan(40_000);
+    expect(peakPayload).toBeLessThanOrEqual(65_536);
+    expect(memo.payload).toBe(0);
     const reference = makeRecordingCtx();
     renderTable(reference.ctx, t, SCALE);
-    expect(texts).toEqual(reference.texts);
-    expect(texts.length).toBe(3600);
+    expect(many.texts).toEqual(reference.texts);
   });
 
   it('lets no other text body see the measured layouts of a table cell', () => {
@@ -655,6 +681,15 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     ], [COL]);
     t.odfRowHeights = true;
     expect(horizontalAt(render(t), 20)).toHaveLength(1);
+    // A table from an ODP source keeps the rule whether or not the source
+    // marked it (RenderContext.odfTables, set by the ODP source admission).
+    const unmarked = tableOf([
+      [cell({ textBody: threeLines(), borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    const { ctx: odpCtx, strokes: odpStrokes } = makeRecordingCtx();
+    renderTable(odpCtx, unmarked, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1, odfTables: true });
+    expect(horizontalAt(odpStrokes, 20)).toHaveLength(1);
     t.height = 100 * EMU;
     const grown = render(t);
     expect(horizontalAt(grown, 20)).toHaveLength(0);
@@ -745,6 +780,85 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     // 30 / 30 / 63.6 / 24pt rows: edges 30, 60, 123.6, 147.6.
     expect(result(false)).toEqual([30, 60, 123, 147]);
     expect(result(true)).toEqual(result(false));
+  });
+
+  it('measures an earlier-rule cell with the earlier sizing input', () => {
+    // A two-column body (numCol=2) keeps the earlier rule. Its runs
+    // alternate an explicit red "A" with a "V " that inherits the cell's
+    // red tcTxStyle colour. The earlier rule measured with the black
+    // default, so the pairs stay separate segments and do not kern (the
+    // mock narrows a kerned "AV"): the row grows to 80pt, as before, not
+    // to the 40pt a red, coalesced measure would give.
+    const runs = Array.from({ length: 4 }, () => [
+      { type: 'text', text: 'A', fontSize: 20, fontFamily: 'Arial', color: 'FF0000' },
+      { type: 'text', text: 'V ', fontSize: 20, fontFamily: 'Arial' },
+    ]).flat();
+    const textBody = {
+      verticalAnchor: 't', numCol: 2, spcCol: 0,
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs, bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody, textColor: 'FF0000', borderB: ln() })]], [80 * EMU]);
+    t.height = 200 * EMU; // frame slack: the earlier rule measures the cell
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 80)).toHaveLength(1);
+    expect(horizontalAt(strokes, 40)).toHaveLength(0);
+  });
+
+  it('leaves merges the earlier rule skips out of the merge groups', () => {
+    // An eight-line merge over rows 1-3 beside a five-line merge over rows
+    // 1-2 resolve by end row: 24/96/72/24 (edges 24/120/192/216). A rotated
+    // merge over rows 3-4 without frame slack is skipped by the earlier
+    // rule, so it must not join them into a reading-order group
+    // (24/96/144/24, edges 24/120/264/288).
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const eight = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const five = [cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const rotated = [cell(), cell(), cell({ textBody: { ...body(1), vert: 'vert' } as TextBody, rowSpan: 2 }), cell({ vMerge: true })];
+    const t = tableOf([0, 1, 2, 3].map((r) => [eight[r], five[r], rotated[r], cell({ borderB: ln() })]),
+      [COL, COL, COL, COL]);
+    for (const row of t.rows) row.height = 24 * EMU;
+    t.height = 96 * EMU;
+    const edges = render(t)
+      .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
+      .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+    expect(edges).toEqual([24, 120, 192, 216]);
+  });
+
+  it('orders a large connected merge group without overflowing the stack', () => {
+    // 1000 columns of non-overlapping two-row merges over 260 rows, linked
+    // into one group by a staggered column: 130,000+ merges in one group.
+    const merges: { ri: number; last: number; earlierRule: boolean }[] = [];
+    for (let ri = 0; ri < 260; ri += 2) {
+      for (let ci = 0; ci < 1000; ci++) merges.push({ ri, last: ri + 1, earlierRule: false });
+    }
+    for (let ri = 1; ri < 259; ri += 2) merges.push({ ri, last: ri + 1, earlierRule: false });
+    const order = orderTableMerges(merges);
+    expect(order).toHaveLength(merges.length);
+    expect(order.every((merge, k) => k === 0 || order[k - 1].last <= merge.last)).toBe(true);
+    // With an earlier-rule merge the group keeps reading order.
+    merges[0].earlierRule = true;
+    expect(orderTableMerges(merges)).toEqual(merges);
   });
 
   it('keeps a multi-column cell on the earlier rule, painting into its columns', () => {

@@ -276,6 +276,8 @@ export class PptxPresentation {
    * are fully resolved (issue #1989). A caller-supplied model source sets this
    * false and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
   private _parsedTextChain = true;
+  /** Slides come from LoadOptions.odp (set by the model-source loader). */
+  private _odfTables = false;
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -1295,6 +1297,7 @@ export class PptxPresentation {
             dpr,
             defaultTextColor: compact.defaultTextColor,
             parsedTextChain: this._parsedTextChain,
+            odfTables: this._odfTables,
             cjkFallback: this._cjkFallback,
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,

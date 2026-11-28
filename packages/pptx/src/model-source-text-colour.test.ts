@@ -6,11 +6,11 @@ import type { ModelSource } from '@silurus/ooxml-core';
 // parser have that proven chain; a caller-supplied model source keeps the
 // 0.89.7 theme or `defaultTextColor` fallback, so white default text on a dark
 // slide does not turn invisible.
-const rendered = vi.hoisted(() => ({ opts: [] as Array<{ parsedTextChain?: boolean }> }));
+const rendered = vi.hoisted(() => ({ opts: [] as Array<{ parsedTextChain?: boolean; odfTables?: boolean }> }));
 vi.mock('./renderer', async (importOriginal) => ({
   ...await importOriginal<typeof import('./renderer')>(),
   renderSlideWithEmbeddedFonts: async (...args: unknown[]) => {
-    rendered.opts.push(args[4] as { parsedTextChain?: boolean });
+    rendered.opts.push(args[4] as { parsedTextChain?: boolean; odfTables?: boolean });
   },
 }));
 vi.mock('./font-requests', async (importOriginal) => ({
@@ -43,7 +43,7 @@ type Internals = {
   _officeRoutesForRequests(): Promise<{ routes: Map<string, string>; installed: Set<string> }>;
 };
 
-async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<boolean | undefined> {
+async function renderOptionsFor(variant: 'parser' | 'model-source' | 'odp'): Promise<{ parsedTextChain?: boolean; odfTables?: boolean } | undefined> {
   G.Worker = SilentWorker;
   G.location = { href: 'http://localhost/' };
   const proto = PptxPresentation.prototype as unknown as Internals;
@@ -66,12 +66,30 @@ async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<b
     release: () => undefined,
   }) };
   const presentation = await PptxPresentation.load(new ArrayBuffer(0),
-    variant === 'model-source' ? { legacyPpt: source } : {});
+    variant === 'model-source' ? { legacyPpt: source } : variant === 'odp' ? { odp: source } : {});
   const canvas = { width: 0, height: 0 } as unknown as OffscreenCanvas;
   await presentation.renderSlide(canvas, 0, { width: 100, dpr: 1 });
   presentation.destroy();
-  return rendered.opts.at(-1)?.parsedTextChain;
+  return rendered.opts.at(-1);
 }
+
+async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<boolean | undefined> {
+  return (await renderOptionsFor(variant))?.parsedTextChain;
+}
+
+describe('ODP table sizing provenance', () => {
+  // Tables of an LoadOptions.odp source keep the ODF row-height rule even
+  // when the provider's model omits TableElement.odfRowHeights; the policy
+  // follows the source the application selected.
+  it('marks slides from an ODP source, whatever their tables carry', async () => {
+    expect((await renderOptionsFor('odp'))?.odfTables).toBe(true);
+  });
+
+  it('leaves slides from the parser and from other sources unmarked', async () => {
+    expect((await renderOptionsFor('parser'))?.odfTables).not.toBe(true);
+    expect((await renderOptionsFor('model-source'))?.odfTables).not.toBe(true);
+  });
+});
 
 describe('parsed text-colour chain provenance', () => {
   it('marks slides from the built-in parser as a parsed chain', async () => {
