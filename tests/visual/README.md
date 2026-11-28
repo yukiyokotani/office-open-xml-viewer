@@ -37,8 +37,9 @@ any renderer change still fail. The specs serve the fixture the input bytes
 the corpus manifest recorded (`selfVrtInputBody`), so a specimen replaced
 during capture fails instead of lending its image to another input. When the
 baseline revision predates this allowance, also copy
-`tests/visual/private-corpus.mjs` and `packages/*/tests/visual/visual.spec.ts`
-and set `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
+`tests/visual/private-corpus.mjs`, `packages/*/tests/visual/visual.spec.ts`
+and `packages/*/tests/visual/fixture.html` (the specs and fixtures agree on
+the encoded input URL) and set `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 
 ## Fast private tier (PPTX/XLSX)
 
