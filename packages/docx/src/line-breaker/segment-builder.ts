@@ -1507,7 +1507,9 @@ function pushLanguagePiece(
     ...(r.lang ? { language: r.lang } : {}),
     // Vertical presentation forms join the language proof (TextShapeRequest).
     ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
-    ...canvasLanguageAxes(r),
+    // Untagged pieces (no w:bidi and no automatic w:eastAsia, §17.3.2.20)
+    // construct no Canvas-axes object.
+    ...(r.langBidi || r.langEastAsiaAutomatic ? canvasLanguageAxes(r) : {}),
     ...(r.langScriptClass !== undefined ? { scriptClassLanguage: r.langScriptClass } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
