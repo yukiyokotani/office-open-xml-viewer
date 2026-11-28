@@ -114,15 +114,16 @@ function paintRetainedGlyph(
   ctx.font = font;
   const previousKerning = ctx.fontKerning;
   if (operation.kerning) ctx.fontKerning = operation.kerning;
-  const previousLang = selectCanvasLanguage(ctx, operation.fontRoute.lang);
+  const lang = operation.fontRoute.lang;
+  const previousLang = selectCanvasLanguage(ctx, lang);
   if (upright) {
-    saveCanvasState(ctx);
+    saveCanvasState(ctx, lang);
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
     ctx.rotate(-Math.PI / 2);
-    fillRetainedText(context, font, operation.text, 0, 0);
+    fillRetainedText(context, font, operation.text, 0, 0, lang);
     ctx.restore();
   } else {
-    fillRetainedText(context, font, operation.text, operation.origin.xPt, operation.origin.yPt);
+    fillRetainedText(context, font, operation.text, operation.origin.xPt, operation.origin.yPt, lang);
   }
   if (operation.kerning) ctx.fontKerning = previousKerning;
   restoreCanvasLanguage(ctx, previousLang);
@@ -320,7 +321,9 @@ function paintLineContents(
     const previousLetterSpacing = ctx.letterSpacing;
     const previousKerning = ctx.fontKerning;
     // The route's language is part of what layout measured; draw in it too.
-    const previousLang = selectCanvasLanguage(ctx, placement.fontRoute.lang);
+    // Untagged routes (no language) save and draw exactly as before.
+    const lang = placement.fontRoute.lang;
+    const previousLang = selectCanvasLanguage(ctx, lang);
     for (const op of placement.paintOps) {
       // §17.3.3.29: an unselected optional hyphen must not affect display.
       // Strip only the paint string, preserving all retained UTF-16 source
@@ -336,7 +339,7 @@ function paintLineContents(
       const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
       const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
       if (op.glyphOrientation === 'upright') {
-        saveCanvasState(ctx);
+        saveCanvasState(ctx, lang);
         ctx.translate(originXPt, originYPt);
         ctx.rotate(-Math.PI / 2);
         // The enclosing vertical page transform maps the run's advance axis
@@ -349,31 +352,31 @@ function paintLineContents(
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.letterSpacing = `${op.letterSpacingPt}px`;
-        const draw = (): void => fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
+        const draw = (): void => fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt, lang);
         if (op.verticalFeature) {
           withVertFeature(ctx as CanvasRenderingContext2D, draw);
         }
         else draw();
         ctx.restore();
       } else if (op.glyphOrientation === 'rotate') {
-        saveCanvasState(ctx);
+        saveCanvasState(ctx, lang);
         ctx.translate(originXPt, originYPt);
         if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-        fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
+        fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt, lang);
         ctx.restore();
       } else if (op.scaleX !== 1) {
-        saveCanvasState(ctx);
+        saveCanvasState(ctx, lang);
         ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
         ctx.scale(op.scaleX, 1);
         ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-        fillRetainedText(context, font, text, 0, 0);
+        fillRetainedText(context, font, text, 0, 0, lang);
         ctx.restore();
       } else {
         ctx.letterSpacing = `${op.letterSpacingPt}px`;
-        fillRetainedText(context, font, text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
+        fillRetainedText(context, font, text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt, lang);
       }
     }
     ctx.letterSpacing = previousLetterSpacing;

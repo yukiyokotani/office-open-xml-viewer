@@ -722,6 +722,42 @@ describe('Canvas lang at measure and paint', () => {
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['г', 'sr-rs'], ['д', 'sr-rs'], ['е', 'sr-rs']]);
     expect(ctx.lang).toBe('inherit');
   });
+  it('paints untagged text with plain save() and no Canvas language access', async () => {
+    const paintAccesses = async (extra: Record<string, unknown>) => {
+      const { canvas, ctx } = recordingCanvas();
+      const events: string[] = [];
+      const target = ctx as unknown as Record<PropertyKey, unknown>;
+      target.fillText = () => { events.push('fill'); };
+      target.save = () => { events.push('save'); };
+      const proxy = new Proxy(target, {
+        has(object, key) {
+          if (key === 'lang') events.push('lang');
+          return Reflect.has(object, key);
+        },
+        get(object, key) {
+          if (key === 'lang') events.push('lang');
+          return Reflect.get(object, key);
+        },
+        set(object, key, value) {
+          if (key === 'lang') events.push('lang');
+          return Reflect.set(object, key, value);
+        },
+      });
+      (canvas as unknown as { getContext: () => unknown }).getContext = () => proxy;
+      // Scaled glyphs are drawn one by one, each inside its own save().
+      await renderDocumentToCanvas(documentOf([
+        run('где', { charScale: 150, ...extra }),
+      ]), canvas, 0, { dpr: 1, width: 600 });
+      const painted = events.slice(events.indexOf('fill') === -1 ? events.length : events.lastIndexOf('save', events.indexOf('fill')));
+      expect(painted.filter(event => event === 'fill')).toHaveLength(3);
+      return painted.filter(event => event === 'lang').length;
+    };
+    expect(await paintAccesses({})).toBe(0);
+    expect(await paintAccesses({ lang: 'x-none' })).toBe(0);
+    // The tagged control: the route language is selected and kept per save.
+    expect(await paintAccesses({ lang: 'sr-rs' })).toBeGreaterThan(0);
+  });
+
   it('does not merge AutoFit intrinsic pieces painted in different language states', () => {
     const context: ParagraphLayoutContext = {
       lineGrid: { active: false, pitchPt: null },

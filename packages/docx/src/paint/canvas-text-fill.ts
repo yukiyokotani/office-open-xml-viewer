@@ -6,16 +6,19 @@ import type { CanvasPaintContext } from './types.js';
 /** `fillText` with the em layout measured `font` at: a shorthand layout
  * planned at the reference em (core reference-advances.ts) is drawn there
  * under a linear scale; any other shorthand is drawn as set. The caller has
- * already assigned `font` and the run's letter spacing to `ctx`. */
+ * already assigned `font` and the run's letter spacing to `ctx`. `lang` is
+ * the route language the caller selected (none for untagged text), kept
+ * across the reference-em `save()`. */
 export function fillRetainedText(
   context: CanvasPaintContext,
   font: string,
   text: string,
   x: number,
   y: number,
+  lang?: string,
 ): void {
   const reference = context.textAdvances?.planned(font);
-  if (reference) fillTextAtReference(context.ctx, reference, text, x, y);
+  if (reference) fillTextAtReference(context.ctx, reference, text, x, y, lang);
   else context.ctx.fillText(text, x, y);
 }
 
@@ -31,6 +34,6 @@ export function fillRetainedRouteText(
   y: number,
 ): void {
   const previousLang = selectCanvasLanguage(context.ctx, route.lang);
-  fillRetainedText(context, font, text, x, y);
+  fillRetainedText(context, font, text, x, y, route.lang);
   restoreCanvasLanguage(context.ctx, previousLang);
 }

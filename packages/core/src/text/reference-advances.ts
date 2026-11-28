@@ -391,16 +391,19 @@ export interface ReferenceTextPaintTarget {
  * reference-em advances a planned layout measured. The caller's current
  * `letterSpacing` (requested px) is converted to reference px; alignment,
  * baseline, direction, kerning and fill state are scale invariant. The font
- * and spacing are restored with the drawing state. */
+ * and spacing are restored with the drawing state. `lang` is the Canvas
+ * language the caller selected for this text, kept across the internal
+ * `save()`; untagged text passes none and gets a plain `save()`. */
 export function fillTextAtReference(
   ctx: ReferenceTextPaintTarget,
   reference: ReferenceTextFont,
   text: string,
   x: number,
   y: number,
+  lang?: string,
 ): void {
   const spacing = ctx.letterSpacing;
-  saveCanvasState(ctx);
+  saveCanvasState(ctx, lang);
   try {
     ctx.translate(x, y);
     ctx.scale(reference.scale, reference.scale);
