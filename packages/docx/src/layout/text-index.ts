@@ -108,6 +108,8 @@ interface ProjectionContext {
   readonly emittedDrawings: Set<string>;
   readonly runs: (TextRunGeometry | InlineContentGeometry)[];
   readonly sourceRuns: Map<string, Set<number>>;
+  /** The runs of `sourceRuns` that hold text (no tab or inline object). */
+  readonly sourceTextRuns: Map<string, Set<number>>;
   readonly completedParagraphSources: Set<string>;
   readonly drawings: DrawingGeometry[];
   readonly inlineResources: InlineResourceGeometry[];
@@ -672,6 +674,9 @@ function visitParagraph(
             const indices = context.sourceRuns.get(key) ?? new Set<number>();
             if (!context.sourceRuns.has(key)) context.sourceRuns.set(key, indices);
             indices.add(placement.sourceRunIndex);
+            const textIndices = context.sourceTextRuns.get(key) ?? new Set<number>();
+            if (!context.sourceTextRuns.has(key)) context.sourceTextRuns.set(key, textIndices);
+            textIndices.add(placement.sourceRunIndex);
           }
         }
       }
@@ -897,6 +902,7 @@ function pageGeometryIndex(
     emittedDrawings: new Set(),
     runs: [],
     sourceRuns: new Map(),
+    sourceTextRuns: new Map(),
     completedParagraphSources: new Set(),
     drawings: [],
     inlineResources: [],
@@ -983,6 +989,10 @@ export function textRunSourceIndexForDocument(
 
 export interface ReviewProjectionIndex {
   readonly renderedRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
+  /** The runs of `renderedRunIndex` that hold laid-out text: without the
+   * tabs and inline objects, which a range of runs covers but which are no
+   * text to stand in for content that is not laid out (a deletion). */
+  readonly textRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
   readonly completedSourceKeys: ReadonlySet<string>;
   /** The pages, in order, that hold laid-out runs of each paragraph source. */
   readonly sourcePages: ReadonlyMap<string, readonly number[]>;
@@ -1007,6 +1017,7 @@ export function reviewProjectionIndexForDocument(
   layout: DocumentLayout,
 ): ReviewProjectionIndex {
   const renderedRunIndex = new Map<string, Set<number>>();
+  const textRunIndex = new Map<string, Set<number>>();
   const completedSourceKeys = new Set<string>();
   const sourcePages = new Map<string, number[]>();
   const splitRuns = new Map<string, Map<number, { continued: number[]; continues: number[] }>>();
@@ -1046,12 +1057,17 @@ export function reviewProjectionIndexForDocument(
         for (const index of pageIndices) held.set(index, pageIndex);
       }
     }
+    for (const [key, pageIndices] of page.sourceTextRuns) {
+      const indices = textRunIndex.get(key) ?? new Set<number>();
+      if (!textRunIndex.has(key)) textRunIndex.set(key, indices);
+      for (const index of pageIndices) indices.add(index);
+    }
     for (const key of page.completedParagraphSources) {
       completedSourceKeys.add(key);
       continuing.delete(key);
     }
   }
-  return Object.freeze({ renderedRunIndex, completedSourceKeys, sourcePages, splitRuns });
+  return Object.freeze({ renderedRunIndex, textRunIndex, completedSourceKeys, sourcePages, splitRuns });
 }
 
 /** Index selectable drawings and inline image/chart placements in page paint order. */

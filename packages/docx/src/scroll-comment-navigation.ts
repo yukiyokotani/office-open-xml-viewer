@@ -18,11 +18,14 @@ interface CommentNavigationHooks {
   select(commentId: string, page: number, point: Readonly<{ x: number; y: number }>, options?: ScrollBehavior): void;
 }
 
-/** A point of what the page shows of `run`: one that every clip of its
- * first visible marking box shows (overlay-geometry.ts, run-clip.ts
- * visiblePoint); undefined for a run the clips hide whole. */
-function shownPoint(run: Readonly<DocxTextRunInfo>): Readonly<{ x: number; y: number }> | undefined {
-  for (const box of overlayBoxes([run])) {
+/** A point of what the page shows of an anchor's `runs`: one that every clip
+ * of the first visible box of its tint shows (overlay-geometry.ts
+ * overlayBoxes, run-clip.ts visiblePoint). The boxes are those of the tint,
+ * made from the runs together: a tab is marked beside the text it leads,
+ * not over the whole height of its line. Undefined when the clips hide
+ * everything. */
+function shownPoint(runs: readonly Readonly<DocxTextRunInfo>[]): Readonly<{ x: number; y: number }> | undefined {
+  for (const box of overlayBoxes(runs)) {
     const point = visiblePoint(box, box.clips);
     if (point) return point;
   }
@@ -160,10 +163,7 @@ export class DocxScrollCommentNavigation {
     const shownPage = page;
     let target: Readonly<{ x: number; y: number }> | undefined;
     for (const anchor of anchors) {
-      for (const run of resolveCommentAnchorRunsOnPage(anchor, runs, shownPage)) {
-        target = shownPoint(run);
-        if (target) break;
-      }
+      target = shownPoint(resolveCommentAnchorRunsOnPage(anchor, runs, shownPage));
       if (target) break;
     }
     if (!target) return false;

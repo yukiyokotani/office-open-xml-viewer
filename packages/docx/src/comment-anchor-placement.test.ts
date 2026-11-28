@@ -26,6 +26,7 @@ import { installDom, makeEl } from './scroll-viewer-test-dom.js';
 import {
   inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART,
 } from './test-support/painted-glyphs.test-support.js';
+import { resolveRevisionAnchorRuns } from './revisions.js';
 import { textRunsForPage } from './text-run-projection.js';
 import type { DocxClipRegion, DocxDocumentModel, DocxTextRunInfo } from './types.js';
 
@@ -50,6 +51,7 @@ function placedAnchors(layout: DocumentLayout, model: DocxDocumentModel): Commen
   return collectLayoutSourceCommentRangesIfPresent(model.comments, layoutSourceStore(model), index.renderedRunIndex, {
     cardOwners: { sourcePages: index.sourcePages, runsForPage: (page) => textRunsForPage(layout, page, { scale: 1 }) },
     splitRuns: index.splitRuns,
+    textRunIndex: index.textRunIndex,
   });
 }
 
@@ -132,6 +134,74 @@ describe('a comment range that starts in a paragraph of deleted text only', () =
     expect(thread!.anchors[0]!.rects).toHaveLength(1);
     expect(thread!.anchors[0]!.rects[0]!.x).toBeCloseTo(covered.x, 6);
     expect(thread!.anchors[0]!.rects[0]!.width).toBeCloseTo(covered.w, 6);
+  });
+});
+
+const DELETION = '<w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:rPr><w:sz w:val="24"/></w:rPr>'
+  + '<w:delText>Deleted</w:delText></w:r></w:del>';
+
+describe('a comment range none of whose text is laid out', () => {
+  it('is shown once, where one run stands in for the whole of it', async () => {
+    // The range covers deleted text in two paragraphs; its reference stands
+    // before "After".
+    const { layout, model, runs } = await paintedDocument(
+      `<w:p><w:commentRangeStart w:id="1"/>${DELETION}</w:p>`
+      + `<w:p>${DELETION.replace('w:id="9"', 'w:id="10"')}<w:commentRangeEnd w:id="1"/>${REFERENCE}${sized('After')}</w:p>`,
+      COMMENT_PART);
+    const anchors = placedAnchors(layout, model);
+    expect(anchors).toHaveLength(2);
+    const rects = resolveDocxCommentThreadsOnPage(model.comments ?? [], anchors, runs, 0)
+      .flatMap((thread) => thread.anchors.flatMap((anchor) => anchor.rects));
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.x).toBeCloseTo(runs.find((run) => run.text === 'After')!.x, 6);
+    installDom();
+    const tint = makeEl('div');
+    const margin = makeEl('div');
+    margin.clientHeight = 800;
+    buildDocxCommentMargin(tint as never, margin as never, runs, { comments: model.comments ?? [], anchors, pageIndex: 0 },
+      612, 792, null, () => undefined, 1, 260, false);
+    expect(tint.children).toHaveLength(1);
+    expect(margin.children).toHaveLength(1);
+  });
+});
+
+describe('text that stands in for content that is not laid out', () => {
+  const body = `<w:p><w:commentRangeStart w:id="1"/>${DELETION}<w:commentRangeEnd w:id="1"/>${REFERENCE}</w:p>`
+    + `<w:p>${inlinePictureRun(40, 30)}</w:p><w:p>${sized('After')}</w:p>`;
+  const parts = {
+    parts: { ...COMMENT_PART.parts, ...PICTURE_PART.parts },
+    relationships: COMMENT_PART.relationships + PICTURE_PART.relationships,
+    contentTypes: COMMENT_PART.contentTypes + PICTURE_PART.contentTypes,
+  };
+
+  it('is text for a deletion: an inline picture between is passed over', async () => {
+    const { layout, model, runs } = await paintedDocument(body, parts);
+    const meta = projectRenderWorkerLayoutMeta(layout, layoutSourceStore(model), {
+      comments: [], revisions: model.revisions ?? [],
+    });
+    expect(meta.revisionAnchorRanges).toHaveLength(1);
+    expect(resolveRevisionAnchorRuns(meta.revisionAnchorRanges![0]!, runs).map((run) => run.text)).toEqual(['After']);
+  });
+
+  it('is text for a comment on that deletion too', async () => {
+    const { layout, model, runs } = await paintedDocument(body, parts);
+    const anchors = placedAnchors(layout, model);
+    expect(anchors.flatMap((anchor) => resolveCommentAnchorRuns(anchor, runs)).map((run) => run.text)).toEqual(['After']);
+  });
+});
+
+describe('a comment range an application makes itself', () => {
+  it('is joined as given to the runs of a document that has no such comment', async () => {
+    const { layout, model } = await paintedDocument(`<w:p>${sized('Word')}</w:p>`);
+    const { doc } = documentOf(model, layout);
+    const runs = await doc.collectPageRuns(0);
+    const word = runs.find((run) => run.text === 'Word')!;
+    const anchor: CommentAnchorRange = {
+      commentId: 'app-1', source: word.source!, startRunIndex: word.sourceRunIndex!, endRunIndex: word.sourceRunIndex! + 1,
+      reference: { source: word.source!, runIndex: word.sourceRunIndex! + 1, affinity: 'preceding' },
+    };
+    expect(resolveCommentAnchorRuns(anchor, runs)).toEqual([word]);
+    expect(resolveDocxCommentThreads([{ id: 'app-1', text: 'mine' }], [anchor], runs)).toHaveLength(1);
   });
 });
 
@@ -484,6 +554,25 @@ describe('navigation to a comment that starts in clipped text and ends on a late
     expect(strips.some((x) => point.x > 50 + x && point.x < 50 + x + 0.5)).toBe(true);
     expect(point.y).toBeGreaterThan(100);
     expect(point.y).toBeLessThan(120);
+  });
+
+  it('goes to the tint of a comment that starts with a tab, not to the tab\'s line box', async () => {
+    // A tab and a 12pt word are commented; 80pt text shares their line, so
+    // the line box is far taller than the tint.
+    const { reached, select, layout } = await navigate(placedAnchors, undefined,
+      `<w:p><w:commentRangeStart w:id="1"/><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:tab/></w:r>${sized('word')}`
+      + `<w:commentRangeEnd w:id="1"/>${REFERENCE}<w:r><w:rPr><w:sz w:val="160"/></w:rPr><w:t>Tall</w:t></w:r></w:p>`);
+    expect(reached).toBe(true);
+    const point = select.mock.calls[0]![2];
+    const { model } = await paintedDocument(
+      `<w:p><w:commentRangeStart w:id="1"/><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:tab/></w:r>${sized('word')}`
+      + `<w:commentRangeEnd w:id="1"/>${REFERENCE}<w:r><w:rPr><w:sz w:val="160"/></w:rPr><w:t>Tall</w:t></w:r></w:p>`,
+      COMMENT_PART);
+    const rects = resolveDocxCommentThreadsOnPage(model.comments ?? [], placedAnchors(layout, model),
+      textRunsForPage(layout, 0, { scale: 1 }), 0).flatMap((thread) => thread.anchors.flatMap((anchor) => anchor.rects));
+    expect(rects.length).toBeGreaterThan(0);
+    expect(rects.some((rect) => point.x >= rect.x && point.x <= rect.x + rect.width
+      && point.y >= rect.y && point.y <= rect.y + rect.height)).toBe(true);
   });
 
   it('does not go to a page that shows nothing of the comment', async () => {

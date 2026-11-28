@@ -1859,6 +1859,7 @@ export class DocxDocument {
           runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
         },
         splitRuns: this._reviewProjectionIndex.splitRuns,
+        textRunIndex: this._reviewProjectionIndex.textRunIndex,
       },
     );
     return this._commentAnchorRanges;
@@ -1927,6 +1928,7 @@ export class DocxDocument {
           runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
         },
         splitRuns: index.splitRuns,
+        textRunIndex: index.textRunIndex,
       });
       // A layout still being published is collected again when it has grown.
       if (this._layoutLifecycle?.complete ?? true) COMMENT_ANCHOR_RANGES_BY_LAYOUT.set(layout, ranges);

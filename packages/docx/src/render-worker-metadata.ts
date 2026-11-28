@@ -37,6 +37,7 @@ export function projectRenderWorkerLayoutMeta(
           runsForPage: (pageIndex: number) => textRunsForPage(layout as DocumentLayout, pageIndex, { scale: 1 }),
         },
         splitRuns: reviewIndex.splitRuns,
+        textRunIndex: reviewIndex.textRunIndex,
         // A placement is kept beside its range, so it is sent beside the
         // ranges: the collector fills this as it returns them.
         commentAnchorPlacements: [] as (CommentAnchorPlacement | null)[],

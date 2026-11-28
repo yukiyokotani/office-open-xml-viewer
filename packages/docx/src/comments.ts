@@ -62,8 +62,12 @@ export interface CommentAnchorPlacement {
   readonly cardPageIndex?: number;
 }
 
+const NO_STAND_IN: CommentAnchorPlacement = Object.freeze({});
 const PLACEMENTS = new WeakMap<Readonly<CommentAnchorRange>, CommentAnchorPlacement>();
 const ADOPTED = new WeakSet<readonly Readonly<CommentAnchorRange>[]>();
+/** The anchors a document collected (or received from its worker), as
+ * distinct from ranges an application made itself. */
+const DOCUMENT_ANCHORS = new WeakSet<Readonly<CommentAnchorRange>>();
 const RUNS_ORIGIN = new WeakMap<readonly Readonly<DocxTextRunInfo>[], CollectedRunsOrigin>();
 const COUNTERPARTS = new WeakMap<readonly Readonly<CommentAnchorRange>[], Map<string, Readonly<CommentAnchorRange>>>();
 
@@ -92,9 +96,10 @@ const anchorKey = (anchor: Readonly<CommentAnchorRange>): string =>
  * layout of the runs collected and placed it. Geometry that belongs to a
  * layout (which covered runs are laid out, the run that stands in, the
  * fallback) is read from the layout the runs come from, whichever layout the
- * given anchor was collected against. Undefined for a range that layout
- * does not show (a segment it left out for the range's laid-out ones): it
- * is absent from the runs, and nothing of another layout stands in for it. */
+ * given anchor was collected against. Undefined for a document's range that
+ * layout does not show (a segment it left out for the range's laid-out
+ * ones): it is absent from the runs, and nothing of another layout stands
+ * in for it. */
 function anchorOfRunsLayout(
   anchor: Readonly<CommentAnchorRange>,
   origin: CollectedRunsOrigin | undefined,
@@ -106,7 +111,9 @@ function anchorOfRunsLayout(
     counterparts = new Map(anchors.map((own) => [anchorKey(own), own]));
     COUNTERPARTS.set(anchors, counterparts);
   }
-  return counterparts.get(anchorKey(anchor));
+  // A range the application made itself is no part of any layout's
+  // projection: it is joined as given.
+  return counterparts.get(anchorKey(anchor)) ?? (DOCUMENT_ANCHORS.has(anchor) ? undefined : anchor);
 }
 
 /** The placement of an anchor in the layout it was collected against;
@@ -123,10 +130,11 @@ export function adoptCommentAnchorPlacements(
   anchors: readonly Readonly<CommentAnchorRange>[],
   placements: readonly (CommentAnchorPlacement | null)[] | undefined,
 ): void {
-  if (!placements || ADOPTED.has(anchors)) return;
+  if (ADOPTED.has(anchors)) return;
   ADOPTED.add(anchors);
   anchors.forEach((anchor, index) => {
-    const placement = placements[index];
+    DOCUMENT_ANCHORS.add(anchor);
+    const placement = placements?.[index];
     if (placement) PLACEMENTS.set(anchor, placement);
   });
 }
@@ -378,6 +386,7 @@ export function assignCommentCardOwners(
     const cardPageIndex = owners.get(index);
     if (cardPageIndex === undefined) return anchor;
     const owner = Object.freeze({ ...anchor, cardOwner: true as const });
+    DOCUMENT_ANCHORS.add(owner);
     PLACEMENTS.set(owner, Object.freeze({ ...PLACEMENTS.get(anchor), cardPageIndex }));
     return owner;
   }));
@@ -405,6 +414,7 @@ function collectIndexedStoryCommentRanges(
   validCommentIds: ReadonlySet<string>,
   renderedRunIndex: RenderedRunIndex,
   splitRuns?: SplitRunIndex,
+  textRunIndex: RenderedRunIndex = renderedRunIndex,
 ): CommentAnchorRange[] {
   const validByValue = new Map<string, string>();
   const ambiguousValues = new Set<string>();
@@ -442,7 +452,9 @@ function collectIndexedStoryCommentRanges(
   }
 
   const ranges: CommentAnchorRange[] = [];
-  const projectedTextIndex = renderedTextLocations(paragraphs, renderedRunIndex);
+  // The adjacent-paragraph fallback is text: a tab or an inline object,
+  // which a range covers, does not stand in for another paragraph.
+  const projectedTextIndex = renderedTextLocations(paragraphs, textRunIndex);
   for (const [valueKey, marks] of marksById) {
     const id = validByValue.get(valueKey);
     if (id === undefined || marks.references.length !== 1) continue;
@@ -497,6 +509,11 @@ function collectIndexedStoryCommentRanges(
       // final view) shows nothing, and is not resolved to text outside the
       // range.
       const laidOut = covering.filter((segment) => segment.coveredGeometry);
+      // One run stands in for a range none of whose covered runs is laid
+      // out: its first segment carries it, the others are placed without.
+      if (laidOut.length === 0 && PLACEMENTS.get(covering[0]!)?.standIn) {
+        for (const segment of covering.slice(1)) PLACEMENTS.set(segment, NO_STAND_IN);
+      }
       ranges.push(...(laidOut.length > 0 ? laidOut : covering.length > 0 ? covering : segments.slice(0, 1)));
       continue;
     }
@@ -518,6 +535,7 @@ function collectIndexedStoryCommentRanges(
   function placed(range: CommentAnchorRange, fallbackSide: 'first' | 'last'): CommentAnchorRange {
     const standIn = standInRun(range, renderedRunIndex, splitRuns, fallbackSide);
     if (standIn) PLACEMENTS.set(range, Object.freeze({ standIn }));
+    DOCUMENT_ANCHORS.add(range);
     return range;
   }
 }
@@ -590,6 +608,7 @@ export function collectLayoutSourceCommentRanges(
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
   splitRuns?: SplitRunIndex,
+  textRunIndex?: RenderedRunIndex,
 ): CommentAnchorRange[] {
   const validCommentIds = new Set(comments.map(({ id }) => id));
   const byStory = new Map<string, ParagraphVisit[]>();
@@ -602,7 +621,7 @@ export function collectLayoutSourceCommentRanges(
     visits.push({ paragraph: block, source: blockSource });
   }
   return [...byStory.values()].flatMap((paragraphs) =>
-    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex, splitRuns));
+    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex, splitRuns, textRunIndex));
 }
 
 /** Avoid any story walk for the common comment-free document. */
@@ -613,7 +632,8 @@ export function collectLayoutSourceCommentRangesIfPresent(
   options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  const collected = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex, options.splitRuns);
+  const collected = collectLayoutSourceCommentRanges(
+    comments ?? [], source, renderedRunIndex, options.splitRuns, options.textRunIndex);
   const completed = options.completedSourceKeys;
   const ranges = completed === undefined ? collected : collected.filter((range) => {
     const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
@@ -690,7 +710,11 @@ export function resolveCommentAnchorRunsOnPage(
   // A lone rangeStart/rangeEnd or reference-only comment is a point anchor at
   // the range's own source/boundary (§17.13.4.3/.4). The separately-authored
   // commentReference may be elsewhere and must not displace that point.
-  const standIn = PLACEMENTS.get(anchor)?.standIn;
+  const placement = PLACEMENTS.get(anchor);
+  // Placed without a stand-in: another segment of the range stands in for
+  // the whole of it.
+  if (placement && !placement.standIn && !('cardPageIndex' in placement)) return [];
+  const standIn = placement?.standIn;
   if (standIn) {
     if (pageIndex !== undefined && standIn.otherPages?.includes(pageIndex)) return [];
     const source = standIn.from === 'anchor' ? anchor.source
