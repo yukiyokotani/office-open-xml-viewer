@@ -701,6 +701,19 @@ describe('Canvas lang at measure and paint', () => {
     expect(calls).toEqual([['10px A', 'sr-rs'], ['64px A', 'sr-rs'], ['10px A', undefined]]);
   });
 
+  it('calls the measurer factory with the font alone for untagged runs', () => {
+    const argumentCounts: number[] = [];
+    const measureForFont = function (_font: string, _lang?: string) {
+      argumentCounts.push(arguments.length);
+      return (s: string) => s.length;
+    };
+    const base = { text: 'abc', x: 0, y: 0, w: 1, h: 1, fontSize: 10, font: '10px A' };
+    runOverlayMeasure(base, measureForFont);
+    runOverlayMeasure({ ...base, referenceFont: { font: '64px A', scale: 0.25 } }, measureForFont);
+    runOverlayMeasure({ ...base, lang: 'sr-rs' }, measureForFont);
+    expect(argumentCounts).toEqual([1, 1, 2]);
+  });
+
   it('measures every fragment of a wrapped piece in the language it is painted with', async () => {
     const { canvas, draws, measures } = recordingCanvas();
     // The piece contains text no named family draws, so it is untagged as a

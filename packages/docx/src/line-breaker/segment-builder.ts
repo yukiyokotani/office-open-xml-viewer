@@ -523,12 +523,13 @@ export function appendTextPiece(
 /** Whether the seam between two adjacent text pieces is a UAX #14 no-break
  * pair. `beforeCp` classifies the left side: its last scalar, or (LB9) the
  * base of its last cluster where the caller knows that cluster. One-way:
- * false means unsupported/deferred, never "break allowed". */
+ * false means unsupported/deferred, never "break allowed". The caller checks
+ * whitespace on both sides of the seam first (source runs may start with
+ * whitespace even though ASCII spaces normally remain attached to the
+ * preceding splitTextForLayout token). */
 function uax14SeamJoins(previous: string, current: string, beforeCp: number | undefined): boolean {
-  // Whitespace is an actual wrap boundary. Check both sides because source
-  // runs may start with whitespace even though ASCII spaces normally remain
-  // attached to the preceding splitTextForLayout token.
-  if (/\s$/u.test(previous) || /^\s/u.test(current)) return false;
+  // Callers have already rejected whitespace on either side of the seam (an
+  // actual wrap boundary), so it is checked once, before scalar extraction.
   const afterCp = current.codePointAt(0);
   if (beforeCp === undefined || afterCp === undefined) return false;
   // U+200B is the explicit zero-width-space opportunity from LB8 and is not
@@ -1359,8 +1360,9 @@ function pushSegmentPiece(
       // break opportunity of its own. The UAX #14 seam pass sees only the
       // last scalar before a seam; a range ends with a whole cluster, so
       // its base classifies the left side here (LB9).
-      if (previousPart && uax14SeamJoins(previousPart, part,
-        previousPart.codePointAt(graphemeClusterOffsets(previousPart).at(-1) ?? 0))) {
+      if (previousPart && !/\s$/u.test(previousPart) && !/^\s/u.test(part) &&
+        uax14SeamJoins(previousPart, part,
+          previousPart.codePointAt(graphemeClusterOffsets(previousPart).at(-1) ?? 0))) {
         emissionState.gluePending = true;
       }
       pushSegmentPiece(
