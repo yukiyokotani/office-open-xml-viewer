@@ -1250,3 +1250,39 @@ test('importing the command modules from stdin does not run or throw', () => {
     assert.equal(child.status, 0, `${module}: ${child.stderr}`);
   }
 });
+
+test('the baseline command refuses paths inside the candidate and registered paths reached through an alias', () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'selfvrt-alias-')));
+  const candidate = join(scratch, 'candidate');
+  try {
+    mkdirSync(candidate);
+    git(candidate, 'init', '--quiet');
+    writeFileSync(join(candidate, 'README'), 'x');
+    git(candidate, 'add', 'README');
+    git(candidate, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', 'x');
+    const revision = git(candidate, 'rev-parse', 'HEAD');
+    const registrations = () => git(candidate, 'worktree', 'list', '--porcelain').match(/^worktree /gm).length;
+
+    // Inside the candidate: comparison could never use it, so nothing is created.
+    assert.throws(
+      () => createBaselineWorktree({ source: candidate, destination: join(candidate, '.nested/baseline'), base: revision }),
+      /outside the candidate checkout/,
+    );
+    assert.equal(existsSync(join(candidate, '.nested')), false);
+    assert.equal(registrations(), 1);
+
+    // A registration left at real/nested/baseline by a moved worktree is found
+    // through alias -> real even though real/nested no longer exists.
+    git(candidate, 'worktree', 'add', '--quiet', '--detach', join(scratch, 'real/nested/baseline'), revision);
+    renameSync(join(scratch, 'real/nested'), join(scratch, 'moved'));
+    symlinkSync(join(scratch, 'real'), join(scratch, 'alias'));
+    assert.throws(
+      () => createBaselineWorktree({ source: candidate, destination: join(scratch, 'alias/nested/baseline'), base: revision }),
+      /already registered/,
+    );
+    assert.equal(registrations(), 2);
+    assert.match(git(candidate, 'worktree', 'list', '--porcelain'), /real\/nested\/baseline\n/);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

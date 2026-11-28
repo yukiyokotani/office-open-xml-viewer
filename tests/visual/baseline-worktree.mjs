@@ -11,7 +11,7 @@
 // command before the worktree is created.
 import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isCorpusInputPath, readRegularFile, writeRegularFile } from './checked-read.mjs';
 
@@ -52,6 +52,18 @@ function specimenChanges(source, revision) {
  * working tree adds or modifies relative to `base`. Returns the worktree's
  * real path and the copied repository paths. If the checkout or a write
  * fails, the worktree this call registered is removed again. */
+// Canonical form of a path that may not exist yet: the deepest existing
+// ancestor resolved, the missing components appended (Git records this form).
+function canonicalPath(path) {
+  const missing = [];
+  let ancestor = path;
+  while (!exists(ancestor) && dirname(ancestor) !== ancestor) {
+    missing.unshift(basename(ancestor));
+    ancestor = dirname(ancestor);
+  }
+  return join(realpathSync(ancestor), ...missing);
+}
+
 export function createBaselineWorktree({ source, destination: requested, base }) {
   // One absolute path for the preflight, `git worktree add` and rollback.
   const destination = resolve(requested);
@@ -67,6 +79,10 @@ export function createBaselineWorktree({ source, destination: requested, base })
   if (exists(destination)) {
     throw new Error(`baseline worktree path already exists: ${destination}`);
   }
+  const offset = relative(from, canonicalPath(destination));
+  if (offset === '' || (!offset.startsWith('..') && !isAbsolute(offset))) {
+    throw new Error(`baseline worktree must be outside the candidate checkout: ${destination}`);
+  }
   const revision = git(from, 'rev-parse', '--verify', `${base}^{commit}`).trim();
   const changes = specimenChanges(from, revision);
   const removed = changes.filter(([status]) => status !== 'A' && status !== 'M');
@@ -80,10 +96,7 @@ export function createBaselineWorktree({ source, destination: requested, base })
   const registered = () => git(from, 'worktree', 'list', '--porcelain', '-z').split('\0')
     .filter((field) => field.startsWith('worktree ')).map((field) => field.slice('worktree '.length));
   // Git records the canonical path; the parent may not exist yet.
-  const canonical = () => {
-    const parent = dirname(destination);
-    return join(exists(parent) ? realpathSync(parent) : parent, basename(destination));
-  };
+  const canonical = () => canonicalPath(destination);
   // A moved worktree keeps its registration at the old path; never create
   // (or later roll back) a destination Git already has registered.
   if (registered().includes(canonical())) {
