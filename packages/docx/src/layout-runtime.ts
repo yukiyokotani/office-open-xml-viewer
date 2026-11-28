@@ -192,8 +192,8 @@ export function createLayoutServices(
         // writes none of the caller context's language state. An engine
         // without the attribute reads as no language and ignores writes.
         lang: {
-          get: () => engineHasLang() ? (canvasContext as { lang: string }).lang : undefined,
-          set: (value: string) => { if (engineHasLang()) (canvasContext as { lang: string }).lang = value; },
+          get: () => engineHasLang() ? (canvasContext as unknown as { lang: string }).lang : undefined,
+          set: (value: string) => { if (engineHasLang()) (canvasContext as unknown as { lang: string }).lang = value; },
           enumerable: true,
         },
       }));
