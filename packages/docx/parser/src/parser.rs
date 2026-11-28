@@ -381,6 +381,48 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn oversized_lang_val_is_not_cloned_into_inheriting_runs() {
+        // The renderer admits at most 64 UTF-16 units as a Canvas language;
+        // a longer style w:val names none and is not retained per run, while
+        // its element still clears the inherited value (§17.3.2.20) and the
+        // regional w:eastAsia/w:bidi inputs stay as authored.
+        let oversized = format!("en-{}", "a".repeat(200));
+        let bounded = format!("en-{}", "a".repeat(61));
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="de-DE"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Big"><w:rPr><w:lang w:val="{oversized}" w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="Edge"><w:rPr><w:lang w:val="{bounded}"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        let runs = "<w:r><w:t>a</w:t></w:r>".repeat(50);
+        let p = parse_p(
+            &format!(r#"<w:pPr><w:pStyle w:val="Big"/></w:pPr>{runs}"#),
+            &styles,
+        );
+        let mut count = 0;
+        for run in &p.runs {
+            let DocRun::Text(_) = run else { continue };
+            count += 1;
+            let wire = serde_json::to_value(run).expect("run serializes");
+            assert!(wire.get("lang").is_none());
+            assert!(wire["__typographyAcquisition"]["languages"]
+                .get("val")
+                .is_none());
+            assert_eq!(wire["langEastAsia"], "ja-jp");
+            assert_eq!(wire["langBidi"], "ar-sa");
+        }
+        assert_eq!(count, 50);
+        assert!(p.paragraph_mark_font_facts.as_ref().unwrap().lang.is_none());
+        // Exactly 64 units is retained.
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Edge"/></w:pPr><w:r><w:t>a</w:t></w:r>"#,
+            &styles,
+        );
+        assert_eq!(first_run_json(&p, "text")["lang"], bounded);
+    }
+
+    #[test]
     fn canvas_east_asian_and_bidi_axes_follow_element_presence() {
         // ECMA-376 §17.3.2.20: a present <w:lang> that omits w:eastAsia or
         // w:bidi leaves that axis to automatic determination at its level, so

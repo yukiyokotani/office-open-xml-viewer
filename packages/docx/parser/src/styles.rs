@@ -608,6 +608,9 @@ pub struct StyleMap {
 /// at five or fewer levels; 64 leaves ample headroom while bounding each
 /// resolution. A longer chain fails closed with a typed resource error.
 pub(crate) const MAX_STYLE_INHERITANCE_DEPTH: usize = 64;
+/// Longest w:lang@w:val retained as a Canvas language, in UTF-16 units: the
+/// renderer bound (packages/docx/src/layout/text.ts MAX_LANGUAGE_TAG_UNITS).
+pub(crate) const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
 
 /// The largest number of distinct styles any one `basedOn` chain applies,
 /// counted exactly as [`StyleMap::apply_style_chain`] and
@@ -2350,8 +2353,14 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang_east_asia = Some(east_asia.to_lowercase());
             }
         }
+        // `lang` is the Canvas-only w:val fact. ECMA-376 §17.3.2.20 types
+        // w:val as ST_Lang (a language identifier); the renderer admits at
+        // most MAX_LANGUAGE_TAG_UNITS (64) UTF-16 units and treats a longer
+        // value as naming no language, so it is not retained here and is not
+        // cloned into every inheriting run. Element presence
+        // (`lang_element_set_here`) still clears the inherited value.
         if let Some(val) = attr_w(lang, "val") {
-            if !val.is_empty() {
+            if !val.is_empty() && val.encode_utf16().count() <= MAX_CANVAS_LANGUAGE_TAG_UNITS {
                 fmt.lang = Some(val.to_lowercase());
             }
         }
