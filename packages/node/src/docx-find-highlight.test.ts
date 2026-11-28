@@ -90,6 +90,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       h: number;
       font: string;
       fontSize: number;
+      highlightBounds?: { x: number; y: number; width: number; height: number };
     };
 
     // Render every page and collect its runs, exactly as DocxViewer does. Keep
