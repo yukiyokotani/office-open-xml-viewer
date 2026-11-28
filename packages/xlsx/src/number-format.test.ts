@@ -343,7 +343,8 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
     vi.stubGlobal('navigator', { language: 'de-DE' });
     try {
       expect(fmt(1234567.5, '#,##0.00')).toBe('1.234.567,50');
-      // The public corpus specimen xlsx-017 under a comma-decimal host:
+      // The rows of public corpus specimen xlsx-001 that a comma-decimal host
+      // tells apart:
       // General, grouping with decimals, and a quoted literal dot.
       expect(formatCellValue(numCell(39.37007874), styles('General'))).toBe('39,37007874');
       expect(fmt(1609.344, '#,##0.000')).toBe('1.609,344');
