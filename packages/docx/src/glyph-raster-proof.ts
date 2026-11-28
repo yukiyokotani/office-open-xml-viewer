@@ -74,8 +74,13 @@ function rasterize(context: RasterContext, font: string, text: string, width: nu
   context.font = font;
   context.textBaseline = 'alphabetic';
   context.fillStyle = '#000';
-  withLanguage(context, lang, () =>
-    withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7))));
+  // Untagged probes keep the direct path: no language wrapper, no closure.
+  if (lang === undefined) {
+    withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7)));
+  } else {
+    withLanguage(context, lang, () =>
+      withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7))));
+  }
   return context.getImageData(0, 0, width, height).data;
 }
 
@@ -98,13 +103,8 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   const faceFont = `${request.style} ${request.weight} ${PROBE_EM_PX}px ${quoteCssFontFamily(request.faceFamily)}`;
   const measure = sharedContext(1, PROBE_EM_PX * 2);
   if (!measure) return false;
-  const width = (font: string) => {
-    measure.font = font;
-    return withLanguage(measure, request.route.lang, () =>
-      withDirection(measure, request.baseDirection, () => measure.measureText(probe).width));
-  };
-  const nativeWidth = width(nativeFont);
-  const faceWidth = width(faceFont);
+  const nativeWidth = probeWidth(measure, nativeFont, probe, request.baseDirection, request.route.lang);
+  const faceWidth = probeWidth(measure, faceFont, probe, request.baseDirection, request.route.lang);
   if (!(Number.isFinite(nativeWidth) && nativeWidth > 0) || nativeWidth !== faceWidth) return false;
   const rasterWidth = Math.ceil(nativeWidth + PROBE_EM_PX);
   const height = PROBE_EM_PX * 2;
@@ -132,6 +132,15 @@ const OWNERSHIP_LIMIT = 16384;
  * the realm-wide cache stays bounded in bytes as well as entries. */
 const OWNERSHIP_KEY_UNITS = 16;
 let graphemes: Intl.Segmenter | null | undefined;
+
+function probeWidth(
+  context: RasterContext, font: string, probe: string, base: 'ltr' | 'rtl' | undefined, lang: string | undefined,
+): number {
+  context.font = font;
+  if (lang === undefined) return withDirection(context, base, () => context.measureText(probe).width);
+  return withLanguage(context, lang, () =>
+    withDirection(context, base, () => context.measureText(probe).width));
+}
 
 /**
  * Glyph ownership through a size-adjust:0% registration of the exact source
@@ -165,9 +174,14 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
       context.font = font;
       // Owned glyphs keep zero advance AND zero ink (the outlines scale too);
       // a fallback, even a zero-advance combining mark, keeps positive ink.
-      const metrics = withLanguage(context, request.lang, () => request.baseDirection === undefined
-        ? context!.measureText(part)
-        : withDirection(context!, request.baseDirection, () => context!.measureText(part)));
+      const measureContext = context;
+      const metrics = request.lang === undefined
+        ? request.baseDirection === undefined
+          ? measureContext.measureText(part)
+          : withDirection(measureContext, request.baseDirection, () => measureContext.measureText(part))
+        : withLanguage(measureContext, request.lang, () => request.baseDirection === undefined
+          ? measureContext.measureText(part)
+          : withDirection(measureContext, request.baseDirection, () => measureContext.measureText(part)));
       const inkWidth = (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
       const inkHeight = (metrics.actualBoundingBoxAscent ?? 0) + (metrics.actualBoundingBoxDescent ?? 0);
       owned = metrics.width === 0 && Number.isFinite(inkWidth) && Number.isFinite(inkHeight)
