@@ -934,7 +934,7 @@ impl<'a> Reader<'a> {
         class: ScriptClass,
     ) -> Result<Option<String>, String> {
         let cascade = Cascade::build(self.search_order(contexts, context)?, TEXT)?;
-        Ok(script_language(&cascade, class, self.fonts).map(|tag| tag.to_string()))
+        Ok(class_language_tag(&cascade, class, self.fonts).map(|tag| tag.to_string()))
     }
 
     pub(super) fn run_properties(
@@ -1542,9 +1542,12 @@ pub(super) struct RunProperties {
     pub lang: Option<Atom>,
     pub lang_east_asia: Option<Atom>,
     pub lang_bidi: Option<Atom>,
-    /// The language of the run's script class (`script_language`); `None`
-    /// where the styles name none for that class.
+    /// The complete language tag of the run's script class
+    /// (`class_language_tag`); `None` where the styles name none for that
+    /// class.
     pub script_language: Option<Atom>,
+    /// Whether the styles name a language for any script class.
+    pub names_language: bool,
     pub complex: bool,
 }
 
@@ -1708,6 +1711,8 @@ impl RunProperties {
         if size < 0.5 {
             size = 0.5;
         }
+        let class_tags = [ScriptClass::Latin, ScriptClass::Asian, ScriptClass::Complex]
+            .map(|any| class_language_tag(cascade, any, fonts));
         (
             Self {
                 family,
@@ -1736,17 +1741,24 @@ impl RunProperties {
                 // ODF 1.3 Part 3 §20.358 Table 22 classes the run's characters,
                 // and the class selects which of the three languages applies
                 // to all of them, as it selects the one face set on every
-                // font slot above. That resolved language is a fact of its
-                // own (`script_language`): the renderer's ECMA-376 §17.3.2.26
+                // font slot above. That resolved language, a complete tag
+                // (`class_language_tag`), is a fact of its own: the renderer's ECMA-376 §17.3.2.26
                 // slot table may place a character of this class in any slot
                 // (U+31C0 is Asian here, highAnsi there; U+1D11E Latin here,
                 // East Asian there), so no axis can stand for it. The axes
-                // keep the style's own three values; the renderer's regional
-                // font selection reads the Asian one.
-                lang: script_language(cascade, ScriptClass::Latin, fonts),
-                lang_east_asia: script_language(cascade, ScriptClass::Asian, fonts),
-                lang_bidi: script_language(cascade, ScriptClass::Complex, fonts),
-                script_language: script_language(cascade, class, fonts),
+                // keep the style's own three language-country values
+                // (`regional_language`); the renderer's regional font
+                // selection reads the Asian one.
+                lang: regional_language(cascade, ScriptClass::Latin, fonts),
+                lang_east_asia: regional_language(cascade, ScriptClass::Asian, fonts),
+                lang_bidi: regional_language(cascade, ScriptClass::Complex, fonts),
+                names_language: class_tags.iter().any(Option::is_some),
+                script_language: class_tags[match class {
+                    ScriptClass::Latin => 0,
+                    ScriptClass::Asian => 1,
+                    ScriptClass::Complex => 2,
+                }]
+                .clone(),
                 complex: class == ScriptClass::Complex,
             },
             face,
@@ -1812,12 +1824,7 @@ impl RunProperties {
     fn class_language_fact(&self, language: Option<&str>) -> Option<String> {
         match language {
             Some(tag) => Some(tag.to_string()),
-            None if self.lang.is_some()
-                || self.lang_east_asia.is_some()
-                || self.lang_bidi.is_some() =>
-            {
-                Some(String::new())
-            }
+            None if self.names_language => Some(String::new()),
             None => None,
         }
     }
@@ -1846,11 +1853,14 @@ impl RunProperties {
     }
 }
 
-/// The language a cascade sets for text of a script class, as a BCP 47 tag
-/// (ODF 1.3 Part 3 §20.358: fo:language and fo:country for Latin text,
-/// style:language-asian / -complex with their countries for the others;
-/// "none" names no language).
-fn script_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
+/// The language a cascade sets for text of a script class as the regional
+/// font-selection input of the model's three language axes: language and
+/// country (ODF 1.3 Part 3 §20.358: fo:language and fo:country for Latin
+/// text, style:language-asian / -complex with their countries for the
+/// others; "none" names no language). The renderer matches these against its
+/// regional font lists (zh-CN, ja-JP, ...), so they keep this shape; the
+/// Canvas language of the class is `class_language_tag`.
+fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
     let (ns, language, country) = match class {
         ScriptClass::Latin => (NS_FO, "language", "country"),
         ScriptClass::Asian => (NS_STYLE, "language-asian", "country-asian"),
@@ -1867,6 +1877,83 @@ fn script_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces)
             None => language.to_ascii_lowercase(),
         }),
     )
+}
+
+/// The complete language tag a cascade sets for text of a script class: the
+/// language the class's text is in, for Canvas `lang`.
+///
+/// - ODF 1.3 Part 3 §§20.343–20.345: style:rfc-language-tag (-asian,
+///   -complex) is an RFC 5646 tag, used only where the language, script and
+///   country attributes cannot express it; producers may write those as a
+///   fallback beside it. The RFC tag therefore wins over them when it is set
+///   in the same style or a nearer one of the §16.2 search order; a
+///   component set in a nearer style overrides an inherited RFC tag
+///   (library policy for the cascade of two alternative spellings, which the
+///   standard does not order).
+/// - Otherwise the tag is assembled from the language (§20.202 fo:language,
+///   §20.302/§20.303), the script (§20.222 fo:script, §20.356/§20.357) and
+///   the country (§20.188 fo:country, §20.256/§20.257), in RFC 5646 order
+///   with its conventional case. Script and country are ignored without a
+///   language (they "may be ignored if not specified together with" it).
+///
+/// The renderer canonicalizes the tag (an ill-formed one names no language).
+fn class_language_tag(
+    cascade: &Cascade<'_>,
+    class: ScriptClass,
+    fonts: &FontFaces,
+) -> Option<Atom> {
+    let (ns, rfc, language, script, country) = match class {
+        ScriptClass::Latin => (NS_FO, "rfc-language-tag", "language", "script", "country"),
+        ScriptClass::Asian => (
+            NS_STYLE,
+            "rfc-language-tag-asian",
+            "language-asian",
+            "script-asian",
+            "country-asian",
+        ),
+        ScriptClass::Complex => (
+            NS_STYLE,
+            "rfc-language-tag-complex",
+            "language-complex",
+            "script-complex",
+            "country-complex",
+        ),
+    };
+    // The RFC tag is a style: attribute for every class.
+    let tag = cascade
+        .get(NS_STYLE, rfc)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if let Some(tag) = tag {
+        let depth = cascade.depth(NS_STYLE, rfc);
+        let nearer_component = [language, script, country]
+            .into_iter()
+            .filter_map(|name| cascade.depth(ns, name))
+            .min()
+            .is_some_and(|component| Some(component) < depth);
+        if !nearer_component {
+            return Some(fonts.atom(tag));
+        }
+    }
+    let language = cascade.get(ns, language).filter(|v| *v != "none")?;
+    let mut tag = language.to_ascii_lowercase();
+    if let Some(script) = cascade
+        .get(ns, script)
+        .filter(|v| *v != "none" && !v.is_empty())
+    {
+        let mut chars = script.chars();
+        tag.push('-');
+        tag.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+        tag.push_str(&chars.as_str().to_ascii_lowercase());
+    }
+    if let Some(country) = cascade
+        .get(ns, country)
+        .filter(|v| *v != "none" && !v.is_empty())
+    {
+        tag.push('-');
+        tag.push_str(&country.to_ascii_uppercase());
+    }
+    Some(fonts.atom(&tag))
 }
 
 /// The Table 22 class of an item's own text: the one class its classified

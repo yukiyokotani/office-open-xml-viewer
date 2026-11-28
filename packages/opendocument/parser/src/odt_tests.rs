@@ -320,6 +320,68 @@ fn fields_and_ruby_bases_take_the_language_of_their_own_text() {
 }
 
 #[test]
+fn class_language_tags_carry_script_and_rfc_language_tags() {
+    let automatic = r#"<style:style style:name="S" style:family="text"><style:text-properties fo:language="sr" fo:script="latn" fo:country="rs" style:language-asian="zh" style:script-asian="Hant" style:country-asian="TW"/></style:style><style:style style:name="F" style:family="text"><style:text-properties fo:language="sl" fo:country="SI" style:rfc-language-tag="sl-rozaj"/></style:style><style:style style:name="N" style:family="text" style:parent-style-name="R"><style:text-properties fo:language="de" fo:country="DE"/></style:style>"#;
+    // R is a common style: N, an automatic style, inherits from it.
+    let styles = r#"<style:style style:name="R" style:family="text"><style:text-properties style:rfc-language-tag="sl-rozaj" style:rfc-language-tag-asian="ja-JP-u-ca-japanese" style:rfc-language-tag-complex="ar-SA-u-nu-arab"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        styles,
+        body: "<text:p><text:span text:style-name=\"S\">a\u{5B57}</text:span><text:span text:style-name=\"R\">b\u{5B57}\u{0627}</text:span><text:span text:style-name=\"F\">c</text:span><text:span text:style-name=\"N\">d\u{5B57}</text:span></text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<Languages<'_>> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            // §20.222 / §20.356: the script subtag joins each class tag;
+            // the regional axes keep language and country only.
+            (
+                "a".to_string(),
+                Some("sr-Latn-RS"),
+                [Some("sr-RS"), Some("zh-TW"), None]
+            ),
+            (
+                "\u{5B57}".to_string(),
+                Some("zh-Hant-TW"),
+                [Some("sr-RS"), Some("zh-TW"), None]
+            ),
+            // §§20.343–20.345: an RFC 5646 tag alone names the class
+            // language; it supplies no regional axis.
+            ("b".to_string(), Some("sl-rozaj"), [None, None, None]),
+            (
+                "\u{5B57}".to_string(),
+                Some("ja-JP-u-ca-japanese"),
+                [None, None, None]
+            ),
+            (
+                "\u{0627}".to_string(),
+                Some("ar-SA-u-nu-arab"),
+                [None, None, None]
+            ),
+            // A fallback language and country beside the RFC tag in one
+            // style: the RFC tag is the language.
+            (
+                "c".to_string(),
+                Some("sl-rozaj"),
+                [Some("sl-SI"), None, None]
+            ),
+            // A language set nearer overrides an inherited RFC tag; the
+            // Asian class keeps its inherited one.
+            ("d".to_string(), Some("de-DE"), [Some("de-DE"), None, None]),
+            (
+                "\u{5B57}".to_string(),
+                Some("ja-JP-u-ca-japanese"),
+                [Some("de-DE"), None, None]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn collapses_white_space_and_keeps_spaces_tabs_and_breaks() {
     let document = read_fixture(Fixture {
         body:

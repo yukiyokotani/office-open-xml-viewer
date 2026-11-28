@@ -342,8 +342,9 @@ pub struct Cascade<'a> {
     /// (namespace, name): the index of its key and value in `order`. The
     /// keys borrow the stored names, so a lookup allocates nothing.
     values: HashMap<(&'a str, &'a str), usize>,
-    /// The keys and values in first-seen order (nearest style first).
-    order: Vec<(&'a Key, &'a str)>,
+    /// The keys and values in first-seen order (nearest style first), with
+    /// the position in `styles` of the style that sets each.
+    order: Vec<(&'a Key, &'a str, usize)>,
 }
 
 impl<'a> Cascade<'a> {
@@ -360,14 +361,14 @@ impl<'a> Cascade<'a> {
         }))?;
         let mut values: HashMap<(&'a str, &'a str), usize> = HashMap::new();
         let mut order = Vec::new();
-        for style in &styles {
+        for (position, style) in styles.iter().enumerate() {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
                     if let std::collections::hash_map::Entry::Vacant(entry) =
                         values.entry((key.0.as_str(), key.1.as_str()))
                     {
                         entry.insert(order.len());
-                        order.push((key, value.as_str()));
+                        order.push((key, value.as_str(), position));
                     }
                 }
             }
@@ -389,6 +390,16 @@ impl<'a> Cascade<'a> {
             .map(|index| self.order[*index].1)
     }
 
+    /// The position in the search order (0 = nearest) of the style that sets
+    /// the attribute's resolved value, for attributes whose meaning depends
+    /// on which of two alternatives is set nearer.
+    pub fn depth(&self, namespace: &str, name: &str) -> Option<usize> {
+        let values: &HashMap<(&str, &str), usize> = &self.values;
+        values
+            .get(&(namespace, name))
+            .map(|index| self.order[*index].2)
+    }
+
     pub fn element(&self, name: &str) -> Option<&'a [Element]> {
         self.styles.iter().find_map(|style| {
             style
@@ -400,7 +411,10 @@ impl<'a> Cascade<'a> {
 
     /// Every attribute key set anywhere in the cascade (for admission).
     pub fn keys(&self) -> Vec<Key> {
-        self.order.iter().map(|(key, _)| (*key).clone()).collect()
+        self.order
+            .iter()
+            .map(|(key, _, _)| (*key).clone())
+            .collect()
     }
 
     /// Every element-valued property name set anywhere in the cascade.
