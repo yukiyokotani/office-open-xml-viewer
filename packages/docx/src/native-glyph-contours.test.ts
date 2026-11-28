@@ -67,3 +67,31 @@ it('uses the acquired native base on its owned contour surface and disposes it',
   expect(directions.every(direction => direction === 'rtl')).toBe(true);
   expect(surfaces.every(surface => surface.width === 1 && surface.height === 1)).toBe(true);
 });
+
+it('keeps the route language across the reference-em draw when save() resets it', () => {
+  const drawn: string[] = [];
+  class ChromeCanvas {
+    width: number; height: number;
+    constructor(w: number, h: number) { this.width = w; this.height = h; }
+    getContext() {
+      const saved: string[] = [];
+      const context = {
+        lang: 'inherit', font: '', letterSpacing: '0px', fillStyle: '', textAlign: '', textBaseline: '', direction: 'ltr',
+        scale() {}, translate() {},
+        // Chrome resets lang on the state that stays active; restore() brings the saved one back.
+        save() { saved.push(context.lang); context.lang = 'inherit'; },
+        restore() { context.lang = saved.pop() ?? 'inherit'; },
+        fillText() { drawn.push(context.lang); },
+        getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+      };
+      return context;
+    }
+  }
+  vi.stubGlobal('OffscreenCanvas', ChromeCanvas);
+  const advances = { plan: (font: string) => ({ font, scale: 0.5 }) } as never;
+  acquireCanvasGlyphContours({
+    ...request, spans: [{ ...request.spans[0]!, fontRoute: { ...request.spans[0]!.fontRoute, lang: 'sr-rs' } }],
+  }, advances);
+  expect(drawn.length).toBeGreaterThan(0);
+  expect(drawn.every(lang => lang === 'sr-rs')).toBe(true);
+});

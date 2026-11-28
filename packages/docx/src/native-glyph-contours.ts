@@ -56,7 +56,7 @@ export function acquireCanvasGlyphContours(
         // planned before the route language, as measurement plans it.
         const reference = advances?.plan(font);
         const previousLang = selectCanvasLanguage(ctx, span.fontRoute.lang);
-        if (reference) fillTextAtReference(ctx, reference, span.text, x, 0);
+        if (reference) fillTextAtReference(ctx, reference, span.text, x, 0, span.fontRoute.lang);
         else ctx.fillText(span.text, x, 0);
         restoreCanvasLanguage(ctx, previousLang);
         x += span.advancePt;
