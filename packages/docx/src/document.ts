@@ -1870,10 +1870,7 @@ export class DocxDocument {
    * document shown in its final state) are asked of the worker, which keeps
    * them with the layout for as long as it keeps the layout. The host keeps
    * none: they live with the run array they were collected for. */
-  private async _workerCommentAnchorRangesFor(
-    view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
-  ): Promise<readonly CommentAnchorRange[]> {
-    const requested = this._layoutOptionsOfView(view);
+  private async _workerCommentAnchorRangesFor(requested: LayoutOptions): Promise<readonly CommentAnchorRange[]> {
     if (this._isActiveView(requested)) return this.commentAnchorRanges();
     if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
     const res = await this._bridge.request(
@@ -2281,46 +2278,49 @@ export class DocxDocument {
   ): Promise<DocxTextRunInfo[]> {
     // Explicit fields only: a caller may reuse render options, and a function
     // such as `errorPlaceholder` must never reach postMessage (#1974).
-    const wireOpts: WireRenderPageOptions = this._withActiveView({
+    const filled: WireRenderPageOptions = this._withActiveView({
       ...(opts.width === undefined ? {} : { width: opts.width }),
       ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
       ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
     });
+    // The layout is fixed here, once, by its normalized options: a Date is
+    // read now and travels as its epoch milliseconds, so one the caller
+    // changes while the request is pending selects nothing else.
+    const produced = this._layoutOptionsOfView(filled);
+    const wireOpts: WireRenderPageOptions = filled.currentDate === undefined
+      ? filled
+      : { ...filled, currentDate: produced.currentDateMs };
+    let runs: DocxTextRunInfo[];
+    let anchors: readonly CommentAnchorRange[];
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
       const res = await this._bridge.request(
         (id) => ({ type: 'collectRuns', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
-      const collected = (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
-      // The anchors of the layout that produced the runs, as it stands now.
-      const anchors = await this._workerCommentAnchorRangesFor(wireOpts);
-      noteCollectedRuns(collected, { pageIndex, anchors: () => anchors });
-      return collected;
-    }
-    const runtime = documentLayoutRuntimeOf(this);
-    const services = runtime.services;
-    if (!services) throw new Error('Document layout services are not initialized');
-    const runs = textRunsForSelectedPage(services, pageIndex, {
-      currentDate: wireOpts.currentDate,
-      defaultCurrentDateMs: runtime.defaultCurrentDateMs,
-      width: wireOpts.width,
-      showTrackedChanges: wireOpts.showTrackedChanges,
-      textAdvances: textAdvanceLookupOf(services),
-    });
-    // The runs carry no page or layout of their own: a comment anchor joined
-    // to them (resolveCommentAnchorRuns) is placed on the page they were
-    // collected for, as the layout that produced them places it, whichever
-    // view is active when the join is made. The anchors of a layout other
-    // than the active one are collected only when such a join asks for them.
-    // The layout is fixed now, by its normalized options: a Date the caller
-    // changes later selects nothing else.
-    const produced = this._layoutOptionsOfView(wireOpts);
-    noteCollectedRuns(runs, {
-      pageIndex,
-      anchors: () => (this._isActiveView(produced)
+      runs = (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
+      anchors = await this._workerCommentAnchorRangesFor(produced);
+    } else {
+      const runtime = documentLayoutRuntimeOf(this);
+      const services = runtime.services;
+      if (!services) throw new Error('Document layout services are not initialized');
+      runs = textRunsForSelectedPage(services, pageIndex, {
+        currentDate: wireOpts.currentDate,
+        defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+        width: wireOpts.width,
+        showTrackedChanges: wireOpts.showTrackedChanges,
+        textAdvances: textAdvanceLookupOf(services),
+      });
+      anchors = this._isActiveView(produced)
         ? this.commentAnchorRanges()
-        : this._mainCommentAnchorRangesFor(produced)),
-    });
+        : this._mainCommentAnchorRangesFor(produced);
+    }
+    // The runs carry no page or layout of their own. They are bound here to
+    // the comment projection of the layout that produced them (its anchors
+    // and their placements): a comment anchor joined to them later
+    // (resolveCommentAnchorRuns) reads that alone, whatever has since
+    // happened to the document, its view or the caller's options. A
+    // document without comments binds the shared empty projection.
+    noteCollectedRuns(runs, { pageIndex, anchors });
     return runs;
   }
 
@@ -2339,7 +2339,7 @@ export class DocxDocument {
     // The anchors and the runs of one layout: the layout these options
     // select, which is the active view's only when they say nothing else.
     const runs = await this.collectPageRuns(pageIndex, runOptions);
-    const anchors = collectedRunsOrigin(runs)?.anchors() ?? this.commentAnchorRanges();
+    const anchors = collectedRunsOrigin(runs)?.anchors ?? this.commentAnchorRanges();
     return resolveDocxCommentThreadsOnPage(
       this.comments,
       anchors,

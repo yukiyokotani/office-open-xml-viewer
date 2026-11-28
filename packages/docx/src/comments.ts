@@ -67,14 +67,16 @@ const ADOPTED = new WeakSet<readonly Readonly<CommentAnchorRange>[]>();
 const RUNS_ORIGIN = new WeakMap<readonly Readonly<DocxTextRunInfo>[], CollectedRunsOrigin>();
 const COUNTERPARTS = new WeakMap<readonly Readonly<CommentAnchorRange>[], Map<string, Readonly<CommentAnchorRange>>>();
 
-/** Where an array of runs was collected: its page, and the anchors of the
- * layout that produced it. That layout need not be the one the document's
- * current anchors were collected against: the runs may be asked of another
- * view (the tracked-change view of a document shown in its final state), or
- * the document's view may change after they were collected. */
+/** Where an array of runs was collected: its page, and the anchors (with
+ * their placements) of the layout that produced it, bound when the runs
+ * were collected and not read from the document again. That layout need not
+ * be the one the document's current anchors were collected against: the
+ * runs may be asked of another view (the tracked-change view of a document
+ * shown in its final state), and the document may change its view or be
+ * destroyed after they were collected. */
 export interface CollectedRunsOrigin {
   readonly pageIndex: number;
-  readonly anchors: () => readonly Readonly<CommentAnchorRange>[];
+  readonly anchors: readonly Readonly<CommentAnchorRange>[];
 }
 
 export function collectedRunsOrigin(
@@ -97,7 +99,7 @@ function anchorOfRunsLayout(
   anchor: Readonly<CommentAnchorRange>,
   origin: CollectedRunsOrigin | undefined,
 ): Readonly<CommentAnchorRange> | undefined {
-  const anchors = origin?.anchors();
+  const anchors = origin?.anchors;
   if (!anchors) return anchor;
   let counterparts = COUNTERPARTS.get(anchors);
   if (!counterparts) {
@@ -135,7 +137,8 @@ export function noteCollectedRuns(
   runs: readonly Readonly<DocxTextRunInfo>[],
   origin: CollectedRunsOrigin,
 ): void {
-  RUNS_ORIGIN.set(runs, origin);
+  Object.freeze(origin.anchors);
+  RUNS_ORIGIN.set(runs, Object.freeze({ ...origin }));
 }
 
 export interface CommentAnchorPoint {

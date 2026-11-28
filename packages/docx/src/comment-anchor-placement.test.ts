@@ -257,6 +257,50 @@ describe('comment threads asked for a view other than the active one', () => {
     expect(builds).toHaveLength(built);
   });
 
+  it('runs keep what their layout showed after the document is destroyed', async () => {
+    const { layout, model } = await paintedDocument(body, COMMENT_PART);
+    const { doc } = documentOf(model, layout);
+    Object.assign(doc, { _bridge: { terminate: () => undefined }, _rawParts: new Map(), _embeddedFontFaces: [], _officeFontFaces: [] });
+    const comments = doc.comments;
+    const anchors = doc.commentAnchorRanges();
+    const runs = await doc.collectPageRuns(0);
+    const before = {
+      runs: resolveCommentAnchorRuns(anchors[0]!, runs),
+      threads: resolveDocxCommentThreads(comments, anchors, runs),
+    };
+    expect(before.runs.map((run) => run.text)).toEqual(['After']);
+    expect(before.threads).toHaveLength(1);
+    doc.destroy();
+    expect(resolveCommentAnchorRuns(anchors[0]!, runs)).toEqual(before.runs);
+    expect(resolveDocxCommentThreads(comments, anchors, runs)).toEqual(before.threads);
+  });
+
+  it('a worker document reads a Date when the runs are asked for, not when they arrive', async () => {
+    const doc = Object.create(DocxDocument.prototype) as DocxDocument;
+    const posted: { type: string; opts?: { currentDate?: unknown } }[] = [];
+    Object.assign(doc, {
+      _mode: 'worker', _review: null,
+      _meta: { comments: [{ id: '1', text: 'c' }], revisions: [], commentAnchorRanges: [] },
+      _bridge: {
+        request: async (build: (id: number) => { type: string; opts?: { currentDate?: unknown } }) => {
+          const request = build(1);
+          posted.push(request);
+          await Promise.resolve();
+          return request.type === 'collectRuns'
+            ? { type: 'runsCollected', id: 1, runs: [] }
+            : { type: 'commentAnchorsCollected', id: 1, ranges: [] };
+        },
+      },
+    });
+    attachDocumentLayoutRuntime(doc, 0);
+    const date = new Date(86_400_000);
+    const pending = doc.collectPageRuns(0, { currentDate: date });
+    date.setTime(Number.NaN);
+    await expect(pending).resolves.toEqual([]);
+    expect(posted.map((request) => [request.type, request.opts?.currentDate ?? (request as { currentDateMs?: number }).currentDateMs]))
+      .toEqual([['collectRuns', 86_400_000], ['collectCommentAnchors', 86_400_000]]);
+  });
+
   it('runs keep the layout that produced them when the document changes its view', async () => {
     const { layout, model } = await paintedDocument(body, COMMENT_PART);
     const { doc } = documentOf(model, layout);
