@@ -179,6 +179,7 @@ export {
   type RevisionAnchorRange,
 } from './revisions';
 export type { DocxStorySource } from './types';
+export type { DocxOutlineEntry } from './outline';
 export type { DocxMatchLocation } from './find';
 export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';

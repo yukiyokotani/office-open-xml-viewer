@@ -465,6 +465,18 @@ function bookmarkSectionByDomain(page: LayoutPage): ReadonlyMap<string, string> 
   return sectionByDomain;
 }
 
+/** Visit every retained paragraph fragment on a page in paint order, including
+ * paragraphs nested in tables, text boxes and drawings — the same walk that
+ * derives the page's bookmark starts. */
+export function visitPageParagraphs(
+  page: LayoutPage | DeepReadonly<LayoutPage>,
+  visit: (paragraph: ParagraphLayout) => void,
+): void {
+  for (const node of orderedPagePaintNodes(page as LayoutPage)) {
+    visitBookmarkParagraphs(node, visit);
+  }
+}
+
 export function deriveRetainedPageBookmarkStarts(
   page: LayoutPage,
   sectionByDomain: ReadonlyMap<string, string> = bookmarkSectionByDomain(page),

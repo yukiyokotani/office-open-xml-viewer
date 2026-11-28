@@ -1,6 +1,7 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
+import { buildDocxOutline, type DocxOutlineEntry } from './outline.js';
 import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
-import { normalizeLayoutOptions } from './layout/options.js';
+import { layoutOptionsForRender, normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
   reviewProjectionIndexForDocument,
@@ -9,7 +10,7 @@ import { collectLayoutSourceRevisionRangesIfPresent } from './revisions.js';
 import type { RetainedRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
-import type { DocumentLayoutMeta, DocumentMeta } from './worker-protocol.js';
+import type { DocumentLayoutMeta, DocumentMeta, RenderWorkerRequest } from './worker-protocol.js';
 
 export type RenderWorkerReviewIndexInput = Pick<DocumentMeta, 'comments' | 'revisions'>;
 
@@ -73,4 +74,20 @@ export function renderWorkerLayoutMeta(
     showTrackedChanges,
   ));
   return projectRenderWorkerLayoutMeta(layout, source, review);
+}
+
+/** Answer an `outline` request from the worker-retained layout source and the
+ * requested variant. Same variant selection as `collectRuns`: under progressive
+ * layout this reads the primed prefix, so headings past it carry no page yet. */
+export function renderWorkerOutline(
+  doc: RetainedRenderWorkerDocumentLayout,
+  opts: Extract<RenderWorkerRequest, { type: 'outline' }>['opts'],
+): DocxOutlineEntry[] {
+  const source = layoutSourceStoreOf(doc.layoutServices);
+  if (!source) throw new Error('Document layout source is not initialized');
+  const layout = doc.layoutVariants.layoutFor(layoutOptionsForRender({
+    ...opts,
+    defaultCurrentDateMs: doc.defaultCurrentDateMs,
+  }));
+  return buildDocxOutline(source, layout);
 }
