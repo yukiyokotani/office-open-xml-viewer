@@ -168,6 +168,77 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       .toBe('"Plain Face", serif');
   });
 
+  it('keys a fragment by its piece\'s identity, never by the piece text', () => {
+    const regional = createTextLayoutService({
+      fonts: createFontResolver([], {
+        regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
+        nativeFamilyLists: { Absent: '"Plain Face", serif' },
+      }),
+      measurer: { fingerprint: 'regional-keys', namedFamiliesDraw: () => true,
+        measure: request => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }) },
+    });
+    const serialized = (count: number) => {
+      const text = Array.from({ length: count }, (_, index) => String.fromCharCode(0x4e00 + index)).join('');
+      const piece = { text, fontSizePt: 10, fonts: { eastAsia: 'Absent' }, eastAsiaLanguage: 'zh-cn',
+        clusterGeometry: false as const, measure: false as const, faceText: text };
+      const route = regional.shape(piece).spans[0]!.fontRoute;
+      const stringify = JSON.stringify;
+      let units = 0;
+      let carriesPiece = false;
+      const spy = vi.spyOn(JSON, 'stringify').mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
+        const out = stringify(...args);
+        units += out?.length ?? 0;
+        carriesPiece ||= out?.includes(text) === true;
+        return out;
+      });
+      try {
+        // Every one-character fragment still shapes through the piece's route.
+        for (let index = 0; index < count; index += 1) {
+          expect(regional.shape(sliceTextShapeRequest(piece, index, index + 1)).spans[0]!.fontRoute).toBe(route);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+      expect(carriesPiece).toBe(false);
+      return units;
+    };
+    // Linear in the number of fragments: no key repeats the piece's text.
+    const small = serialized(128);
+    const large = serialized(512);
+    expect(large / small).toBeLessThan(4.5);
+  });
+
+  it('selects the Canvas language of a script-class run independently of the slot table', () => {
+    const regional = createTextLayoutService({
+      fonts: createFontResolver([], {
+        regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
+        nativeFamilyLists: { Absent: '"Plain Face", serif' },
+      }),
+      measurer: { fingerprint: 'script-class', namedFamiliesDraw: () => true,
+        measure: request => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }) },
+    });
+    const base = { fontSizePt: 10, fonts: { ascii: 'Absent', highAnsi: 'Absent', eastAsia: 'Absent', complexScript: 'Absent' },
+      language: 'fr-fr', eastAsiaLanguage: 'zh-cn', complexScriptLanguage: 'ar-sa', clusterGeometry: false as const };
+    const languages = (request: Parameters<typeof regional.shape>[0]) =>
+      regional.shape(request).spans.map(span => [span.text, span.script, span.fontRoute.lang]);
+    // U+1D11E takes the East Asian slot of §17.3.2.26, yet it is text of the
+    // run's one (Latin-class) language; without the fact the slot decides.
+    expect(languages({ ...base, text: 'a\u{1d11e}' })).toEqual([['a', 'ascii', 'fr-fr'], ['\u{1d11e}', 'eastAsia', 'zh-cn']]);
+    expect(languages({ ...base, text: 'a\u{1d11e}', scriptClassLanguage: 'fr-FR' }).map(span => span[2]))
+      .toEqual(['fr-fr', 'fr-fr']);
+    // Present and empty: the class names no language, whatever the axes say.
+    expect(languages({ ...base, text: 'a\u{1d11e}\u5b57', scriptClassLanguage: '' })
+      .every(span => span[2] === undefined)).toBe(true);
+    // The Asian axis stays the regional font-selection input: Han of a
+    // Latin-class run still resolves the zh-CN regional route.
+    const han = regional.shape({ ...base, text: '\u5b57', scriptClassLanguage: 'fr-FR' }).spans[0]!.fontRoute;
+    expect([han.familyList, han.lang]).toEqual(['"SC Face", serif', 'fr-fr']);
+    // A ruby guide takes no language from a script-class base either.
+    const guide = rubyGuideShapeRequest({ ...base, text: '\u5b57', scriptClassLanguage: 'zh-CN' }, '\u3058');
+    expect(guide.scriptClassLanguage).toBe('');
+    expect(regional.shape(guide).spans.map(span => span.fontRoute.lang)).toEqual([undefined]);
+  });
+
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
     const scoped = createTextLayoutService({
       fonts: createFontResolver([
@@ -389,13 +460,64 @@ describe('Canvas lang at measure and paint', () => {
     expect(await drawn('en-a')).toEqual(untagged);
   });
 
-  it('draws a cluster of uniform-language runs whole in its base language on every axis', async () => {
+  it('draws a cluster of runs naming one language on every axis whole in its base language', async () => {
     const { canvas, draws } = recordingCanvas();
     const uniform = (lang: string) => ({ lang, langEastAsia: lang, langBidi: lang });
     await renderDocumentToCanvas(documentOf([
       run('\u0433', uniform('sr-rs')), run('\u0301', uniform('en-us')),
     ]), canvas, 0, { dpr: 1, width: 600 });
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['\u0433\u0301', 'sr-rs']]);
+  });
+
+  it('shapes every range of a mixed sequence in its own run\'s language tuple', async () => {
+    const { canvas, draws } = recordingCanvas();
+    const all = (lang: string) => ({ lang, langEastAsia: lang, langBidi: lang });
+    // One sequence: a Serbian base, a mark and kana in ja-JP on every axis,
+    // then a mark and Han with en-US on w:val and ja-JP on the other axes.
+    await renderDocumentToCanvas(documentOf([
+      run('\u0433', all('sr-rs')), run('\u0301\u304b', all('ja-jp')),
+      run('\u0301\u6f22', { lang: 'en-us', langEastAsia: 'ja-jp', langBidi: 'ja-jp' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => draw.text).join('')).toBe('\u0433\u0301\u304b\u0301\u6f22');
+    // No text takes another run's East Asian language.
+    const language = (text: string) => draws.find(draw => draw.text.includes(text))?.lang;
+    expect([language('\u0433'), language('\u304b'), language('\u6f22')]).toEqual(['sr-rs', 'ja-jp', 'ja-jp']);
+  });
+
+  it('draws script-class runs in their class language, cluster seams included', async () => {
+    const { canvas, draws } = recordingCanvas();
+    // OpenDocument runs: the three axes are the style's own values; the
+    // script-class language names each run's language.
+    const axes = { lang: 'fr-fr', langEastAsia: 'ja-jp', langBidi: 'ar-sa' };
+    await renderDocumentToCanvas(documentOf([
+      run('a\u{1d11e}', { ...axes, langScriptClass: 'fr-FR' }),
+      run('\u0301\u5b57', { ...axes, langScriptClass: 'ja-JP' }),
+      run('x', { ...axes, langScriptClass: '' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => draw.text).join('')).toBe('a\u{1d11e}\u0301\u5b57x');
+    // U+1D11E and the mark completing its cluster are French (§17.3.2.26
+    // font slots still delimit shaped spans, as inside one run); the class
+    // without a language draws untagged.
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([
+      ['a', 'fr-fr'], ['\u{1d11e}', 'fr-fr'], ['\u0301', 'fr-fr'], ['\u5b57', 'ja-jp'], ['x', 'inherit'],
+    ]);
+  });
+
+  it('classes digits by the w:bidi language of their own range', async () => {
+    const drawn = async (runs: DocxTextRun[]) => {
+      const { canvas, draws } = recordingCanvas();
+      await renderDocumentToCanvas(documentOf(runs), canvas, 0, { dpr: 1, width: 600 });
+      return draws.map(draw => draw.text).sort();
+    };
+    // Digits of a complex-script run are AN under an RTL w:bidi language (segmented
+    // into digit groups) and EN otherwise; runs differing only in w:bidi are
+    // one sequence, and each part keeps its own class.
+    const arabic = run('12-34', { cs: true, langBidi: 'ar-sa' });
+    const english = run('56-78', { cs: true, langBidi: 'en-us' });
+    expect(await drawn([arabic, english]))
+      .toEqual([...await drawn([arabic]), ...await drawn([english])].sort());
+    expect(await drawn([arabic])).toEqual(['-', '12', '34']);
+    expect(await drawn([english])).toEqual(['56-78']);
   });
 
   it('keeps Arabic joining across runs whose unused w:val differs', async () => {

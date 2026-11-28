@@ -1379,6 +1379,8 @@ export interface NumberingMarkerShapeInput {
   /** The independent w:lang axes of numbering/paragraph-mark run properties. */
   readonly language?: string;
   readonly complexScriptLanguage?: string;
+  /** TextShapeRequest.scriptClassLanguage of those run properties. */
+  readonly scriptClassLanguage?: string;
   readonly kerning?: boolean;
 }
 

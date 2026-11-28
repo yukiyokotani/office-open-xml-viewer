@@ -400,6 +400,7 @@ export function paragraphMarkLineMetrics(
       eastAsiaLanguage: effectiveMarkShapeInput?.eastAsiaLanguage,
       language: effectiveMarkShapeInput?.language,
       complexScriptLanguage: effectiveMarkShapeInput?.complexScriptLanguage,
+      scriptClassLanguage: effectiveMarkShapeInput?.scriptClassLanguage,
       kerning: effectiveMarkShapeInput?.kerning,
       measure: true,
     });

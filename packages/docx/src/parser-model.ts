@@ -158,6 +158,9 @@ export interface InternalRunSlotMetadata {
   langEastAsia?: string;
   /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
   lang?: string;
+  /** The one language of all the text where the source resolved it by its
+   * own script classification (ODF 1.3 Part 3 §20.358); empty: none. */
+  langScriptClass?: string;
 }
 
 function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {
@@ -1731,6 +1734,7 @@ export function numberingMarkerShapeInput(
     eastAsiaLanguage: facts?.langEastAsia,
     ...(facts?.lang !== undefined ? { language: facts.lang } : {}),
     ...(facts?.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
+    ...(facts?.langScriptClass !== undefined ? { scriptClassLanguage: facts.langScriptClass } : {}),
     // Marker-specific zero-threshold observations are absent. Preserve its
     // previous size comparison; the content-run zero-disables extension is
     // not evidence for generated numbering glyphs.
@@ -1815,6 +1819,7 @@ function nonContentRunShapeInput(
     eastAsiaLanguage: facts.langEastAsia,
     ...(facts.lang !== undefined ? { language: facts.lang } : {}),
     ...(facts.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
+    ...(facts.langScriptClass !== undefined ? { scriptClassLanguage: facts.langScriptClass } : {}),
     // Paragraph marks likewise have no measured zero-threshold evidence.
     kerning: wordKerningApplies(fontSizePt, facts.kerning, 'size-comparison'),
   });

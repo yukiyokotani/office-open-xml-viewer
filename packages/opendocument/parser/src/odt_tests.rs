@@ -151,47 +151,135 @@ fn fields_and_paragraph_marks_carry_the_run_language() {
             _ => None,
         })
         .expect("page-number field");
-    // The page number is Latin-class text: its class's language on every axis.
+    // The page number is Latin-class text: its class's language is the
+    // script-class fact; the axes keep the style's own values.
     assert_eq!(
-        (field.lang.as_deref(), field.lang_east_asia.as_deref()),
-        (Some("sr-RS"), Some("sr-RS"))
+        (
+            field.lang_script_class.as_deref(),
+            field.lang.as_deref(),
+            field.lang_east_asia.as_deref()
+        ),
+        (Some("sr-RS"), Some("sr-RS"), Some("ja-JP"))
     );
     let mark = paragraphs[1]
         .paragraph_mark_font_facts
         .as_ref()
         .expect("paragraph mark facts");
     assert_eq!(
-        (mark.lang.as_deref(), mark.lang_bidi.as_deref()),
-        (Some("sr-RS"), Some("sr-RS"))
+        (
+            mark.lang_script_class.as_deref(),
+            mark.lang.as_deref(),
+            mark.lang_bidi.as_deref()
+        ),
+        (Some("sr-RS"), Some("sr-RS"), Some("ar-SA"))
+    );
+}
+
+const THREE_LANGUAGES: &str = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="fr" fo:country="FR" style:language-asian="zh" style:country-asian="CN" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+
+/// Each run's text, script-class language and three style axes.
+type Languages<'a> = (String, Option<&'a str>, [Option<&'a str>; 3]);
+
+fn languages(run: &TextRun) -> Languages<'_> {
+    (
+        run.text.clone(),
+        run.lang_script_class.as_deref(),
+        [
+            run.lang.as_deref(),
+            run.lang_east_asia.as_deref(),
+            run.lang_bidi.as_deref(),
+        ],
+    )
+}
+
+#[test]
+fn the_script_class_language_is_a_fact_beside_the_style_axes() {
+    let document = read_fixture(Fixture {
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\">a\u{1D11E}\u{31C0}\u{5B57}\u{0627}</text:span>x</text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<_> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    // ODF Table 22: U+31C0 is Asian like U+5B57 and U+1D11E Latin, whatever
+    // slot the renderer's §17.3.2.26 table gives them. The class language is
+    // its own fact; every run keeps the style's three axes, so regional font
+    // selection still reads the Asian setting. The unstyled "x" records that
+    // its class names no language.
+    let axes = [Some("fr-FR"), Some("zh-CN"), Some("ar-SA")];
+    assert_eq!(
+        runs,
+        [
+            ("a\u{1D11E}".to_string(), Some("fr-FR"), axes),
+            ("\u{31C0}\u{5B57}".to_string(), Some("zh-CN"), axes),
+            ("\u{0627}".to_string(), Some("ar-SA"), axes),
+            ("x".to_string(), Some(""), [None; 3]),
+        ]
     );
 }
 
 #[test]
-fn every_language_axis_carries_the_script_class_language() {
-    let automatic = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="fr" fo:country="FR" style:language-asian="ja" style:country-asian="JP" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+fn a_latin_class_character_keeps_the_asian_axis_for_regional_fonts() {
+    // U+16FE2 is outside Table 22 and weak: it takes the Latin class of "a",
+    // while the renderer's Unicode Han test may still select a regional face
+    // for it from the Asian axis.
     let document = read_fixture(Fixture {
-        automatic,
-        body: "<text:p><text:span text:style-name=\"T\">a\u{1D11E}\u{31C0}\u{5B57}\u{0627}</text:span></text:p>",
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\">a\u{16FE2}</text:span></text:p>",
         ..Fixture::default()
     });
-    let axes: Vec<(String, [Option<&str>; 3])> = text_runs(paragraphs(&document.body)[0])
+    let runs: Vec<_> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    assert_eq!(
+        runs,
+        [(
+            "a\u{16FE2}".to_string(),
+            Some("fr-FR"),
+            [Some("fr-FR"), Some("zh-CN"), Some("ar-SA")]
+        )]
+    );
+}
+
+#[test]
+fn fields_and_ruby_bases_take_the_language_of_their_own_text() {
+    let document = read_fixture(Fixture {
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\"><text:page-number>1</text:page-number>\u{5B57}<text:page-number>2</text:page-number><text:page-count>3</text:page-count><text:ruby><text:ruby-base>\u{0434}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>\u{3001}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>\u{2014}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+        ..Fixture::default()
+    });
+    let items: Vec<(String, Option<&str>)> = paragraphs(&document.body)[0]
+        .runs
         .iter()
-        .map(|run| {
-            (
-                run.text.clone(),
-                [run.lang.as_deref(), run.lang_east_asia.as_deref(), run.lang_bidi.as_deref()],
-            )
+        .filter_map(|run| match run {
+            DocRun::Field(field) => Some((
+                format!("<{}>", field.field_type),
+                field.lang_script_class.as_deref(),
+            )),
+            DocRun::Text(text) => Some((text.text.clone(), text.lang_script_class.as_deref())),
+            _ => None,
         })
         .collect();
-    // ODF Table 22: U+31C0 is Asian like U+5B57 and U+1D11E Latin, whatever
-    // slot the renderer's §17.3.2.26 table gives them: every axis of a run
-    // carries its class's language.
     assert_eq!(
-        axes,
+        items,
         [
-            ("a\u{1D11E}".to_string(), [Some("fr-FR"); 3]),
-            ("\u{31C0}\u{5B57}".to_string(), [Some("ja-JP"); 3]),
-            ("\u{0627}".to_string(), [Some("ar-SA"); 3]),
+            // A page number or count is Latin text wherever it stands: at
+            // the paragraph start and after Asian text alike.
+            ("<page>".to_string(), Some("fr-FR")),
+            ("\u{5B57}".to_string(), Some("zh-CN")),
+            ("<page>".to_string(), Some("fr-FR")),
+            ("<numPages>".to_string(), Some("fr-FR")),
+            // A ruby base is classed by its own text: Cyrillic is Latin
+            // class after U+5B57, U+3001 Asian.
+            ("\u{0434}".to_string(), Some("fr-FR")),
+            ("\u{3001}".to_string(), Some("zh-CN")),
+            // A base of weak characters alone takes the preceding class.
+            ("\u{2014}".to_string(), Some("zh-CN")),
+            // A base of two classes is one run and names no one language.
+            ("a\u{5B57}".to_string(), Some("")),
         ]
     );
 }

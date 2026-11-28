@@ -208,6 +208,10 @@ type ParagraphTextFacts = Readonly<{
   langEastAsia?: string;
   /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
   lang?: string;
+  /** The one language of all the run's text where the source format resolved
+   * it per run by its own script classification (ODF 1.3 Part 3 §20.358);
+   * empty: that class names none. See {@link TextShapeRequest.scriptClassLanguage}. */
+  langScriptClass?: string;
   fontSlots?: Readonly<{
     direct: TextFontSlots;
     theme: TextFontSlots;
@@ -378,6 +382,13 @@ export interface TextShapeRequest {
   readonly language?: string;
   /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
   readonly complexScriptLanguage?: string;
+  /** The language of all this text, whatever §17.3.2.26 slot a character
+   * takes, where the source format resolved one language for the run from
+   * its own script classification (ODF 1.3 Part 3 §20.358 Table 22, whose
+   * classes differ from the slot table); empty: that class names none. When
+   * present it alone selects the Canvas language; {@link eastAsiaLanguage}
+   * stays the regional font-selection input. */
+  readonly scriptClassLanguage?: string;
   /** The route language acquired for the source piece this request derives
    * from (one slot language group; null: withheld). A request re-resolves its
    * route from run facts on every shape, and the language is the one part of
@@ -389,7 +400,8 @@ export interface TextShapeRequest {
   /** The source piece's whole text when this request shapes a fragment of
    * it: faces are resolved for that text (regional fallback looks at its Han,
    * for instance), so a fragment measures through the route paint draws the
-   * piece with. Independent probes resolve their own text. */
+   * piece with. Independent probes resolve their own text. Shape caches key
+   * it by a compact identity, never by its content. */
   readonly faceText?: string;
   /** The text is set in a vertical CJK line (§17.6.20 tbRl), where layout
    * draws vertical presentation forms in place of some characters: a
@@ -560,6 +572,8 @@ export function rubyGuideShapeRequest(
     // Only a base w:eastAsia needs withholding; an untagged guide's request
     // (and its keys) stay as before languages.
     ...(base.eastAsiaLanguage !== undefined ? { canvasEastAsiaLanguage: null } : {}),
+    // A base's script-class language is not the guide's either.
+    ...(base.scriptClassLanguage !== undefined ? { scriptClassLanguage: '' } : {}),
   };
 }
 
@@ -656,12 +670,15 @@ export function canvasLanguageTag(tag: string | undefined): string | undefined {
 
 /** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
  * slot: the same classification that selects the slot's face selects its
- * language ({@link canvasLanguageTag}). */
+ * language ({@link canvasLanguageTag}). A request whose source resolved one
+ * language for all its text ({@link TextShapeRequest.scriptClassLanguage})
+ * names that language for every slot, independently of the slot table. */
 export function scriptSlotLanguage(
   request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'
-    | 'canvasEastAsiaLanguage'>>,
+    | 'canvasEastAsiaLanguage' | 'scriptClassLanguage'>>,
   slot: FontScriptSlot,
 ): string | undefined {
+  if (request.scriptClassLanguage !== undefined) return canvasLanguageTag(request.scriptClassLanguage);
   return canvasLanguageTag(slot === 'eastAsia'
     ? request.canvasEastAsiaLanguage !== undefined ? request.canvasEastAsiaLanguage ?? undefined : request.eastAsiaLanguage
     : slot === 'complexScript' ? request.complexScriptLanguage : request.language);
@@ -1523,6 +1540,22 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   // all-prefix strings, occurrence ids, extra cache or public detail payload.
   type ShapeEntry = TextShapeResult | ProjectableNativeUnitResult;
   const shapeCache = new Map<string, ShapeEntry>();
+  // Identities of the piece texts fragments resolve their faces for
+  // (TextShapeRequest.faceText). Numbers are never reused, so dropping the
+  // table when it is full only costs later fragments of those pieces a
+  // repeated shape; it cannot alias two texts.
+  const faceTextIdentities = new Map<string, number>();
+  const faceTextIdentityLimit = 4096;
+  let nextFaceTextIdentity = 0;
+  const faceTextIdentity = (text: string): number => {
+    let identity = faceTextIdentities.get(text);
+    if (identity === undefined) {
+      if (faceTextIdentities.size >= faceTextIdentityLimit) faceTextIdentities.clear();
+      identity = nextFaceTextIdentity++;
+      faceTextIdentities.set(text, identity);
+    }
+    return identity;
+  };
   const scopeCache = new Map<string, Map<string, Uint8Array>>();
   let scopeScans = 0;
   let scopeUtf16Units = 0;
@@ -1852,17 +1885,27 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     ];
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
     if (request.language !== undefined || request.complexScriptLanguage !== undefined
-      || request.canvasLanguagePin !== undefined || request.canvasEastAsiaLanguage !== undefined) {
+      || request.canvasLanguagePin !== undefined || request.canvasEastAsiaLanguage !== undefined
+      || request.scriptClassLanguage !== undefined) {
       shapeParts.push(['lang', canvasLanguageTag(request.language) ?? null,
         canvasLanguageTag(request.complexScriptLanguage) ?? null,
         request.canvasEastAsiaLanguage === undefined ? 'base' : canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null,
         request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
-        request.canvasLanguagePin?.lang ?? null]);
+        request.canvasLanguagePin?.lang ?? null,
+        ...(request.scriptClassLanguage !== undefined
+          ? [canvasLanguageTag(request.scriptClassLanguage) ?? ''] : [])]);
     }
     // Vertical forms join the language proof only for text that has a language.
     if (request.verticalForms && (request.language !== undefined || request.eastAsiaLanguage !== undefined
-      || request.complexScriptLanguage !== undefined)) shapeParts.push('verticalForms');
-    if (request.faceText !== undefined && request.faceText !== request.text) shapeParts.push(['faceText', request.faceText]);
+      || request.complexScriptLanguage !== undefined || request.scriptClassLanguage !== undefined)) {
+      shapeParts.push('verticalForms');
+    }
+    // A fragment resolves its faces for the piece's whole text. The key
+    // names that text by identity: its content would repeat in the key of
+    // every fragment, quadratic in the piece's length.
+    if (request.faceText !== undefined && request.faceText !== request.text) {
+      shapeParts.push(['faceText', faceTextIdentity(request.faceText)]);
+    }
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
     if (retainedShape) return retainedShape;

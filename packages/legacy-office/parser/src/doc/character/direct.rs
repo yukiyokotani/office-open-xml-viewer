@@ -248,6 +248,7 @@ impl Properties {
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
             lang,
+            lang_script_class: None,
             lang_bidi,
             lang_east_asia,
             kerning: self.direct_kerning_threshold_pt()?,

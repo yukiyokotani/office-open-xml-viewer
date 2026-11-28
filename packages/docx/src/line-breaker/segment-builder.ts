@@ -5,7 +5,7 @@ import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-sou
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
-import { acquireTextSequences, type SequenceLanguages } from './text-sequence.js';
+import { acquireTextSequences, type SequenceLanguageRange, type SequenceLanguages } from './text-sequence.js';
 import type { HyperlinkTarget, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
   canvasFontRouteFaces,
@@ -358,6 +358,10 @@ export function appendTextPiece(
     selectedMetric,
     selectedAverageWidth,
     r,
+    sequenceRun: r,
+    languageRanges: (r as ParagraphTextBearingRun & SequenceLanguages).languageRanges,
+    languageRangeRuns: [],
+    bidiDigitRun: forceCs || Boolean(r.rtl),
     effectiveVertAlign,
     effectivePosition,
     effectiveCharacterSpacing,
@@ -484,10 +488,14 @@ export function appendTextPiece(
         // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
         // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
         // so a single-segment date would otherwise stay 28-02-2026.
-        if (digitsAsAN) {
-          for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
-        } else {
-          emit(word, 'cs');
+        // (w:bidi is per language range of a sequence: each stretch of the
+        // word follows the digit class of its own range.)
+        for (const part of bidiDigitParts(emissionState, word)) {
+          if (part.digitsAsAN) {
+            for (const slice of splitDigitGroups(part.text)) emit(slice, 'cs');
+          } else {
+            emit(part.text, 'cs');
+          }
         }
       } else {
         // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
@@ -722,10 +730,11 @@ export function finalizeBuiltSegments(
         // as untagged); w:eastAsia stays raw, as regional font resolution
         // reads it.
         ...(canvasLanguageTag(request.language) !== undefined || request.eastAsiaLanguage !== undefined
-          || request.canvasLanguagePin !== undefined
+          || request.canvasLanguagePin !== undefined || request.scriptClassLanguage !== undefined
           ? [JSON.stringify([canvasLanguageTag(request.language) ?? null, request.eastAsiaLanguage ?? null,
             request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
-            request.canvasLanguagePin?.lang ?? null])]
+            request.canvasLanguagePin?.lang ?? null,
+            ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : [])])]
           : []),
       ].join('|');
       const cached = metricCache.get(key);
@@ -1184,7 +1193,19 @@ interface SegmentEmissionState {
   readonly segs: LayoutSeg[];
   readonly selectedMetric: SegmentBuildContext['selectedMetric'];
   readonly selectedAverageWidth: SegmentBuildContext['selectedAverageWidth'];
-  readonly r: ParagraphTextBearingRun;
+  /** The run whose facts the piece being emitted takes: {@link sequenceRun},
+   * or its copy in the languages of the piece's language range. */
+  r: ParagraphTextBearingRun;
+  /** The emitted run as acquired (a text sequence's run, or a source run). */
+  readonly sequenceRun: ParagraphTextBearingRun;
+  /** The §17.3.2.20 language ranges of a sequence whose runs name different
+   * languages (text-sequence.ts SequenceLanguages), over its display text. */
+  readonly languageRanges: readonly SequenceLanguageRange[] | undefined;
+  /** {@link sequenceRun} in each range's languages, made on first use. */
+  readonly languageRangeRuns: (ParagraphTextBearingRun | undefined)[];
+  /** Whether the run's digits may take the AN class (forced complex-script
+   * or rtl): its w:bidi language then decides {@link digitsAsAN}. */
+  readonly bidiDigitRun: boolean;
   readonly effectiveVertAlign: 'super' | 'sub' | null;
   readonly effectivePosition: number | undefined;
   readonly effectiveCharacterSpacing: number | undefined;
@@ -1209,7 +1230,8 @@ interface SegmentEmissionState {
   readonly csBold: boolean;
   readonly csItalic: boolean;
   readonly eaFontFamily: string | null;
-  readonly digitsAsAN: boolean;
+  /** Of the piece being emitted (per language range, like {@link r}). */
+  digitsAsAN: boolean;
   readonly sourceRunIndex: number;
   readonly sourceFragmentIndex: number | undefined;
   readonly hyperlink: HyperlinkTarget | undefined;
@@ -1224,7 +1246,131 @@ interface SegmentEmissionState {
   readonly scopeContext: { readonly text: string; cursor: number };
 }
 
+/** Index of the language range holding the display unit at `offset` (the
+ * last range at the text's end). Binary search over the ascending ends keeps
+ * a sequence of many pieces and ranges linearithmic. */
+function languageRangeIndex(ranges: readonly SequenceLanguageRange[], offset: number): number {
+  let index = 0;
+  let high = ranges.length - 1;
+  while (index < high) {
+    const middle = (index + high) >>> 1;
+    if (ranges[middle]!.end <= offset) index = middle + 1;
+    else high = middle;
+  }
+  return index;
+}
+
+/** Whether digits of a run that may class them AN do so under `langBidi`. */
+const bidiDigitsAsAN = (emissionState: SegmentEmissionState, langBidi: string | undefined): boolean =>
+  emissionState.bidiDigitRun && isRtlBidiLang(langBidi, Boolean(emissionState.sequenceRun.rtl));
+
+/** `word`, the next text the run emits, cut where the digit class set by
+ * w:bidi changes between its language ranges (cluster boundaries). One part
+ * for a run without ranges. */
+function bidiDigitParts(
+  emissionState: SegmentEmissionState,
+  word: string,
+): readonly Readonly<{ text: string; digitsAsAN: boolean }>[] {
+  const ranges = emissionState.languageRanges;
+  const start = emissionState.scopeContext.cursor;
+  // The word is located by the run's cursor; text that is not the display
+  // text at the cursor keeps the sequence run's class.
+  if (!ranges || !emissionState.scopeContext.text.startsWith(word, start)) {
+    return [{ text: word, digitsAsAN: emissionState.digitsAsAN }];
+  }
+  const parts: { text: string; digitsAsAN: boolean }[] = [];
+  const end = start + word.length;
+  let index = languageRangeIndex(ranges, start);
+  for (let partStart = start; partStart < end || parts.length === 0; index += 1) {
+    const partEnd = Math.min(end, ranges[index]?.end ?? end);
+    const digitsAsAN = bidiDigitsAsAN(emissionState, ranges[index]?.langBidi);
+    const part = word.slice(partStart - start, partEnd - start);
+    const previous = parts.at(-1);
+    if (previous && previous.digitsAsAN === digitsAsAN) previous.text += part;
+    else parts.push({ text: part, digitsAsAN });
+    partStart = partEnd;
+    if (partStart >= end) break;
+  }
+  return parts;
+}
+
+/**
+ * Emit one piece of the run's display text.
+ *
+ * In a sequence whose runs name different §17.3.2.20 languages
+ * (text-sequence.ts SequenceLanguages) a piece is emitted language range by
+ * language range, each through the run facts of its own range: the range's
+ * whole language tuple reaches the shape request (w:val, w:eastAsia, w:bidi
+ * and the script-class language), the segment and the bidi digit class. The
+ * ranges are cut at grapheme cluster boundaries, so every cluster shapes
+ * whole in one language.
+ */
 function pushSegmentPiece(
+  emissionState: SegmentEmissionState,
+  text: string,
+  cs: boolean,
+  fontFamily: string | null,
+  authoritativeSpan?: TextShapeSpan,
+  compressCharacterWhitespace = false,
+  mappedSymbolUnicode = false,
+  substituteContext?: TextShapeRequest['substituteContext'],
+): void {
+  const ranges = emissionState.languageRanges;
+  if (!ranges) {
+    pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,
+      compressCharacterWhitespace, mappedSymbolUnicode, substituteContext);
+    return;
+  }
+  // Consume this piece's exact range of the display run (pushLanguagePiece).
+  const scopeContext = emissionState.scopeContext;
+  const context = substituteContext
+    ?? Object.freeze({ text: scopeContext.text, offset: scopeContext.cursor });
+  assertTextShapeRunContext({ text, substituteContext: context }, scopeContext.text);
+  if (!substituteContext) scopeContext.cursor += text.length;
+  const pieceStart = context.offset;
+  const pieceEnd = pieceStart + text.length;
+  let index = languageRangeIndex(ranges, pieceStart);
+  if (ranges[index]!.end < pieceEnd) {
+    let previousPart = '';
+    for (let partStart = pieceStart; partStart < pieceEnd; index += 1) {
+      const partEnd = Math.min(pieceEnd, ranges[index]?.end ?? pieceEnd);
+      const part = text.slice(partStart - pieceStart, partEnd - pieceStart);
+      // The language seam is a rendering seam inside one piece, not a line
+      // break opportunity of its own. The UAX #14 seam pass sees only the
+      // last scalar before a seam; a range ends with a whole cluster, so
+      // its base classifies the left side here (LB9).
+      if (previousPart && uax14SeamJoins(previousPart, part,
+        previousPart.codePointAt(graphemeClusterOffsets(previousPart).at(-1) ?? 0))) {
+        emissionState.gluePending = true;
+      }
+      pushSegmentPiece(
+        emissionState, part, cs, fontFamily,
+        undefined, compressCharacterWhitespace, mappedSymbolUnicode,
+        { text: context.text, offset: partStart },
+      );
+      previousPart = part;
+      partStart = partEnd;
+    }
+    return;
+  }
+  const range = ranges[index]!;
+  const outerRun = emissionState.r;
+  const outerDigitsAsAN = emissionState.digitsAsAN;
+  emissionState.r = emissionState.languageRangeRuns[index] ??= Object.freeze({
+    ...emissionState.sequenceRun,
+    lang: range.lang, langEastAsia: range.langEastAsia, langBidi: range.langBidi,
+    langScriptClass: range.langScriptClass,
+  }) as ParagraphTextBearingRun;
+  emissionState.digitsAsAN = bidiDigitsAsAN(emissionState, range.langBidi);
+  pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,
+    compressCharacterWhitespace, mappedSymbolUnicode, context);
+  emissionState.r = outerRun;
+  emissionState.digitsAsAN = outerDigitsAsAN;
+}
+
+/** {@link pushSegmentPiece} for a piece in one language state
+ * (`emissionState.r`). */
+function pushLanguagePiece(
   emissionState: SegmentEmissionState,
   text: string,
   cs: boolean,
@@ -1258,59 +1404,6 @@ function pushSegmentPiece(
     ?? Object.freeze({ text: scopeContext.text, offset: scopeContext.cursor });
   assertTextShapeRunContext({ text, substituteContext: retainedContext }, scopeContext.text);
   if (!substituteContext) scopeContext.cursor += text.length;
-
-  // §17.3.2.20 w:val of this piece. A sequence that joined runs differing
-  // only in w:val (text-sequence.ts) carries their languages as ranges of its
-  // display text, cut at grapheme cluster boundaries: a piece crossing one is
-  // emitted range by range, so every cluster shapes whole in one language.
-  const sequenceLanguages = r as ParagraphTextBearingRun & SequenceLanguages;
-  const languageRanges = sequenceLanguages.westernLanguageRanges;
-  let westernLanguage = r.lang;
-  // Ranges of uniform runs (one language on every axis) set every axis.
-  let eastAsiaLanguage = r.langEastAsia;
-  let bidiLanguage = r.langBidi;
-  if (languageRanges) {
-    const pieceStart = retainedContext.offset;
-    const pieceEnd = pieceStart + text.length;
-    // First range ending after the piece's start: binary search over the
-    // ascending ends keeps a sequence of many pieces and ranges linearithmic.
-    let index = 0;
-    let high = languageRanges.length - 1;
-    while (index < high) {
-      const middle = (index + high) >>> 1;
-      if (languageRanges[middle]!.end <= pieceStart) index = middle + 1;
-      else high = middle;
-    }
-    if (languageRanges[index]!.end < pieceEnd) {
-      let partStart = pieceStart;
-      let previousPart = '';
-      for (; partStart < pieceEnd; index += 1) {
-        const partEnd = Math.min(pieceEnd, languageRanges[index]?.end ?? pieceEnd);
-        const part = text.slice(partStart - pieceStart, partEnd - pieceStart);
-        // The language seam is a rendering seam inside one piece, not a line
-        // break opportunity of its own. The UAX #14 seam pass sees only the
-        // last scalar before a seam; a range ends with a whole cluster, so
-        // its base classifies the left side here (LB9).
-        if (previousPart && uax14SeamJoins(previousPart, part,
-          previousPart.codePointAt(graphemeClusterOffsets(previousPart).at(-1) ?? 0))) {
-          emissionState.gluePending = true;
-        }
-        pushSegmentPiece(
-          emissionState, part, cs, fontFamily,
-          undefined, compressCharacterWhitespace, mappedSymbolUnicode,
-          { text: retainedContext.text, offset: partStart },
-        );
-        previousPart = part;
-        partStart = partEnd;
-      }
-      return;
-    }
-    westernLanguage = languageRanges[index]!.lang;
-    if (sequenceLanguages.uniformLanguageRanges) {
-      eastAsiaLanguage = westernLanguage;
-      bidiLanguage = westernLanguage;
-    }
-  }
 
   if (
     compatOf(environment).balanceSingleByteDoubleByteWidth &&
@@ -1390,13 +1483,14 @@ function pushSegmentPiece(
     style,
     complexScript: cs,
     fontHint: r.fontHint,
-    eastAsiaLanguage,
+    eastAsiaLanguage: r.langEastAsia,
     // §17.3.2.20 languages of the other slots, present only when authored so
     // runs without a language keep their requests and cache keys.
-    ...(westernLanguage ? { language: westernLanguage } : {}),
+    ...(r.lang ? { language: r.lang } : {}),
     // Vertical presentation forms join the language proof (TextShapeRequest).
     ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
-    ...(bidiLanguage ? { complexScriptLanguage: bidiLanguage } : {}),
+    ...(r.langBidi ? { complexScriptLanguage: r.langBidi } : {}),
+    ...(r.langScriptClass !== undefined ? { scriptClassLanguage: r.langScriptClass } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
     measure: false,

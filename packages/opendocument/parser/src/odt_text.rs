@@ -926,6 +926,17 @@ impl<'a> Reader<'a> {
         Ok(runs)
     }
 
+    /// The language a context's styles set for text of `class` (§20.358).
+    fn class_language(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+        class: ScriptClass,
+    ) -> Result<Option<String>, String> {
+        let cascade = Cascade::build(self.search_order(contexts, context)?, TEXT)?;
+        Ok(script_language(&cascade, class, self.fonts).map(|tag| tag.to_string()))
+    }
+
     pub(super) fn run_properties(
         &self,
         contexts: &[TextContext<'a>],
@@ -991,6 +1002,8 @@ impl<'a> Reader<'a> {
         };
         let weak = weak_classes(&tokens);
         let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
+        // Class languages of items whose text is not of their position's class.
+        let mut languages: HashMap<(u32, ScriptClass), Option<String>> = HashMap::new();
         // The last emitted text run's key and direction, for merging.
         let mut current: Option<(u32, ScriptClass, bool)> = None;
         let mut previous_class = ScriptClass::Latin;
@@ -1013,10 +1026,38 @@ impl<'a> Reader<'a> {
                     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                         entry.insert(self.run_properties(contexts, context, key.1)?);
                     }
+                    // §20.358 classes characters, and an item's visible text
+                    // is its own: the language is that of the class of the
+                    // text the item shows, not of the character before it.
+                    // (Its other properties stay those of its position.)
+                    let own_class = match &inline.items[item as usize] {
+                        // A page number or count is set in ASCII digits or
+                        // letters (`page_number_format`): Latin in Table 22.
+                        Item::Field { .. } => Some(Some(ScriptClass::Latin)),
+                        Item::Ruby { base, .. } => Some(text_class(base, previous_class)),
+                        Item::Run(_) | Item::NoteReference { .. } => None,
+                    };
+                    let language = match own_class {
+                        None => None,
+                        Some(Some(class)) if class == previous_class => None,
+                        Some(Some(class)) => {
+                            let key = (context, class);
+                            if let std::collections::hash_map::Entry::Vacant(entry) =
+                                languages.entry(key)
+                            {
+                                entry.insert(self.class_language(contexts, context, class)?);
+                            }
+                            Some(languages[&key].clone().unwrap_or_default())
+                        }
+                        // Text of several classes in one run names no one
+                        // language.
+                        Some(None) => Some(String::new()),
+                    };
                     let properties = &cache[&key];
                     let run = self.item_run(
                         &mut inline.items[item as usize],
                         properties,
+                        language,
                         contexts,
                         context,
                     )?;
@@ -1118,6 +1159,9 @@ impl<'a> Reader<'a> {
         &mut self,
         item: &mut Item,
         properties: &RunProperties,
+        // The class language of the item's own text where it differs from
+        // `properties`' (empty: none), for a field or ruby base.
+        language: Option<String>,
         contexts: &[TextContext<'a>],
         context: u32,
     ) -> Result<Vec<DocRun>, String> {
@@ -1176,6 +1220,7 @@ impl<'a> Reader<'a> {
                     lang: text.lang.clone(),
                     lang_east_asia: text.lang_east_asia.clone(),
                     lang_bidi: text.lang_bidi.clone(),
+                    lang_script_class: language.or(text.lang_script_class.clone()),
                     ..FieldRun::default()
                 }))]
             }
@@ -1203,6 +1248,9 @@ impl<'a> Reader<'a> {
             } => {
                 let mut run = properties.text_run();
                 run.text = base.clone();
+                if language.is_some() {
+                    run.lang_script_class = language;
+                }
                 run.ruby = Some(RubyAnnotation {
                     text: text.clone(),
                     font_size_pt: match *ruby_size {
@@ -1485,10 +1533,13 @@ pub(super) struct RunProperties {
     pub combine: bool,
     pub vertical: bool,
     pub border: Option<(String, Option<String>, u64)>,
-    /// fo:language + fo:country (western text), as a BCP 47 tag (#2001).
+    /// fo:language + fo:country (western text), as a BCP 47 tag.
     pub lang: Option<Atom>,
     pub lang_east_asia: Option<Atom>,
     pub lang_bidi: Option<Atom>,
+    /// The language of the run's script class (`script_language`); `None`
+    /// where the styles name none for that class.
+    pub script_language: Option<Atom>,
     pub complex: bool,
 }
 
@@ -1649,27 +1700,9 @@ impl RunProperties {
                     (spec.width * 1000.0).round() as u64,
                 )
             });
-        let language = |ns: &str, language: &str, country: &str| -> Option<Atom> {
-            let language = cascade.get(ns, language).filter(|v| *v != "none")?;
-            Some(
-                fonts.atom(&match cascade.get(ns, country).filter(|v| *v != "none") {
-                    Some(country) => format!(
-                        "{}-{}",
-                        language.to_ascii_lowercase(),
-                        country.to_ascii_uppercase()
-                    ),
-                    None => language.to_ascii_lowercase(),
-                }),
-            )
-        };
         if size < 0.5 {
             size = 0.5;
         }
-        let class_language = match class {
-            ScriptClass::Latin => language(NS_FO, "language", "country"),
-            ScriptClass::Asian => language(NS_STYLE, "language-asian", "country-asian"),
-            ScriptClass::Complex => language(NS_STYLE, "language-complex", "country-complex"),
-        };
         (
             Self {
                 family,
@@ -1695,20 +1728,20 @@ impl RunProperties {
                 combine,
                 vertical,
                 border,
-                // ODF 1.3 Part 3 Table 22 classes the run's characters, and the
-                // class selects which language applies to all of them
-                // (fo:language, style:language-asian, style:language-complex),
-                // as it selects the one face set on every font slot above. The
-                // renderer's ECMA-376 §17.3.2.26 slot table may place a
-                // character of this class in any slot (U+31C0 is Asian here,
-                // highAnsi there; U+1D11E Latin here, East Asian there), so
-                // every axis carries the class's language: the run names one
-                // language, which the renderer keeps as one fact. Regional
-                // font selection reads the East Asian axis only for Han, which
-                // is always Asian-class here.
-                lang: class_language.clone(),
-                lang_east_asia: class_language.clone(),
-                lang_bidi: class_language,
+                // ODF 1.3 Part 3 §20.358 Table 22 classes the run's characters,
+                // and the class selects which of the three languages applies
+                // to all of them, as it selects the one face set on every
+                // font slot above. That resolved language is a fact of its
+                // own (`script_language`): the renderer's ECMA-376 §17.3.2.26
+                // slot table may place a character of this class in any slot
+                // (U+31C0 is Asian here, highAnsi there; U+1D11E Latin here,
+                // East Asian there), so no axis can stand for it. The axes
+                // keep the style's own three values; the renderer's regional
+                // font selection reads the Asian one.
+                lang: script_language(cascade, ScriptClass::Latin, fonts),
+                lang_east_asia: script_language(cascade, ScriptClass::Asian, fonts),
+                lang_bidi: script_language(cascade, ScriptClass::Complex, fonts),
+                script_language: script_language(cascade, class, fonts),
                 complex: class == ScriptClass::Complex,
             },
             face,
@@ -1760,6 +1793,7 @@ impl RunProperties {
             lang: self.lang.as_deref().map(str::to_string),
             lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
             lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
+            lang_script_class: Some(self.script_language.as_deref().unwrap_or("").to_string()),
             ..TextRun::default()
         }
     }
@@ -1782,9 +1816,45 @@ impl RunProperties {
             lang: self.lang.as_deref().map(str::to_string),
             lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
             lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
+            lang_script_class: Some(self.script_language.as_deref().unwrap_or("").to_string()),
             ..RunFontFacts::default()
         }
     }
+}
+
+/// The language a cascade sets for text of a script class, as a BCP 47 tag
+/// (ODF 1.3 Part 3 §20.358: fo:language and fo:country for Latin text,
+/// style:language-asian / -complex with their countries for the others;
+/// "none" names no language).
+fn script_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
+    let (ns, language, country) = match class {
+        ScriptClass::Latin => (NS_FO, "language", "country"),
+        ScriptClass::Asian => (NS_STYLE, "language-asian", "country-asian"),
+        ScriptClass::Complex => (NS_STYLE, "language-complex", "country-complex"),
+    };
+    let language = cascade.get(ns, language).filter(|v| *v != "none")?;
+    Some(
+        fonts.atom(&match cascade.get(ns, country).filter(|v| *v != "none") {
+            Some(country) => format!(
+                "{}-{}",
+                language.to_ascii_lowercase(),
+                country.to_ascii_uppercase()
+            ),
+            None => language.to_ascii_lowercase(),
+        }),
+    )
+}
+
+/// The Table 22 class of an item's own text: the one class its classified
+/// characters share, `previous` (the preceding character's class, the weak
+/// character rule of `weak_classes`) where it has none, and `None` where
+/// they are of several classes.
+fn text_class(text: &str, previous: ScriptClass) -> Option<ScriptClass> {
+    let mut classes = text.chars().filter_map(table_22);
+    let Some(first) = classes.next() else {
+        return Some(previous);
+    };
+    classes.all(|class| class == first).then_some(first)
 }
 
 /// The font size a cascade sets for a script class (§20.190 fo:font-size,

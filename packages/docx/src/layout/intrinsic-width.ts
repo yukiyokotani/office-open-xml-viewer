@@ -150,14 +150,18 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       request.genericFamily ?? null,
       request.letterSpacingPt ?? null,
       request.kerning ?? null,
-      // Authored §17.3.2.20 languages delimit text sequences, so production
-      // shapes pieces of different languages apart even when neither is
-      // admitted to Canvas; an untagged key is unchanged.
-      // A forced complex-script request never uses w:val.
+      // Authored §17.3.2.20 languages delimit the pieces of a text sequence
+      // (text-sequence.ts language ranges), so production shapes pieces of
+      // different languages apart even when neither is admitted to Canvas.
+      // This key partitions exactly as those ranges do (languageKey): w:val
+      // by its effective tag and not at all on a forced complex-script
+      // request, the other axes as written (w:eastAsia above). An untagged
+      // key is unchanged.
       ...((request.complexScript ? undefined : canvasLanguageTag(request.language)) !== undefined
-        || canvasLanguageTag(request.complexScriptLanguage) !== undefined
+        || request.complexScriptLanguage !== undefined || request.scriptClassLanguage !== undefined
         ? [['lang', (request.complexScript ? undefined : canvasLanguageTag(request.language)) ?? null,
-          canvasLanguageTag(request.complexScriptLanguage) ?? null]] : []),
+          request.complexScriptLanguage ?? null,
+          ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : [])]] : []),
     ] : null,
     segment.bold,
     segment.italic,
