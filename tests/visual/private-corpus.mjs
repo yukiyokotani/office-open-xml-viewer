@@ -499,7 +499,8 @@ const ITEM_IMAGE_OR_MANIFEST = /^(?:(page|sheet|slide)-\d+\.png|manifest\.json)$
 /** Remove the files the harness generated for documents the corpus no longer
  * lists (a removed or renamed input), then their directories if empty, so no
  * image of theirs outlives the run. `tree` holds one directory per document.
- * A symlink among its entries fails the run instead of being skipped. */
+ * A symlink among its entries, or a generated name that is not a regular
+ * file, fails the run instead of being skipped or removed. */
 function removeStaleDocuments(tree, files, directory, generated) {
   assertNoSymlinkBelowCheckout(tree);
   const listed = new Set(files.map((file) => file.slice(directory.length + 1, file.lastIndexOf('.'))));
@@ -516,9 +517,14 @@ function removeStaleDocuments(tree, files, directory, generated) {
       throw new Error(`refusing to use a symlinked self-VRT output path: ${path}`);
     }
     if (!entry.isDirectory() || listed.has(entry.name)) continue;
-    for (const file of readdirSync(path)) {
-      if (generated.test(file)) unlinkSync(join(path, file));
+    const stale = readdirSync(path, { withFileTypes: true }).filter((file) => generated.test(file.name));
+    // Only regular files are the harness's; anything else under such a name
+    // stops the run before the first removal.
+    const foreign = stale.find((file) => !file.isFile());
+    if (foreign) {
+      throw new Error(`refusing to remove a self-VRT output that is not a regular file: ${join(path, foreign.name)}`);
     }
+    for (const file of stale) unlinkSync(join(path, file.name));
     try {
       rmdirSync(path);
     } catch {

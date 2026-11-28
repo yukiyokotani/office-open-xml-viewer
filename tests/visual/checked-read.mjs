@@ -1,7 +1,7 @@
 // Built-in-only helper shared by the self-VRT harness and the standalone corpus
 // tools, so importing it never requires installed dependencies.
 import {
-  closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, writeFileSync,
+  closeSync, constants, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, writeFileSync,
 } from 'node:fs';
 
 /** Read a whole regular file through one descriptor. The open is non-blocking
@@ -21,10 +21,12 @@ export function readRegularFile(path) {
   }
 }
 
-/** Write a harness output file. An existing leaf must be a regular file (a
- * symlink or a named pipe there is refused before anything is opened), and the
- * open is non-blocking and refuses a final symlink. Callers check the
- * directory components separately. */
+/** Write a harness output file. An existing leaf must be a regular file with
+ * no other hard link (a symlink or a named pipe there is refused before
+ * anything is opened; a hard link would change the file it shares an inode
+ * with). The open is non-blocking, refuses a final symlink and truncates
+ * nothing: the descriptor is checked first. Callers check the directory
+ * components separately. */
 export function writeRegularFile(path, data) {
   let stat;
   try {
@@ -37,12 +39,14 @@ export function writeRegularFile(path, data) {
   }
   const fd = openSync(
     path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NONBLOCK
-      | (constants.O_NOFOLLOW ?? 0),
+    constants.O_WRONLY | constants.O_CREAT | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
     0o666,
   );
   try {
-    if (!fstatSync(fd).isFile()) throw new Error(`self-VRT output is not a regular file: ${path}`);
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) throw new Error(`self-VRT output is not a regular file: ${path}`);
+    if (opened.nlink > 1) throw new Error(`refusing to write over a hard-linked file: ${path}`);
+    ftruncateSync(fd, 0);
     writeFileSync(fd, data);
   } finally {
     closeSync(fd);

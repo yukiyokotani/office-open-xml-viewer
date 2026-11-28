@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { PNG } from 'pngjs';
 import { copyCorpusInputs } from './copy-corpus-inputs.mjs';
@@ -795,6 +797,11 @@ test('the specimen copy command checks its destination and refuses deletions and
     symlinkSync(join(outside, 'target.xlsx'), join(base, 'packages/xlsx/public/corpus/new.xlsx'));
     assert.throws(copy, /symlink or non-regular file/);
     assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
+    // Nor over a hard link, which shares its inode with another file.
+    rmSync(join(base, 'packages/xlsx/public/corpus/new.xlsx'));
+    linkSync(join(outside, 'target.xlsx'), join(base, 'packages/xlsx/public/corpus/new.xlsx'));
+    assert.throws(copy, /hard-linked file/);
+    assert.equal(readFileSync(join(outside, 'target.xlsx'), 'utf8'), 'keep');
     rmSync(join(base, 'packages/xlsx'), { recursive: true });
     mkdirSync(join(base, 'packages/xlsx/public'), { recursive: true });
     symlinkSync(outside, join(base, 'packages/xlsx/public/corpus'));
@@ -838,6 +845,16 @@ test('documents the corpus no longer lists keep no generated file after a snapsh
     assert.deepEqual(readdirSync(screenshots).sort(), ['deck', 'gone', 'kept']);
     assert.deepEqual(readdirSync(join(screenshots, 'gone')), ['manifest.json']);
     assert.deepEqual(readdirSync(join(screenshots, 'kept')).sort(), ['manifest.json', 'notes.txt']);
+    // A generated name that is not a regular file is not the harness's to
+    // remove: the run fails and the stale document keeps every entry.
+    leftover(baselineDemo, 'gone');
+    try {
+      execFileSync('mkfifo', [join(baselineDemo, 'gone/slide-2.png')]);
+    } catch {
+      mkdirSync(join(baselineDemo, 'gone/slide-2.png'));
+    }
+    await assert.rejects(snapshot(fixture.base, fixture.revision), /not a regular file: .*gone\/slide-2\.png/);
+    assert.deepEqual(readdirSync(join(baselineDemo, 'gone')).sort(), ['manifest.json', 'slide-1.png', 'slide-2.png']);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
@@ -962,36 +979,41 @@ test('a named pipe or symlink in place of an input or an output is refused witho
   }
 });
 
-test('collecting the specs prepares nothing: stale output survives until a suite hook runs', () => {
-  // Preparation writes the snapshot manifest and removes stale documents, so a
-  // list-only run (`playwright test --list`) must not reach it. What the specs
-  // do while they are collected is enumeration only ...
-  const fixture = selfVrtFixture();
-  const stale = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo/gone');
+test('listing the tests of a spec prepares nothing', (t) => {
+  // Preparation writes the snapshot manifest and removes stale documents; a
+  // list-only run collects the specs and must do neither. The real pptx spec
+  // is collected by the package's Playwright with a disposable checkout as
+  // the working directory, which is where the harness reads and writes.
+  const packageDirectory = fileURLToPath(new URL('../../packages/pptx/', import.meta.url));
+  const cli = join(packageDirectory, 'node_modules/@playwright/test/cli.js');
+  if (!existsSync(cli)) {
+    t.skip('Playwright is not installed for packages/pptx');
+    return;
+  }
+  const fixture = fastFixture();
+  const output = join(fixture.base, 'packages/pptx/tests/visual/baseline/private-corpus');
   try {
-    mkdirSync(stale, { recursive: true });
-    writeFileSync(join(stale, 'slide-1.png'), 'old');
-    const previous = process.cwd();
-    process.chdir(join(fixture.base, 'packages/pptx'));
-    try {
-      assert.deepEqual(selfVrtCorpusFiles({ corpus: 'demo', format: 'pptx' }), ['demo/deck.pptx']);
-    } finally {
-      process.chdir(previous);
-    }
-    assert.deepEqual(readdirSync(join(stale, '..')), ['gone']);
-    assert.equal(readFileSync(join(stale, 'slide-1.png'), 'utf8'), 'old');
+    mkdirSync(join(output, 'pptx/gone'), { recursive: true });
+    writeFileSync(join(output, 'pptx/gone/slide-1.png'), 'old');
+    const child = spawnSync(process.execPath, [
+      cli, 'test', '--config', join(packageDirectory, 'playwright.config.ts'),
+      '--list', '--grep', 'private corpus self regression',
+    ], {
+      cwd: join(fixture.base, 'packages/pptx'),
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env, VRT_PRIVATE_CORPUS: '1', VRT_PRIVATE_TIER: '', VRT_SNAPSHOT: '1', VRT_MODE: '',
+        VRT_BASELINE_REVISION: fixture.revision, VRT_BASELINE_CHECKOUT: '',
+        VRT_ALLOW_HARNESS_CHANGES: '', VRT_ALLOW_CORPUS_INPUT_CHANGES: '',
+      },
+    });
+    assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+    assert.match(child.stdout, /private corpus self regression › pptx\/deck\.pptx/);
+    assert.deepEqual(readdirSync(output), ['pptx']);
+    assert.deepEqual(readdirSync(join(output, 'pptx')), ['gone']);
+    assert.equal(readFileSync(join(output, 'pptx/gone/slide-1.png'), 'utf8'), 'old');
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
-  }
-  // ... and every preparation call in them sits directly in a `beforeAll`.
-  for (const format of ['docx', 'xlsx', 'pptx']) {
-    const lines = readFileSync(
-      new URL(`../../packages/${format}/tests/visual/visual.spec.ts`, import.meta.url), 'utf8',
-    ).split('\n');
-    const calls = lines.flatMap((line, index) => (/\bprepareSelfVrtCorpus\(/.test(line) ? [index] : []));
-    assert.ok(calls.length > 0, format);
-    for (const index of calls) {
-      assert.match(lines[index - 1], /^\s*test\.beforeAll\(\(\) => \{$/, `${format} visual.spec.ts:${index + 1}`);
-    }
   }
 });

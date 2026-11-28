@@ -58,21 +58,25 @@ the exact page/sheet/slide set. The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run.
 
-The default commands include the public specimen corpus. Before the snapshot,
-copy the specimens the candidate adds or rewrites into the baseline worktree with
-`node tests/visual/copy-corpus-inputs.mjs <baseline-worktree> "$base"`,
-as described under "Visual regression" in
-[tests/corpus/README.md](../../tests/corpus/README.md#visual-regression). Set
-`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison run
-when there are any such specimens; the manifests bind every input by SHA-256, so
-the comparison fails if a copy is missing or differs. Set `VRT_ALLOW_HARNESS_CHANGES=1`
-for both runs when the baseline revision predates the harness changes (see
-[Harness bootstrap](#harness-bootstrap)).
+The default commands include the public specimen corpus, so the block below
+first copies the specimens the candidate adds or rewrites into the baseline
+worktree ([tests/visual/README.md](../../tests/visual/README.md), "Added or
+changed public specimens"). The manifests bind every input by SHA-256, so the
+comparison fails if a copy is missing or differs. Start in the root of the
+candidate worktree; the exported flags apply to the snapshot and to the
+comparison.
 
 ```bash
+candidate=$PWD
 git fetch origin main
 base=$(git rev-parse origin/main)   # the base branch's current head (origin/v0.x for a backport), not a merge-base
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
+node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
+# Only if that command copied at least one specimen:
+export VRT_ALLOW_CORPUS_INPUT_CHANGES=1
+# Only when $base predates the harness (Harness bootstrap below), after copying
+# the harness files into the baseline worktree:
+# export VRT_ALLOW_HARNESS_CHANGES=1
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm
 # The private corpus is git-ignored, so a new worktree has none: copy the same
@@ -80,7 +84,7 @@ pnpm install --frozen-lockfile && pnpm build:wasm
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:snapshot
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:private:snapshot
 
-cd <candidate-worktree>
+cd "$candidate"
 pnpm build:wasm
 VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt
 VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:private
