@@ -214,8 +214,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'FieldRun<type=field>.langEastAsia: missing-in-ts': 'typography acquisition input',
     'FieldRun<type=field>.lang: missing-in-ts': 'typography acquisition input',
     'FieldRun<type=field>.langScriptClass: missing-in-ts': 'typography acquisition input',
-    'FieldRun<type=field>.langEastAsiaCanvas: missing-in-ts': 'typography acquisition input',
-    'FieldRun<type=field>.langBidiCanvas: missing-in-ts': 'typography acquisition input',
+    'FieldRun<type=field>.langEastAsiaAutomatic: missing-in-ts': 'typography acquisition input',
+    'FieldRun<type=field>.langBidiAutomatic: missing-in-ts': 'typography acquisition input',
     'FieldRun<type=field>.rtl: missing-in-ts': 'typography acquisition input',
     'NumberingInfo.fontFacts: missing-in-ts': 'read by parser-model.ts',
     'ShapeRun<type=shape>.textBoxContent: missing-in-ts': 'textbox acquisition input',
@@ -241,8 +241,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'TextRun<type=text>.langEastAsia: missing-in-ts': 'typography acquisition input',
     'TextRun<type=text>.lang: missing-in-ts': 'typography acquisition input',
     'TextRun<type=text>.langScriptClass: missing-in-ts': 'typography acquisition input',
-    'TextRun<type=text>.langEastAsiaCanvas: missing-in-ts': 'typography acquisition input',
-    'TextRun<type=text>.langBidiCanvas: missing-in-ts': 'typography acquisition input',
+    'TextRun<type=text>.langEastAsiaAutomatic: missing-in-ts': 'typography acquisition input',
+    'TextRun<type=text>.langBidiAutomatic: missing-in-ts': 'typography acquisition input',
 
     // ---- Intentional: ShapeRun.vmlPicture projection ------------------------
     // `ShapeRun.vmlPicture` is a full Rust ImageRun; TS deliberately types it as

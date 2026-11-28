@@ -251,9 +251,9 @@ impl Properties {
             lang_script_class: None,
             // MS-DOC 2.6.1 stores each language (sprmCRgLid0/1, sprmCLidBi)
             // as its own property, with no partial w:lang element: the
-            // decoded values are the Canvas axes too.
-            lang_east_asia_canvas: None,
-            lang_bidi_canvas: None,
+            // decoded values are the Canvas axes too (no axis is automatic).
+            lang_east_asia_automatic: false,
+            lang_bidi_automatic: false,
             lang_bidi,
             lang_east_asia,
             kerning: self.direct_kerning_threshold_pt()?,

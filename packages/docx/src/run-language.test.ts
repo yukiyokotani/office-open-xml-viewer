@@ -613,7 +613,7 @@ describe('Canvas lang at measure and paint', () => {
     // per-attribute langEastAsia/langBidi (regional font selection, bidi
     // digit classes) and records the element-presence Canvas axes apart.
     const style = { lang: 'en-us', langEastAsia: 'ja-jp', langBidi: 'ar-sa' };
-    const partial = { ...style, langEastAsiaCanvas: '', langBidiCanvas: '' };
+    const partial = { ...style, langEastAsiaAutomatic: true, langBidiAutomatic: true };
     const { canvas, draws } = recordingCanvas();
     await renderDocumentToCanvas(documentOf([run('\u6f22', partial), run('x\u5b57', style)]), canvas, 0, { dpr: 1, width: 600 });
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([

@@ -1360,7 +1360,7 @@ function pushSegmentPiece(
     ...emissionState.sequenceRun,
     lang: range.lang, langEastAsia: range.langEastAsia, langBidi: range.langBidi,
     langScriptClass: range.langScriptClass,
-    langEastAsiaCanvas: range.langEastAsiaCanvas, langBidiCanvas: range.langBidiCanvas,
+    langEastAsiaAutomatic: range.langEastAsiaAutomatic, langBidiAutomatic: range.langBidiAutomatic,
   }) as ParagraphTextBearingRun;
   emissionState.digitsAsAN = bidiDigitsAsAN(emissionState, range.langBidi);
   pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,

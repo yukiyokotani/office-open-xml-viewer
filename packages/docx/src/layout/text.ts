@@ -212,13 +212,13 @@ type ParagraphTextFacts = Readonly<{
    * it per run by its own script classification (ODF 1.3 Part 3 §20.358);
    * empty: that class names none. See {@link TextShapeRequest.scriptClassLanguage}. */
   langScriptClass?: string;
-  /** Canvas languages of East Asian and complex-script text where §17.3.2.20
-   * element presence resolves them apart from the per-attribute
-   * {@link langEastAsia} / {@link langBidi} (a present w:lang omitting the
-   * attribute: automatic determination); empty names none. Absent where the
-   * two agree. See {@link canvasLanguageAxes}. */
-  langEastAsiaCanvas?: string;
-  langBidiCanvas?: string;
+  /** §17.3.2.20 by element presence: the deepest present w:lang omits
+   * w:eastAsia (w:bidi), leaving that axis to automatic determination, while
+   * the per-attribute {@link langEastAsia} ({@link langBidi}) inherits a tag.
+   * Such text takes no Canvas language on that axis. Absent when false. See
+   * {@link canvasLanguageAxes}. */
+  langEastAsiaAutomatic?: boolean;
+  langBidiAutomatic?: boolean;
   fontSlots?: Readonly<{
     direct: TextFontSlots;
     theme: TextFontSlots;
@@ -623,18 +623,17 @@ function withVerticalForms(text: string): string {
 /** The shape-request Canvas axes of run language facts. ECMA-376 §17.3.2.20
  * resolves each axis by element presence for Canvas (a level whose w:lang
  * omits w:eastAsia or w:bidi leaves that axis to automatic determination), so
- * `langEastAsiaCanvas` / `langBidiCanvas`, where the parser records them,
- * replace the per-attribute values that regional font selection and bidi
- * digit classes keep reading. Keys are present only when a value is, so
+ * an axis the parser marks automatic (`langEastAsiaAutomatic` /
+ * `langBidiAutomatic`) names no Canvas language, while regional font
+ * selection and bidi digit classes keep reading the per-attribute values. Keys are present only when a value is, so
  * untagged requests (and their cache keys) are unchanged. */
 export function canvasLanguageAxes(facts: Readonly<{
-  langEastAsiaCanvas?: string; langBidi?: string; langBidiCanvas?: string;
+  langEastAsiaAutomatic?: boolean; langBidi?: string; langBidiAutomatic?: boolean;
 }>): Pick<TextShapeRequest, 'complexScriptLanguage' | 'canvasEastAsiaLanguage'> {
-  const bidi = facts.langBidiCanvas ?? facts.langBidi;
+  const bidi = facts.langBidiAutomatic ? undefined : facts.langBidi;
   return {
     ...(bidi ? { complexScriptLanguage: bidi } : {}),
-    ...(facts.langEastAsiaCanvas !== undefined
-      ? { canvasEastAsiaLanguage: facts.langEastAsiaCanvas || null } : {}),
+    ...(facts.langEastAsiaAutomatic ? { canvasEastAsiaLanguage: null } : {}),
   };
 }
 

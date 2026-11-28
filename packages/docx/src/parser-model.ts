@@ -161,9 +161,9 @@ export interface InternalRunSlotMetadata {
   /** The one language of all the text where the source resolved it by its
    * own script classification (ODF 1.3 Part 3 §20.358); empty: none. */
   langScriptClass?: string;
-  /** Element-presence Canvas axes (layout/text.ts canvasLanguageAxes). */
-  langEastAsiaCanvas?: string;
-  langBidiCanvas?: string;
+  /** Element-presence automatic axes (layout/text.ts canvasLanguageAxes). */
+  langEastAsiaAutomatic?: boolean;
+  langBidiAutomatic?: boolean;
 }
 
 /** layout/text.ts canvasLanguageAxes for numbering and paragraph-mark run
@@ -171,11 +171,10 @@ export interface InternalRunSlotMetadata {
 function markCanvasLanguageAxes(
   facts: Readonly<InternalRunSlotMetadata>,
 ): Pick<NumberingMarkerShapeInput, 'complexScriptLanguage' | 'canvasEastAsiaLanguage'> {
-  const bidi = facts.langBidiCanvas !== undefined ? facts.langBidiCanvas || undefined : facts.langBidi;
+  const bidi = facts.langBidiAutomatic ? undefined : facts.langBidi;
   return {
     ...(bidi !== undefined ? { complexScriptLanguage: bidi } : {}),
-    ...(facts.langEastAsiaCanvas !== undefined
-      ? { canvasEastAsiaLanguage: facts.langEastAsiaCanvas || null } : {}),
+    ...(facts.langEastAsiaAutomatic ? { canvasEastAsiaLanguage: null } : {}),
   };
 }
 
