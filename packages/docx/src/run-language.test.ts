@@ -952,5 +952,18 @@ describe('Canvas lang at measure and paint', () => {
     const after = await rendered([run('a  b ', { langEastAsia: 'sr-rs' }), run('c  d', { langEastAsia: 'ru-ru' })]);
     expect(gap(after.draws, 'a', 'b')).not.toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
     expect(gap(after.draws, 'c', 'd')).toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
+    // An automatic w:eastAsia keeps its regional tag but shapes untagged:
+    // its half cell is not the explicitly tagged run's, in either order.
+    const automatic = { langEastAsia: 'sr-rs', langEastAsiaAutomatic: true } as Partial<DocxTextRun>;
+    const explicit = { langEastAsia: 'sr-rs' } as Partial<DocxTextRun>;
+    const automaticAlone = gap((await rendered([run('c  d', automatic)])).draws, 'c', 'd');
+    const explicitAlone = gap((await rendered([run('a  b', explicit)])).draws, 'a', 'b');
+    expect(automaticAlone).not.toBeCloseTo(explicitAlone, 6);
+    const explicitFirst = await rendered([run('a  b ', explicit), run('c  d', automatic)]);
+    expect(gap(explicitFirst.draws, 'a', 'b')).toBeCloseTo(explicitAlone, 6);
+    expect(gap(explicitFirst.draws, 'c', 'd')).toBeCloseTo(automaticAlone, 6);
+    const automaticFirst = await rendered([run('c  d ', automatic), run('a  b', explicit)]);
+    expect(gap(automaticFirst.draws, 'c', 'd')).toBeCloseTo(automaticAlone, 6);
+    expect(gap(automaticFirst.draws, 'a', 'b')).toBeCloseTo(explicitAlone, 6);
   });
 });

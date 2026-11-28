@@ -360,7 +360,7 @@ export function appendTextPiece(
     r,
     sequenceRun: r,
     languageRanges: (r as ParagraphTextBearingRun & SequenceLanguages).languageRanges,
-    languageRangeRuns: [],
+    languageRangeRuns: undefined,
     bidiDigitRun: forceCs || Boolean(r.rtl),
     effectiveVertAlign,
     effectivePosition,
@@ -490,6 +490,15 @@ export function appendTextPiece(
         // so a single-segment date would otherwise stay 28-02-2026.
         // (w:bidi is per language range of a sequence: each stretch of the
         // word follows the digit class of its own range.)
+        if (!emissionState.languageRanges) {
+          // No language ranges: the run's own digit class, no part list.
+          if (emissionState.digitsAsAN) {
+            for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
+          } else {
+            emit(word, 'cs');
+          }
+          continue;
+        }
         for (const part of bidiDigitParts(emissionState, word)) {
           if (part.digitsAsAN) {
             for (const slice of splitDigitGroups(part.text)) emit(slice, 'cs');
@@ -729,12 +738,19 @@ export function finalizeBuiltSegments(
         // w:val enters as its effective tag (x-none and ill-formed tags shape
         // as untagged); w:eastAsia stays raw, as regional font resolution
         // reads it.
+        // The ideographic-cell probe shapes in the effective Canvas East
+        // Asian axis: an automatic w:eastAsia (canvasEastAsiaLanguage null)
+        // keeps the regional tag for fonts but shapes untagged, so it is
+        // keyed apart from an explicit tag of the same value.
         ...(canvasLanguageTag(request.language) !== undefined || request.eastAsiaLanguage !== undefined
           || request.canvasLanguagePin !== undefined || request.scriptClassLanguage !== undefined
+          || request.canvasEastAsiaLanguage !== undefined
           ? [JSON.stringify([canvasLanguageTag(request.language) ?? null, request.eastAsiaLanguage ?? null,
             request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
             request.canvasLanguagePin?.lang ?? null,
-            ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : [])])]
+            ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : []),
+            ...(request.canvasEastAsiaLanguage !== undefined
+              ? ['ea', canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null] : [])])]
           : []),
       ].join('|');
       const cached = metricCache.get(key);
@@ -1202,7 +1218,8 @@ interface SegmentEmissionState {
    * languages (text-sequence.ts SequenceLanguages), over its display text. */
   readonly languageRanges: readonly SequenceLanguageRange[] | undefined;
   /** {@link sequenceRun} in each range's languages, made on first use. */
-  readonly languageRangeRuns: (ParagraphTextBearingRun | undefined)[];
+  /** Allocated on the first language range emitted (none for untagged text). */
+  languageRangeRuns: (ParagraphTextBearingRun | undefined)[] | undefined;
   /** Whether the run's digits may take the AN class (forced complex-script
    * or rtl): its w:bidi language then decides {@link digitsAsAN}. */
   readonly bidiDigitRun: boolean;
@@ -1356,7 +1373,7 @@ function pushSegmentPiece(
   const range = ranges[index]!;
   const outerRun = emissionState.r;
   const outerDigitsAsAN = emissionState.digitsAsAN;
-  emissionState.r = emissionState.languageRangeRuns[index] ??= Object.freeze({
+  emissionState.r = (emissionState.languageRangeRuns ??= [])[index] ??= Object.freeze({
     ...emissionState.sequenceRun,
     lang: range.lang, langEastAsia: range.langEastAsia, langBidi: range.langBidi,
     langScriptClass: range.langScriptClass,
