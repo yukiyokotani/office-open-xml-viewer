@@ -2235,3 +2235,48 @@ fn reads_the_libreoffice_line_settings() {
     let s = document.settings.as_ref().unwrap();
     assert!(s.libre_office_ms_word_grid_metrics && s.libre_office_no_external_leading);
 }
+
+#[test]
+fn an_oversized_class_language_is_not_copied_into_inheriting_runs() {
+    // The renderer admits at most 64 UTF-16 units as a Canvas language; a
+    // longer RFC tag names none there and becomes the empty "names none"
+    // fact instead of a copy per run. The regional axes are unchanged.
+    let read = |tag: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="{tag}" fo:language="fr" fo:country="FR"/></style:style>"#
+        );
+        let body = "<text:p><text:span text:style-name=\"T\">a</text:span></text:p>".repeat(40);
+        read_fixture(Fixture {
+            automatic: &style,
+            body: &body,
+            ..Fixture::default()
+        })
+    };
+    let oversized = read(&format!("en-{}", "a".repeat(200)));
+    let bounded_tag = format!("en-{}", "a".repeat(61));
+    let bounded = read(&bounded_tag);
+    let facts = |document: &_| -> Vec<(Option<String>, [Option<String>; 3])> {
+        paragraphs(document)
+            .into_iter()
+            .flat_map(text_runs)
+            .map(|run| {
+                (
+                    run.lang_script_class.clone(),
+                    [
+                        run.lang.clone(),
+                        run.lang_east_asia.clone(),
+                        run.lang_bidi.clone(),
+                    ],
+                )
+            })
+            .collect()
+    };
+    let oversized = facts(&oversized.body);
+    let bounded = facts(&bounded.body);
+    assert_eq!(oversized.len(), 40);
+    for ((fact, axes), (kept, kept_axes)) in oversized.iter().zip(&bounded) {
+        assert_eq!(fact.as_deref(), Some(""));
+        assert_eq!(kept.as_deref(), Some(bounded_tag.as_str()));
+        assert_eq!(axes, kept_axes);
+    }
+}

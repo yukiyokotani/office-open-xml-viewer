@@ -1929,8 +1929,16 @@ impl RunProperties {
     /// otherwise pick one of the axes by its own slot table). Absent when the
     /// styles name no language at all: such text is the same with or without
     /// the fact, and a document without languages stays free of it.
+    ///
+    /// A tag longer than the renderer admits (64 UTF-16 units, packages/docx
+    /// src/layout/text.ts MAX_LANGUAGE_TAG_UNITS) names no language there, so
+    /// it becomes the empty "names none" fact instead of being copied into
+    /// every run (RFC 5646 §4.4.1 lets an implementation bound tag length).
     fn class_language_fact(&self, language: Option<&str>) -> Option<String> {
         match language {
+            Some(tag) if tag.encode_utf16().count() > MAX_CANVAS_LANGUAGE_TAG_UNITS => {
+                Some(String::new())
+            }
             Some(tag) => Some(tag.to_string()),
             None if self.names_language => Some(String::new()),
             None => None,
@@ -1968,6 +1976,9 @@ impl RunProperties {
 /// others; "none" names no language). The renderer matches these against its
 /// regional font lists (zh-CN, ja-JP, ...), so they keep this shape; the
 /// Canvas language of the class is `class_language_tag`.
+/// Longest class language retained as a Canvas language, in UTF-16 units.
+const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
+
 fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
     // Untagged styles: no language attribute anywhere, so no lookups.
     if !cascade.names_language() {
