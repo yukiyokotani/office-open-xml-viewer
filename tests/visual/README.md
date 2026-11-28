@@ -34,10 +34,12 @@ worktree, so both renderers draw identical bytes, and set
 run:
 
 ```bash
-git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.docx' \
-  'packages/*/public/corpus/*.xlsx' 'packages/*/public/corpus/*.pptx' \
-  | while read -r f; do cp "$f" "/tmp/ooxml-vrt-baseline/$f"; done
+node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
 ```
+
+The script (built-ins only, run from the candidate checkout) lists the added
+or modified specimens against `$base`, creates a missing corpus folder, and
+refuses to write through a symlink in the destination.
 
 Only a `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
 qualifies. It must be a regular file reached without a symlink, and during the
@@ -51,7 +53,7 @@ the corpus manifest recorded (`selfVrtInputBody`), so a specimen replaced
 during capture fails instead of lending its image to another input. When the
 baseline revision predates this allowance, also copy
 `tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
-`tests/visual/corpus-features.mjs`, `packages/*/tests/visual/visual.spec.ts`
+`tests/visual/corpus-features.mjs`, `tests/visual/copy-corpus-inputs.mjs`, `packages/*/tests/visual/visual.spec.ts`
 and `packages/*/tests/visual/fixture.html` (the specs and fixtures agree on
 the encoded input URL) and set `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 

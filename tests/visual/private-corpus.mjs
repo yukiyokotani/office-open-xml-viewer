@@ -43,6 +43,7 @@ const VRT_HARNESS_PATHS = new Set([
   'packages/pptx/tests/visual/visual.spec.ts',
   'tests/visual/private-corpus.mjs',
   'tests/visual/checked-read.mjs',
+  'tests/visual/copy-corpus-inputs.mjs',
   'tests/visual/corpus-features.mjs',
   // Only for the fixture font packages; see lockfileBootstrapDiffViolations.
   'pnpm-lock.yaml',
@@ -593,20 +594,14 @@ function sha256(buffer) {
 }
 
 // Each input is read once by prepareSelfVrtCorpus, and that buffer is what the
-// manifest's SHA-256 describes. Public corpora (demo, demo-scroll, corpus) are
-// small, so their buffer is kept and later served to the renderer as is. A
-// private corpus can be large, so only the digest is kept there and the route
-// re-reads the file through the checked reader and serves that buffer only when
-// its digest matches. Either way the images captured or compared in this
-// process belong to the manifest's input even when the file on disk is
-// replaced during the run.
+// manifest's SHA-256 describes. Only the digest is kept: the spec's route
+// checks the file on disk against it (verifySelfVrtInput) and lets the dev
+// server stream the file, so no input is held in memory or base64-encoded.
 const preparedInputs = new Map();
-const BODY_CACHED_CORPORA = new Set(['demo', 'demo-scroll', 'corpus']);
 
 function corpusFiles(corpus, files, selectionFiles) {
   return files.map((name) => {
-    const bytes = readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`);
-    const digest = sha256(bytes);
+    const digest = sha256(readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`));
     if (selectionFiles) {
       const selected = selectionFiles.get(name)?.sha256;
       if (selected !== digest) {
@@ -616,28 +611,22 @@ function corpusFiles(corpus, files, selectionFiles) {
         );
       }
     }
-    preparedInputs.set(`${corpus}\0${name}`, {
-      digest,
-      bytes: BODY_CACHED_CORPORA.has(corpus) ? bytes : null,
-    });
+    preparedInputs.set(`${corpus}\0${name}`, digest);
     return { name, sha256: digest };
   });
 }
 
-/** The bytes of a prepared self-VRT input, for the spec to serve to the
- * fixture (page.route) instead of letting the dev server read the file again.
- * Throws when the file no longer has the digest its manifest recorded.
+/** Throws unless the prepared input on disk still has the digest its manifest
+ * recorded. The spec's route calls it before letting the dev server serve the
+ * file.
  * @param {{ corpus: string, file: string }} options */
-export function selfVrtInputBody({ corpus, file }) {
-  const prepared = preparedInputs.get(`${corpus}\0${file}`);
-  if (!prepared) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
-  if (prepared.bytes) return prepared.bytes;
+export function verifySelfVrtInput({ corpus, file }) {
+  const expected = preparedInputs.get(`${corpus}\0${file}`);
+  if (!expected) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
   const path = `public/${selfVrtInputPath({ corpus, file })}`;
-  const body = readRegularFile(path);
-  if (sha256(body) !== prepared.digest) {
+  if (sha256(readRegularFile(path)) !== expected) {
     throw new Error(`self-VRT input ${path} changed after its manifest recorded it`);
   }
-  return body;
 }
 
 function readBaselineJson(location, path) {
@@ -737,7 +726,9 @@ export function prepareSelfVrtCorpus({
     }
     // Candidate screenshots of documents this corpus no longer lists.
     const screenshots = resolve(`tests/visual/screenshots/${outputPrefix}${directory}`);
-    removeOrphanedDocuments(screenshots, orphanedDocuments(screenshots, files, directory));
+    // Candidate screenshots hold item images only; no manifest of the harness's.
+    const noManifest = { manifest: false };
+    removeOrphanedDocuments(screenshots, orphanedDocuments(screenshots, files, directory, noManifest), noManifest);
   }
 }
 
@@ -746,7 +737,7 @@ const GENERATED_ITEM = /^(page|sheet|slide)-\d+\.png$/;
 /** Per-document output directories below `base` that are not among the
  * corpus's documents but hold generated files (item images, a manifest). A
  * symlinked directory is never listed, so it is never followed. */
-function orphanedDocuments(base, files, directory) {
+function orphanedDocuments(base, files, directory, { manifest = true } = {}) {
   const expected = new Set(files.map((file) => file.slice(directory.length + 1).replace(/\.[^.]+$/, '')));
   let entries;
   try {
@@ -758,17 +749,17 @@ function orphanedDocuments(base, files, directory) {
     .filter((entry) => entry.isDirectory() && !expected.has(entry.name))
     .map((entry) => entry.name)
     .filter((name) => readdirSync(join(base, name))
-      .some((file) => GENERATED_ITEM.test(file) || file === 'manifest.json'));
+      .some((file) => GENERATED_ITEM.test(file) || (manifest && file === 'manifest.json')));
 }
 
 /** Remove the generated files (and then the empty folder) of documents that
  * the corpus no longer lists, through the symlink-checked path. */
-function removeOrphanedDocuments(base, names) {
+function removeOrphanedDocuments(base, names, { manifest = true } = {}) {
   for (const name of names) {
     const directory = join(base, name);
     assertNoSymlinkBelowCheckout(directory);
     for (const file of readdirSync(directory)) {
-      if (GENERATED_ITEM.test(file) || file === 'manifest.json') unlinkSync(join(directory, file));
+      if (GENERATED_ITEM.test(file) || (manifest && file === 'manifest.json')) unlinkSync(join(directory, file));
     }
     try {
       rmdirSync(directory);
@@ -853,7 +844,7 @@ function itemPlan({ corpus, format, stem, itemKind, itemCount, snapshot, itemInd
       format,
       baselineRevision: baselineRevision(snapshot),
       checkout: location.checkout,
-      input: { name: inputName, sha256: prepared.digest },
+      input: { name: inputName, sha256: prepared },
       itemKind,
       itemCount,
     },

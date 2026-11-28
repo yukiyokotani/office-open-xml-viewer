@@ -8,7 +8,7 @@ import {
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
   selfVrtCorpusFiles,
-  selfVrtInputBody,
+  verifySelfVrtInput,
   selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
@@ -220,8 +220,8 @@ test.describe('docx visual fidelity', () => {
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
 type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 
-// Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
-// (selfVrtInputBody), not whatever the dev server finds on disk later.
+// Let the dev server serve an input only after its SHA-256 on disk is checked
+// against the one the corpus manifest records (verifySelfVrtInput).
 // The route matches the raw encoded path the fixture requests (each segment
 // through encodeURIComponent), so a name such as `A%20B` cannot be confused
 // with a sibling `A B`. The returned function reports how many times the route
@@ -229,14 +229,24 @@ type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<() => number> {
   const inputPath = '/' + selfVrtInputPath({ corpus, file }).split('/').map(encodeURIComponent).join('/');
   let served = 0;
+  let failure: Error | undefined;
   await page.route(
     (url) => url.pathname === inputPath,
     (route) => {
       served += 1;
-      return route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) });
+      try {
+        verifySelfVrtInput({ corpus, file });
+      } catch (error) {
+        failure = error as Error;
+        return route.abort('failed');
+      }
+      return route.continue();
     },
   );
-  return () => served;
+  return () => {
+    if (failure) throw failure;
+    return served;
+  };
 }
 
 // `query` holds the fixture parameters after the page index: the demo and

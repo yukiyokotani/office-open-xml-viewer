@@ -131,9 +131,7 @@ git fetch origin "$target"
 base=$(git rev-parse "origin/$target")                               # the target's current head
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"            # previous renderer
 # Specimens this branch adds or rewrites, so both renderers draw the same bytes.
-git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.docx' \
-  'packages/*/public/corpus/*.xlsx' 'packages/*/public/corpus/*.pptx' \
-  | while read -r f; do cp "$f" "/tmp/ooxml-vrt-baseline/$f"; done
+node tests/visual/copy-corpus-inputs.mjs /tmp/ooxml-vrt-baseline "$base"
 (cd /tmp/ooxml-vrt-baseline && pnpm install --frozen-lockfile && pnpm build:wasm \
   && VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
 pnpm build:wasm                                                      # changed renderer
@@ -145,7 +143,7 @@ VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base \
 (`tests/visual/README.md`, "Added or changed public specimens"; the same file's "Threat model" states what the bindings do and do not cover). When `$base`
 predates that allowance, bootstrap the harness first: copy
 `tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
-`tests/visual/corpus-features.mjs`, `packages/*/tests/visual/visual.spec.ts`
+`tests/visual/corpus-features.mjs`, `tests/visual/copy-corpus-inputs.mjs`, `packages/*/tests/visual/visual.spec.ts`
 and `packages/*/tests/visual/fixture.html` into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
 
 The comparison reads the baseline images from the baseline worktree itself,

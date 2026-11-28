@@ -59,7 +59,8 @@ reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run.
 
 The default commands include the public specimen corpus. Before the snapshot,
-copy the specimens the candidate adds or rewrites into the baseline worktree,
+copy the specimens the candidate adds or rewrites into the baseline worktree with
+`node tests/visual/copy-corpus-inputs.mjs <baseline-worktree> "$base"`,
 as described under "Visual regression" in
 [tests/corpus/README.md](../../tests/corpus/README.md#visual-regression). Set
 `VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison run
