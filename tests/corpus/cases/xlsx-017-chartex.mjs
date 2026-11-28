@@ -1,6 +1,6 @@
 import { COLOR, XLSX } from '../lib/grid.mjs';
 import {
-  CHARTEX_CT, CHARTEX_REL, DRAWING_CT, axes, chartExDrawing, chartExPart, dim, fill, line, seriesText, spPr, txPr, uniqueId,
+  CHARTEX_CT, CHARTEX_REL, DRAWING_CT, axes, chartExDrawing, chartExPart, chartExStyleParts, dim, fill, line, seriesText, spPr, txPr, uniqueId,
 } from '../lib/chartex.mjs';
 import { A_SERIES, B_SERIES, C_SERIES } from '../lib/iso216.mjs';
 import { relationships } from '../lib/opc.mjs';
@@ -254,6 +254,9 @@ export default {
       parts[`xl/drawings/drawing${n}.xml`] = chartExDrawing({ ...FRAME, requires: spec.requires ?? 'cx1', name: spec.title });
       parts[`xl/drawings/_rels/drawing${n}.xml.rels`] = relationships([['rId1', CHARTEX_REL, `../charts/chartEx${n}.xml`]]);
       parts[`xl/charts/chartEx${n}.xml`] = spec.chart(name);
+      const style = chartExStyleParts('xl/charts', n);
+      Object.assign(parts, style.parts);
+      Object.assign(overrides, style.overrides);
       overrides[`xl/drawings/drawing${n}.xml`] = DRAWING_CT;
       overrides[`xl/charts/chartEx${n}.xml`] = CHARTEX_CT;
     });

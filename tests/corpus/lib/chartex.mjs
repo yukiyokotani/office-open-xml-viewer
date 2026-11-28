@@ -5,11 +5,16 @@
 // type as XML fragments built with the helpers below.
 
 import { COLOR, FONT, LANG, OUTLINED_INSET } from './grid.mjs';
+import { relationships } from './opc.mjs';
 import { XML_DECL, esc } from './xml.mjs';
 
 export const CHARTEX_NS = 'http://schemas.microsoft.com/office/drawing/2014/chartex';
 export const CHARTEX_CT = 'application/vnd.ms-office.chartex+xml';
 export const CHARTEX_REL = 'http://schemas.microsoft.com/office/2014/relationships/chartEx';
+export const CHART_STYLE_CT = 'application/vnd.ms-office.chartstyle+xml';
+export const CHART_COLORS_CT = 'application/vnd.ms-office.chartcolorstyle+xml';
+const CHART_STYLE_REL = 'http://schemas.microsoft.com/office/2011/relationships/chartStyle';
+const CHART_COLORS_REL = 'http://schemas.microsoft.com/office/2011/relationships/chartColorStyle';
 export const DRAWING_CT = 'application/vnd.openxmlformats-officedocument.drawing+xml';
 
 /** The markup-compatibility namespace a consumer must understand for each
@@ -100,3 +105,29 @@ export function chartExDrawing({ from: [c0, r0], to: [c1, r1], requires = 'cx1',
 
 /** Deterministic series GUID: {00000000-0000-0000-0000-<n as 12 hex digits>}. */
 export const uniqueId = (n) => `{00000000-0000-0000-0000-${n.toString(16).toUpperCase().padStart(12, '0')}}`;
+
+const CS_NS = 'xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+const CS_ELEMENTS = ['axisTitle', 'categoryAxis', 'chartArea', 'dataLabel', 'dataLabelCallout', 'dataPoint', 'dataPoint3D',
+  'dataPointLine', 'dataPointMarker', 'dataPointWireframe', 'dataTable', 'downBar', 'dropLine', 'errorBar', 'floor',
+  'gridlineMajor', 'gridlineMinor', 'hiLoLine', 'leaderLine', 'legend', 'plotArea', 'plotArea3D', 'seriesAxis', 'seriesLine',
+  'title', 'trendline', 'trendlineLabel', 'upBar', 'valueAxis', 'wall'];
+const CS_ENTRY = '<cs:lnRef idx="0"/><cs:fillRef idx="0"/><cs:effectRef idx="0"/><cs:fontRef idx="minor"><a:schemeClr val="tx1"/></cs:fontRef>';
+
+/** The chart style and colour style parts of one chartEx part, with the
+ * relationships from it and the content types. Excel refuses a chartEx part
+ * without these relationships (it repairs the file by deleting the drawings).
+ * Every entry is empty (index 0) and the colours are the theme accents, so
+ * the style adds nothing to the chart's own formatting. dir: the package
+ * directory of the chart parts (xl/charts, ppt/charts, word/charts); n: the
+ * chartEx part number. Returns { parts, overrides } to merge into the package. */
+export function chartExStyleParts(dir, n) {
+  return {
+    parts: {
+      [`${dir}/_rels/chartEx${n}.xml.rels`]: relationships([['rId1', CHART_STYLE_REL, `style${n}.xml`], ['rId2', CHART_COLORS_REL, `colors${n}.xml`]]),
+      [`${dir}/style${n}.xml`]: `${XML_DECL}<cs:chartStyle ${CS_NS} id="410">${CS_ELEMENTS.map((e) => `<cs:${e}>${CS_ENTRY}</cs:${e}>`).join('')}</cs:chartStyle>`,
+      [`${dir}/colors${n}.xml`]: `${XML_DECL}<cs:colorStyle ${CS_NS} meth="cycle" id="10">`
+        + `${[1, 2, 3, 4, 5, 6].map((i) => `<a:schemeClr val="accent${i}"/>`).join('')}<cs:variation/></cs:colorStyle>`,
+    },
+    overrides: { [`${dir}/style${n}.xml`]: CHART_STYLE_CT, [`${dir}/colors${n}.xml`]: CHART_COLORS_CT },
+  };
+}
