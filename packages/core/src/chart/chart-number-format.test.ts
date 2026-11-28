@@ -4,6 +4,7 @@ import {
   formatChartValWithCode,
   formatCategoryLabel,
   formatLocalizedExcelShortDate,
+  localizedCategoryText,
 } from './chart-number-format.js';
 
 describe('formatChartVal (General)', () => {
@@ -265,34 +266,56 @@ describe('chart labels paint the host locale separators (#2346)', () => {
   });
 });
 
-describe('category labels keep number-vs-text provenance (#2346)', () => {
+describe('raw category text paints the host decimal separator (#2346)', () => {
   const labels = (locale: string) => {
     vi.stubGlobal('navigator', { language: locale });
     try {
       return {
-        // numRef/numLit category 1.2: General localizes, an explicit code applies.
-        numericGeneral: formatCategoryLabel('1.2', null, false, null, true),
+        // No code: the raw string, whose `.` is localized for a numeric list only.
+        numericRaw: formatCategoryLabel('1.2', null, false, null, true),
+        textRaw: formatCategoryLabel('1.2', null),
+        unknownRaw: formatCategoryLabel('1.2', null, false, null, undefined),
+        // Not a number, or nothing to repaint.
+        numericListText: formatCategoryLabel('v1.2', null, false, null, true),
+        exponent: localizedCategoryText('1E+20', true),
+        // A code formats any number-looking category, as before; provenance
+        // plays no part.
         numericCode: formatCategoryLabel('1.2', '0.00', false, null, true),
-        // strRef/strLit category "1.2" is text: never reformatted, even under an axis code.
-        textGeneral: formatCategoryLabel('1.2', null, false, null, false),
-        textCode: formatCategoryLabel('1.2', '0.0', false, null, false),
-        // Unknown provenance keeps the earlier behaviour.
-        unknownCode: formatCategoryLabel('1.2', '0.0'),
+        textCode: formatCategoryLabel('1.2', '0.00'),
       };
     } finally {
       vi.unstubAllGlobals();
     }
   };
 
-  it('localizes numeric categories and leaves text categories verbatim under fr-FR', () => {
+  it('fr-FR', () => {
     expect(labels('fr-FR')).toEqual({
-      numericGeneral: '1,2', numericCode: '1,20', textGeneral: '1.2', textCode: '1.2', unknownCode: '1,2',
+      numericRaw: '1,2', textRaw: '1.2', unknownRaw: '1.2', numericListText: 'v1.2', exponent: '1E+20',
+      numericCode: '1,20', textCode: '1,20',
     });
   });
 
-  it('keeps en-US output unchanged', () => {
+  it('en-US is unchanged whatever the provenance', () => {
     expect(labels('en-US')).toEqual({
-      numericGeneral: '1.2', numericCode: '1.20', textGeneral: '1.2', textCode: '1.2', unknownCode: '1.2',
+      numericRaw: '1.2', textRaw: '1.2', unknownRaw: '1.2', numericListText: 'v1.2', exponent: '1E+20',
+      numericCode: '1.20', textCode: '1.20',
     });
+  });
+});
+
+describe('built-in short dates follow the adopted host locale', () => {
+  it('defaults to the locale a worker adopted, not its own navigator', async () => {
+    vi.resetModules();
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      const { adoptHostLocale } = await import('../number-symbols');
+      const { formatLocalizedExcelShortDate } = await import('./chart-number-format');
+      expect(formatLocalizedExcelShortDate(45_659, false)).toBe('1/2/2025');
+      adoptHostLocale('fr-FR');
+      expect(formatLocalizedExcelShortDate(45_659, false)).toBe('02/01/2025');
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 });

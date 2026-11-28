@@ -16,6 +16,7 @@ import {
 import { computeChartFrame } from '../layout.js';
 import { automaticRadarMajorUnit, planNumericValueAxis } from '../axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine } from '../axis-style.js';
+import { formatCategoryLabel } from '../chart-number-format.js';
 import { axisLabelLineHeightPx, fillAuthoredText } from '../chart-text-lines.js';
 import { categoryLabelOffsetPx } from '../category-spacing.js';
 
@@ -31,8 +32,7 @@ import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
 import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
 import { drawAxisTick, valGridStroke, valMinorGridStroke, valAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, axisLabelPx, catLabelsVisible } from '../shared/axis.js';
 import { drawChartTitleForLayout } from '../shared/title.js';
-import { chartCategories } from '../category-spacing.js';
-import { axisCategoryCaption } from '../category-caption.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { drawChartMarker } from '../shared/markers.js';
 import { clamp } from '../shared/geometry.js';
 import { paintClassicDataPointPath } from '../shared/chartex-style.js';
@@ -49,6 +49,7 @@ export function renderRadarChart(
 ): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
+  const catsNumeric = chartCategoriesNumeric(chart);
   const n = cats.length; if (n < 3) return;
 
   // Shared frame (radial form). Radar uses title pads 0.035 / 0.035 and the
@@ -261,7 +262,7 @@ export function renderRadarChart(
           : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
     // §21.2.2.71: format numeric-serial categories via the category-axis
     // numFmt; string spoke labels pass through unchanged.
-    const label = axisCategoryCaption(chart, i);
+    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric);
     fillAuthoredText(ctx, label, lx, ly, axisLabelLineHeightPx(radarCatFontPx), maxPx);
   }
 

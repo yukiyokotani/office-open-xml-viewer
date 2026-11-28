@@ -138,8 +138,8 @@ export interface ChartSeries {
    * `ChartModel.categories` as X.
    */
   categories?: string[] | null;
-  /** Provenance of this series' own `categories`: numeric source (`c:numRef` /
-   *  `c:numLit`) or text; see `ChartModel.categoriesNumeric`. */
+  /** Provenance of this series' own `categories`, as
+   *  `ChartModel.categoriesNumeric` is for the shared list. */
   categoriesNumeric?: boolean;
   /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
    * exposes such a lone bubble series as one legend entry per point while a
@@ -856,22 +856,15 @@ export interface ChartModel {
    */
   categoryLevels?: string[][] | null;
   /**
-   * Whether the shared category source is numeric (`c:numRef` / `c:numLit`)
-   * rather than text (`c:strRef` / `c:strLit` / `c:multiLvlStrRef`).
-   * `categories` holds either as strings; a numeric category follows its
-   * number format code (General included, with the host decimal separator) and a
-   * text category is never reformatted. Absent: unknown, legacy handling.
+   * Provenance of `categories`, which holds numbers and text alike as
+   * strings: `true` when every non-empty label is the invariant text of a
+   * number (a `c:numCache` / `c:numLit` point, or a numeric worksheet cell)
+   * and at least one carries a decimal point. Its only use is painting that
+   * `.` as the host locale's decimal separator where the label is drawn
+   * without a number format (`localizedCategoryText`); it selects neither
+   * text nor format. Absent: text, a mixed range, or nothing to repaint.
    */
   categoriesNumeric?: boolean;
-  /**
-   * Number format of the shared category source (the first series' `cat` /
-   * `xVal` cache), as `ChartSeries.catFormat*` carries it for a series' own
-   * source. Kept at chart level so the format stays tied to the source that
-   * supplied `categories` when series are filtered or reordered.
-   */
-  categoryFormatCode?: string;
-  categoryBuiltinFormatId?: number;
-  categoryFormatCodes?: (string | null)[];
   series: ChartSeries[];
   /** Ordered classic chart groups. Absent keeps legacy public models on the
    * existing single-family compatibility path. */

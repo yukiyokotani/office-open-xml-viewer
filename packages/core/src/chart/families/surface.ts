@@ -60,8 +60,8 @@ import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
 import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
 import { strokeAxisSegment, axisTickLengthPx, valMinorGridStroke, catMinorGridStroke, catGridlineFractions, valAxisReversed, catAxisReversed, drawValMajorGridlines, planValueAxis, axisLabelPx } from '../shared/axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
-import { chartCategories } from '../category-spacing.js';
-import { axisCategoryCaption } from '../category-caption.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
+import { localizedCategoryText } from '../chart-number-format.js';
 import { MAX_CANVAS_MARKER_GRADIENT_STOPS, MAX_CANVAS_MARKER_PAINT_COMPONENTS } from '../shared/paint-limits.js';
 import { axisLabelLineHeightPx, fillAuthoredText } from '../chart-text-lines.js';
 
@@ -119,6 +119,7 @@ export function renderSurfaceChart(
 ): void {
   const { x, y, w, h } = r;
   const categories = chartCategories(chart);
+  const categoriesNumeric = chartCategoriesNumeric(chart);
   const rows = chart.series;
   const columnCount = categories.length;
   const rowCount = rows.length;
@@ -1395,7 +1396,7 @@ export function renderSurfaceChart(
     ctx.textAlign = anchor.textAlign;
     fillAuthoredText(
       ctx,
-      axisCategoryCaption(chart, column),
+      localizedCategoryText(categories[column] ?? '', categoriesNumeric),
       point.x,
       point.y + categoryLabelOffsetPx(8, chart.catAxisLabelOffsetPercent),
       axisLabelLineHeightPx(catFontPx),

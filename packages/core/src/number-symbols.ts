@@ -13,6 +13,15 @@
 // emulation (a test harness's per-page locale) does not reach dedicated
 // workers, and paint and font demand must agree across the two realms.
 //
+// Scope: separators only. Which text a site paints and which format code
+// applies to it are untouched; the one output difference is the decimal and
+// group characters of numbers (and the font demand for them), and en-US
+// output is unchanged. Formatters paint the host symbols themselves. A chart
+// category painted as its raw string has no formatter: where that string is
+// the invariant text of a number, its `.` is repainted through
+// `localizedCategoryText` (chart-number-format.ts), keyed by the provenance
+// the parser records for that list (`categoriesNumeric`).
+//
 // Library policy and its limits:
 // - Only the two symbols are localized. Digits stay ASCII and groups stay
 //   three digits wide: the symbols come from the locale's Latin-digit

@@ -7,7 +7,7 @@ import { bubblePointIsThreeD, effectiveMarkerSymbol, markerFillColorFor, markerF
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
 import { chartStyleDirectFillDecision, chartStyleDirectLineDecision, chartStyleFillDecision, chartStyleLineDecision } from '../style-paint.js';
 import { axisLineWidthPx } from '../axis-style.js';
-import { categorySourceAt, pointCategoryCaption } from '../category-caption.js';
+import { localizedCategoryText } from '../chart-number-format.js';
 import { resolveNativeFill as resolveFill } from '../../shape/paint.js';
 import { drawingmlLineDashArray } from '../../draw/dash.js';
 import { chartVariesColorsByPoint, legendEntryGlobalIndex, legendEntryRanges, legendIsCategoryDriven } from '../legend-entry-plan.js';
@@ -582,6 +582,11 @@ export function buildLegendEntries(
     const first = series[0];
     const n = first ? first.values.length : 0;
     const cats = first?.categories ?? chartCategories;
+    // Provenance of `cats`: the series' own list, else the chart's shared
+    // list, which is what every caller that names a chart passes.
+    const catsNumeric = first?.categories != null
+      ? first.categoriesNumeric
+      : chart && chartCategories === chart.categories ? chart.categoriesNumeric : undefined;
     const sourceSeriesIndex = chart && first
       ? Math.max(0, chartSeriesSourceIndex(chart, first))
       : 0;
@@ -631,7 +636,7 @@ export function buildLegendEntries(
         ? pieSliceColor(i, first, pieVaryColors, 0)
         : legendEntryColor(chartType, series, i, varyByPoint, pieVaryColors);
       return {
-        label: legendEntryLabel(chart, first, cats, i),
+        label: cats[i] == null ? `Item ${i + 1}` : localizedCategoryText(cats[i].toString(), catsNumeric),
         color: resolvedFill?.fillType === 'solid'
           ? (resolvedFill.color.startsWith('#') ? resolvedFill.color : `#${resolvedFill.color}`)
           : legacyColor,
@@ -1282,20 +1287,4 @@ export function legendEntryColor(
     return `#${CHART_PALETTE[entryIndex % CHART_PALETTE.length]}`;
   }
   return chartColor(entryIndex, series[entryIndex]);
-}
-
-/** A point-driven legend entry's label: the resolved category text of its
- * point, or `Item n` where no source has it. */
-function legendEntryLabel(
-  chart: ChartModel | undefined,
-  first: ChartSeries | undefined,
-  cats: readonly string[],
-  index: number,
-): string {
-  if (chart && first) {
-    return categorySourceAt(chart, first, index, 'none').owner === 'generated'
-      ? `Item ${index + 1}`
-      : pointCategoryCaption(chart, first, index, 'none');
-  }
-  return cats[index] == null ? `Item ${index + 1}` : cats[index].toString();
 }

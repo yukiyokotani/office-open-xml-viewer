@@ -2269,93 +2269,6 @@ pub(super) fn has_authored_reference_data(container: Node<'_, '_>) -> bool {
     })
 }
 
-/// Whether a series' category/X source holds numbers (`numRef` / `numLit`,
-/// `Some(true)`) or text (`strRef` / `strLit` / `multiLvlStrRef`,
-/// `Some(false)`). The label strings are projected from either; this is the
-/// only record of which it was (ECMA-376 §21.2.2.24 CT_AxDataSource).
-pub(super) fn category_source_is_numeric(ser_node: Node<'_, '_>, child_tag: &str) -> Option<bool> {
-    let container = ser_node
-        .children()
-        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
-    source_container_kind(container)
-}
-
-/// Number-format facts of a category/X source: the cache's own code (a bare
-/// `General` is the default and not recorded), the worksheet built-in id of
-/// its first cell, and per-point `formatCode`s.
-#[derive(Default)]
-pub(super) struct CategorySourceFormats {
-    pub code: Option<String>,
-    pub builtin_id: Option<u32>,
-    pub codes: Option<Vec<Option<String>>>,
-}
-
-pub(super) fn category_source_formats(
-    ser: Node<'_, '_>,
-    own_category_tag: &str,
-    references: &mut dyn ChartReferenceResolver,
-) -> CategorySourceFormats {
-    let code = ser
-            .children()
-            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
-            .and_then(|source| {
-                source.descendants().find(|node| {
-                    node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
-                })
-            })
-            .and_then(|cache| child(cache, "formatCode"))
-            .and_then(|format| format.text().map(str::to_string))
-            .filter(|format| !format.is_empty() && format != "General");
-        let builtin_id = ser
-            .children()
-            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
-            .and_then(|source| child(source, "numRef").or_else(|| child(source, "strRef")))
-            .and_then(|reference| child(reference, "f"))
-            .and_then(|formula| formula.text())
-            .and_then(|formula| references.resolve_number_format_id(formula));
-        let codes = ser
-            .children()
-            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
-            .and_then(|source| {
-                source.descendants().find(|node| {
-                    node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
-                })
-            })
-            .and_then(|cache| {
-                let point_count = child(cache, "ptCount")
-                    .and_then(|count| attr(&count, "val"))
-                    .and_then(|count| count.parse::<usize>().ok())
-                    .unwrap_or_else(|| {
-                        cache
-                            .children()
-                            .filter(|node| node.is_element() && node.tag_name().name() == "pt")
-                            .filter_map(|point| attr(&point, "idx"))
-                            .filter_map(|idx| idx.parse::<usize>().ok())
-                            .max()
-                            .map(|idx| idx + 1)
-                            .unwrap_or(0)
-                    });
-                let mut formats = vec![None; point_count];
-                for point in cache
-                    .children()
-                    .filter(|node| node.is_element() && node.tag_name().name() == "pt")
-                {
-                    let Some(idx) =
-                        attr(&point, "idx").and_then(|idx| idx.parse::<usize>().ok())
-                    else {
-                        continue;
-                    };
-                    if idx >= formats.len() {
-                        formats.resize(idx + 1, None);
-                    }
-                    formats[idx] = attr(&point, "formatCode")
-                        .filter(|format| !format.is_empty() && format != "General");
-                }
-                formats.iter().any(Option::is_some).then_some(formats)
-            });
-    CategorySourceFormats { code, builtin_id, codes }
-}
-
 pub(super) fn reference_formula(container: Node<'_, '_>) -> Option<String> {
     container
         .descendants()
@@ -2384,47 +2297,67 @@ pub(super) fn collect_string_source(
         // use that live source just as Office does. Keep an unresolved empty
         // cache explicit so non-XLSX hosts never inherit unrelated data.
         return reference_formula(container)
-            .and_then(|formula| resolve_source_strings(container, &formula, references))
+            .and_then(|formula| references.resolve_strings(&formula))
             .or(Some(authored));
     }
-    reference_formula(container)
-        .and_then(|formula| resolve_source_strings(container, &formula, references))
+    reference_formula(container).and_then(|formula| references.resolve_strings(&formula))
 }
 
-/// Resolve a category/X source formula the way its declared kind reads it. A
-/// `numRef` is resolved through typed numeric resolution (a worksheet text
-/// cell is a gap, not a number-looking string; gaps stay positional as empty
-/// labels), a text reference through the string resolver.
-fn resolve_source_strings(
-    container: Node<'_, '_>,
+/// [`collect_string_source`] with the provenance of the labels it returns
+/// (`ChartModel::categories_numeric`). The labels are exactly
+/// `collect_string_source`'s; the flag describes the branch that supplied
+/// them: an authored snapshot is numeric when its source element is
+/// `numRef` / `numLit` (ECMA-376 §21.2.2.24 CT_AxDataSource), live worksheet
+/// labels when every non-empty one is a numeric cell.
+pub(super) fn collect_string_source_with_provenance(
+    ser_node: Node<'_, '_>,
+    child_tag: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<(Vec<String>, bool)> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    let labels = collect_string_source(ser_node, child_tag, references)?;
+    if !labels_carry_decimal_point(&labels) {
+        return Some((labels, false));
+    }
+    let authored = has_authored_reference_data(container)
+        && !collect_str_cache_positional(ser_node, child_tag).is_empty();
+    let numeric = if authored {
+        container
+            .children()
+            .find(|node| node.is_element())
+            .is_some_and(|source| matches!(source.tag_name().name(), "numRef" | "numLit"))
+    } else {
+        reference_formula(container)
+            .is_some_and(|formula| resolved_labels_are_numbers(&labels, &formula, references))
+    };
+    Some((labels, numeric))
+}
+
+/// Provenance changes paint only where a label has a `.` to repaint, so it is
+/// not worked out (no second worksheet resolution) for any other list.
+pub(super) fn labels_carry_decimal_point(labels: &[String]) -> bool {
+    labels.iter().any(|label| label.contains('.'))
+}
+
+/// Whether `labels`, resolved from the worksheet range `formula`, are all
+/// numeric cells (blank cells aside). The string resolver projects text and
+/// number cells alike; the typed resolver over the same range tells them
+/// apart. A text cell reading "1.2" keeps the list textual.
+pub(super) fn resolved_labels_are_numbers(
+    labels: &[String],
     formula: &str,
     references: &mut dyn ChartReferenceResolver,
-) -> Option<Vec<String>> {
-    if source_container_kind(container) == Some(true) {
-        // A host without typed numeric resolution still answers as text.
-        if let Some(values) = references.resolve_numbers(formula) {
-            return Some(
-                values
-                    .into_iter()
-                    .map(|value| value.map(|number| number.to_string()).unwrap_or_default())
-                    .collect(),
-            );
-        }
-    }
-    references.resolve_strings(formula)
-}
-
-/// `Some(true)` for a `numRef` / `numLit` source, `Some(false)` for a text
-/// one, `None` when the container declares neither.
-pub(super) fn source_container_kind(container: Node<'_, '_>) -> Option<bool> {
-    container
-        .children()
-        .filter(|node| node.is_element())
-        .find_map(|node| match node.tag_name().name() {
-            "numRef" | "numLit" => Some(true),
-            "strRef" | "strLit" | "multiLvlStrRef" => Some(false),
-            _ => None,
-        })
+) -> bool {
+    let Some(numbers) = references.resolve_numbers(formula) else {
+        return false;
+    };
+    labels.len() == numbers.len()
+        && labels
+            .iter()
+            .zip(&numbers)
+            .all(|(label, number)| number.is_some() || label.is_empty())
 }
 
 pub(super) fn collect_number_source(

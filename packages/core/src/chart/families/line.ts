@@ -51,8 +51,7 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawDataLabelText, drawCategoryDataLabels } from '../shared/data-labels.js';
-import { chartCategories } from '../category-spacing.js';
-import { axisCategoryCaption, pointCategoryCaptionAt } from '../category-caption.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { drawLineGroupDecorations, axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
@@ -71,6 +70,7 @@ export function renderLineChart(
 ): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
+  const catsNumeric = chartCategoriesNumeric(chart);
   const n = cats.length; if (n === 0) return;
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
@@ -458,9 +458,9 @@ export function renderLineChart(
   const categoryLabelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
   const categoryLabelTexts = (): string[] => dateAxisPlan
     ? dateAxisPlan.majorTicks.map(tick =>
-      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true))
+      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelInterval) }, (_, index) =>
-      axisCategoryCaption(chart, index * categoryLabelInterval));
+      formatCategoryLabel((cats[index * categoryLabelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them, as the column
   // family does for its wrapped labels. An authored inner rectangle already
@@ -745,7 +745,7 @@ export function renderLineChart(
             isSecondarySeries(s) && secScale ? secScale.max : plan.max,
           ),
           shapeRotationDeg,
-          pointCategoryCaptionAt(chart, s),
+          catsNumeric,
         );
       });
     }
@@ -864,14 +864,14 @@ export function renderLineChart(
     const rotRad = catLabelRotation;
     const labelEntries = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: axisCategoryCaption(chart, ci),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric),
           x: toX(ci),
           categoryIndex: ci,
         };

@@ -74,9 +74,6 @@ mod tests {
             category_source_hidden: None,
             category_levels: None,
             categories_numeric: None,
-            category_format_code: None,
-            category_builtin_format_id: None,
-            category_format_codes: None,
             series: vec![ChartSeries {
                 name: "S1".to_string(),
                 chartex_format_idx: None,

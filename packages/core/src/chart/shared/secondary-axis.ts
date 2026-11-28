@@ -7,7 +7,7 @@ import { axisTitleBreakThicknessPx, axisTitleFontPx, categoryTickLabelGapPx, cha
 import { rawLinkedChartStyleRole } from '../effective-style.js';
 import { categoryLabelAnchorFraction, categoryLabelOffsetPx } from '../category-spacing.js';
 import { authoredExtraLinesHeight, axisLabelLineHeightPx, fillAuthoredText } from '../chart-text-lines.js';
-import { formatCategoryRecord, type CategoryRecord } from '../category-caption.js';
+import { formatCategoryLabel } from '../chart-number-format.js';
 import { catAxisReversed, drawAxisTick, drawAxisTitle, formatAxisTickWithUnits, secondaryMajorGridStroke, secondaryMinorGridStroke, strokeAxisSegment, strokeValueGridlineH, valueAxisUnitInRendererSpace } from './axis.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
 import { effectiveLinkedLabelBox } from './style-roles.js';
@@ -370,8 +370,8 @@ export function drawSecondaryCategoryAxis(
   py0: number,
   pw: number,
   ptToPx: number,
-  /** The resolved record of each label (text, provenance and source together). */
-  categoryAt?: (index: number) => CategoryRecord,
+  /** Provenance of `categories` (`categoriesNumeric` of that list). */
+  categoriesNumeric?: boolean,
 ): void {
   if (axis.hidden || categories.length === 0) return;
   const { color, width } = resolveAxisLine(axis.lineColor, axis.lineWidthEmu, ptToPx);
@@ -423,7 +423,7 @@ export function drawSecondaryCategoryAxis(
       ctx.textAlign = anchor.textAlign;
       fillAuthoredText(
         ctx,
-        formatCategoryRecord(chart, categoryAt?.(index) ?? { text: categories[index], numeric: undefined, formatCode: null, builtinFormatId: undefined, owner: 'generated' }, { code: axis.formatCode, divisors: axis.formatDivisors }),
+        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, categoriesNumeric),
         px0 + anchor.fraction * pw,
         py0 - labelGap,
         axisLabelLineHeightPx(fontPx),
@@ -439,7 +439,7 @@ export function drawSecondaryCategoryAxis(
       px0 + pw / 2,
       py0 - (axis.tickLabelPos === 'none'
         ? 0
-        : fontPx + secondaryCategoryLabelExtraH(categories, axis, chart, fontPx, categoryAt)
+        : fontPx + secondaryCategoryLabelExtraH(categories, axis, chart, fontPx, categoriesNumeric)
           + categoryLabelOffsetPx(
             categoryTickLabelGapPx(fontPx),
             axis.labelOffsetPercent,
@@ -480,13 +480,13 @@ export function secondaryCategoryLabelExtraH(
   axis: SecondaryValueAxis,
   chart: ChartModel,
   fontPx: number,
-  categoryAt?: (index: number) => CategoryRecord,
+  categoriesNumeric?: boolean,
 ): number {
   if (axis.tickLabelPos === 'none') return 0;
   const labelSkip = Math.max(1, Math.floor(axis.tickLabelSkip ?? 1));
   const labels: string[] = [];
   for (let index = 0; index < categories.length; index += labelSkip) {
-    labels.push(formatCategoryRecord(chart, categoryAt?.(index) ?? { text: categories[index], numeric: undefined, formatCode: null, builtinFormatId: undefined, owner: 'generated' }, { code: axis.formatCode, divisors: axis.formatDivisors }));
+    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, categoriesNumeric));
   }
   return authoredExtraLinesHeight(labels, axisLabelLineHeightPx(fontPx));
 }

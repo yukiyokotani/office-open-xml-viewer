@@ -638,9 +638,6 @@ export interface ChartModel {
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
     categoriesNumeric?: boolean;
-    categoryFormatCode?: string;
-    categoryBuiltinFormatId?: number;
-    categoryFormatCodes?: (string | null)[];
     series: ChartSeries[];
     plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;

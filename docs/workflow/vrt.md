@@ -58,6 +58,10 @@ the exact page/sheet/slide set and the browser locale every package
 Playwright config pins (`VRT_LOCALE`, default `en-US`; number separators and
 built-in date formats follow it). The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
+A baseline revision whose own harness predates the locale field writes none:
+it is an `en-US` capture (leave `VRT_LOCALE` unset for it) and compares with
+an `en-US` candidate run only, with no bootstrap. The field may be missing for
+no other reason.
 Use distinct ports so a candidate server can never satisfy the baseline run:
 
 ```bash

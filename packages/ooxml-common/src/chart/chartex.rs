@@ -2178,9 +2178,6 @@ fn parse_chartex_impl(
         category_source_hidden: None,
         category_levels: None,
         categories_numeric: None,
-        category_format_code: None,
-        category_builtin_format_id: None,
-        category_format_codes: None,
         series,
         plot_groups: None,
         // chartEx layouts color by branch/series index, not §21.2.2.227

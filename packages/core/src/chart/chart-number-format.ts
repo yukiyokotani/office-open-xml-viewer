@@ -164,14 +164,25 @@ export function formatChartValWithCode(
   return (needsLeadingMinus ? '-' : '') + applyChartNumberSection(Math.abs(v), section);
 }
 
-/** A category's text where no axis code applies (data-label category names,
- * legend entries, generated ticks): a number from a numeric source
- * (`c:numRef` / `c:numLit`) paints as General, with the host decimal
- * separator; any other category is shown verbatim. */
-function generalCategoryCaption(raw: string, numeric: boolean | null | undefined): string {
-  return numeric === true && raw.trim() !== '' && Number.isFinite(Number(raw))
-    ? raw.replace('.', hostNumberSymbols().decimal)
-    : raw;
+/**
+ * A raw category string as painted where no number format applies to it.
+ *
+ * Scope of #2346 for chart category text: separators only. Which text a site
+ * paints, and whether a format code applies to it, is unchanged; a site that
+ * paints a raw category string passes the provenance of the very list it took
+ * that string from (`categoriesNumeric` of the chart or of the series), and
+ * the one difference is that the invariant text of a number (`"1.2"`) paints
+ * its `.` as the host locale's decimal separator. Raw number text carries no
+ * group separator. Text categories, unknown provenance (hand-built models,
+ * ChartEx, multi-level categories) and every en-US label are returned as is.
+ * A label formatted through a code needs none of this: the formatter paints
+ * the host separators itself.
+ */
+export function localizedCategoryText(raw: string, numeric: boolean | null | undefined): string {
+  if (numeric !== true) return raw;
+  const { decimal } = hostNumberSymbols();
+  if (decimal === '.' || !raw.includes('.') || !Number.isFinite(Number(raw))) return raw;
+  return raw.replace('.', decimal);
 }
 
 /**
@@ -193,16 +204,11 @@ export function formatCategoryLabel(
   date1904 = false,
   /** Section divisors of `code` ({@link formatChartValWithCode}). */
   divisors?: readonly number[] | null,
-  /** Whether the category came from a numeric source (`c:numRef` /
-   *  `c:numLit`, model `categoriesNumeric`). `false`: text, shown verbatim
-   *  whatever the axis code. `true`: a number, shown through the code, or as
-   *  General (host decimal separator) when there is none. Absent: formatted
-   *  by the code when the text parses as a number. */
+  /** Provenance of `raw` (`categoriesNumeric` of the list it came from),
+   *  used only where no code applies ({@link localizedCategoryText}). */
   numeric?: boolean | null,
 ): string {
-  if (numeric === false) return raw;
-  if (!code && numeric === true) return generalCategoryCaption(raw, true);
-  if (!code) return raw;
+  if (!code) return localizedCategoryText(raw, numeric);
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text
   // explicitly; keep genuine string categories (e.g. "Q1", "North") verbatim.

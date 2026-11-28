@@ -374,9 +374,42 @@ function assertExactManifest(actual, expected, path) {
 /** The browser locale every package Playwright config pins (`VRT_LOCALE`,
  * default en-US). Number separators and built-in date formats follow it, so
  * the corpus manifest records it and a baseline rendered under another
- * locale, or by a harness that did not record one, fails closed. */
+ * locale fails closed. */
 export function vrtLocale() {
-  return process.env.VRT_LOCALE || 'en-US';
+  return process.env.VRT_LOCALE || DEFAULT_VRT_LOCALE;
+}
+
+// Also Playwright's own default context locale, which is what a config that
+// pins none renders under.
+const DEFAULT_VRT_LOCALE = 'en-US';
+
+/** Whether the harness committed at the baseline revision records the capture
+ * locale. This file's use of the name `vrtLocale` is the marker, so the name
+ * must stay; a revision without this file predates the field as well. */
+function baselineHarnessRecordsLocale({ checkout, revision }) {
+  try {
+    return /\bvrtLocale\b/.test(
+      git(checkout, ['show', `${revision}:tests/visual/private-corpus.mjs`], { trim: false }),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The manifest a comparison run requires of the baseline. A baseline revision
+ * whose own harness predates the `locale` field wrote none; its package
+ * configs pinned no other locale than the default, so that baseline is an
+ * en-US capture and is comparable by an en-US candidate run only. The field
+ * may be missing for no other reason: a baseline revision that records the
+ * locale, or a run under another `VRT_LOCALE`, needs it to match exactly. */
+function expectedBaselineManifest(manifest, actual, location) {
+  if (Object.hasOwn(actual ?? {}, 'locale')
+    || manifest.locale !== DEFAULT_VRT_LOCALE
+    || baselineHarnessRecordsLocale({ checkout: location.checkout, revision: manifest.baselineRevision })) {
+    return manifest;
+  }
+  const { locale: _locale, ...beforeLocale } = manifest;
+  return beforeLocale;
 }
 
 /** Fail closed on an empty/stale corpus and bind every baseline to an explicit
@@ -401,7 +434,8 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot }) {
     mkdirSync(root, { recursive: true });
     writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
-    assertExactManifest(readBaselineJson(location, path), manifest, path);
+    const actual = readBaselineJson(location, path);
+    assertExactManifest(actual, expectedBaselineManifest(manifest, actual, location), path);
   }
 }
 

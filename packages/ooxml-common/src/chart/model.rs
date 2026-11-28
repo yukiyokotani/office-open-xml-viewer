@@ -461,23 +461,16 @@ pub struct ChartModel {
     pub category_source_hidden: Option<Vec<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_levels: Option<Vec<Vec<String>>>,
-    /// Whether the shared category source is numeric (`<c:numRef>` /
-    /// `<c:numLit>`, true) or text (`<c:strRef>` / `<c:strLit>` /
-    /// `<c:multiLvlStrRef>`, false). `categories` projects both into strings;
-    /// this keeps which a label was, so a numeric category follows the axis
-    /// number format (General included, with the host's decimal separator)
-    /// and a text category is never reformatted. Absent: no category source.
+    /// Provenance of `categories`, which projects numbers and text alike
+    /// into strings: `Some(true)` when every non-empty label is the
+    /// invariant text of a number (a `<c:numCache>` / `<c:numLit>` point, or
+    /// a numeric worksheet cell of a live reference) and at least one carries
+    /// a decimal point. Its only use is painting that `.` as the host
+    /// locale's decimal separator where the label is drawn without a number
+    /// format; it selects neither text nor format. Absent: text, a mixed
+    /// range, multi-level categories, or nothing to repaint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories_numeric: Option<bool>,
-    /// Number format of the shared category source (the first series' `cat` /
-    /// `xVal` cache), as `ChartSeries.cat_format_*` carries it for a series'
-    /// own source: the code, the worksheet built-in id, per-point codes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category_format_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category_builtin_format_id: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category_format_codes: Option<Vec<Option<String>>>,
     pub series: Vec<ChartSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_groups: Option<Vec<ChartPlotGroup>>,
@@ -1693,8 +1686,8 @@ pub struct ChartSeries {
     pub use_secondary_axis: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<String>>,
-    /// Provenance of this series' own `categories` (see
-    /// `ChartModel::categories_numeric`); present only with them.
+    /// Provenance of this series' own `categories`, as
+    /// `ChartModel::categories_numeric` is for the shared list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories_numeric: Option<bool>,
     /// Bubble-only source provenance. A string-backed `<c:xVal>` has distinct

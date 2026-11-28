@@ -2,13 +2,12 @@
 import type { ChartModel, ChartSeries } from '../../types/chart';
 import { chartDataTableFamilyIsPainted } from '../marker-style.js';
 import { catAxisLabelBandH, chartTextFontSizePx } from '../layout.js';
-import { formatChartValWithCode, formatLocalizedExcelShortDate } from '../chart-number-format.js';
+import { formatCategoryLabel, formatChartValWithCode, formatLocalizedExcelShortDate } from '../chart-number-format.js';
 import { legendEntryGlobalIndex, legendEntryRanges } from '../legend-entry-plan.js';
 import { authoredLineCount, authoredTextLines, fillAuthoredText, measureAuthoredTextWidth } from '../chart-text-lines.js';
 import { axisLineWidthPx } from '../axis-style.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
-import { chartCategories } from '../category-spacing.js';
-import { categorySourceAt, formatCategoryRecord } from '../category-caption.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { wrapMeasuredText } from './axis.js';
 import { buildLegendEntries, drawLegendSwatch } from './legend.js';
 import { dashPatternForPreset } from './geometry.js';
@@ -142,17 +141,17 @@ export function measureChartDataTable(
   const face = chartFontFamily(chart, table.fontFace, 'minor');
   ctx.save();
   ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
-  // Each header is the resolved record of the shared source: its text,
-  // provenance, format code and built-in id come from that one source, not
-  // from whichever series happens to be first after visibility filtering.
-  const headerLines = chartCategories(chart).map((_, index) => {
-    const source = categorySourceAt(chart, null, index);
-    const numeric = source.text.trim() === '' ? Number.NaN : Number(source.text);
-    const label = source.numeric !== false && source.builtinFormatId === 14 && Number.isFinite(numeric)
+  const seriesCategoryFormat = chart.series.find(series => series.catFormatCode)?.catFormatCode;
+  const categoryFormat = seriesCategoryFormat ?? chart.catAxisFormatCode;
+  const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
+  const categoryBuiltinId = chart.series
+    .find(series => series.catFormatBuiltinId != null)?.catFormatBuiltinId;
+  const categoriesNumeric = chartCategoriesNumeric(chart);
+  const headerLines = chartCategories(chart).map(category => {
+    const numeric = category.trim() === '' ? Number.NaN : Number(category);
+    const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryRecord(chart, source, source.formatCode
-        ? { code: source.formatCode }
-        : { code: chart.catAxisFormatCode, divisors: chart.catAxisFormatDivisors });
+      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, categoriesNumeric);
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();
