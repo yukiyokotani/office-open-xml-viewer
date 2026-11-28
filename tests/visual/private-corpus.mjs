@@ -169,7 +169,15 @@ function assertRendererCheckout({ root, revision, label }) {
   if (head !== revision) {
     throw new Error(`${label} checkout mismatch: expected ${revision}, found ${head} at ${root}`);
   }
-  const changed = [...new Set([...tracked, ...untracked])];
+  // A new public specimen does not exist at the baseline revision. With
+  // VRT_ALLOW_NEW_CORPUS_INPUTS=1 its input may be copied into the baseline
+  // checkout as an untracked file, so the previous renderer draws it; a
+  // tracked input still may not change. The corpus manifest binds every
+  // input by SHA-256, so the candidate run accepts the baseline only when the
+  // copied file is byte-identical to its own.
+  const newCorpusInput = (path) => process.env.VRT_ALLOW_NEW_CORPUS_INPUTS === '1'
+    && /^packages\/(docx|xlsx|pptx)\/public\/corpus\/[^/]+\.(docx|xlsx|pptx)$/.test(path);
+  const changed = [...new Set([...tracked, ...untracked.filter((path) => !newCorpusInput(path))])];
   if (changed.length === 0) return;
   const harnessBootstrap = process.env.VRT_ALLOW_HARNESS_CHANGES === '1'
     && changed.every((path) => VRT_HARNESS_PATHS.has(path));

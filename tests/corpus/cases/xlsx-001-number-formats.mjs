@@ -3,15 +3,27 @@ import { BUILTIN_NUMFMT, sheet } from '../lib/xlsx.mjs';
 
 const { MARGIN_COL, MODULE, FIRST_ROW } = XLSX;
 
-// [quantity, value, number format: built-in id or format code]
+// ECMA-376 §18.8.30 defines `.` and `,` in a format code as the decimal point
+// and thousands separator tokens; [MS-OI29500] §2.1.712 states the grammar for
+// en-US and has Office adjust it for international settings. The viewer paints
+// those tokens, and General, with the host locale's separators (#2346), so
+// under the en-US VRT host this sheet pins the en-US output. The General,
+// grouped-decimal and quoted-dot rows are the cases that a comma-decimal host
+// tells apart: the dot inside " l." is literal text and stays a dot. The
+// comma-decimal output of those rows is checked by the de-DE unit test in
+// packages/xlsx/src/number-format.test.ts.
+// [quantity, value, number format: built-in id, format code, or null for General]
 const ROWS = [
+  ['Inches per metre', 39.37007874, null],
   ['Millimetres per inch', 25.4, '0.000'],
   ['Twips per inch', 1440, 3],
   ['EMU per inch', 914400, 3],
   ['Square root of 2', Math.SQRT2, '0.00000'],
   ['Area of A0, m²', 0.999949, '0.0000'],
   ['A4 as a share of A0', 0.0625, 10],
+  ['Metres per mile', 1609.344, '#,##0.000'],
   ['Speed of light, m/s', 299792458, '0.000E+00'],
+  ['Litres per US gallon', 3.785411784, '0.00" l."'],
   ['1970-01-01 as a date serial', 25569, 'yyyy-mm-dd'],
   ['Half a day', 0.5, 'hh:mm:ss'],
   ['Three quarters', 0.75, 12],
@@ -47,10 +59,11 @@ export default {
     s.set(`F${head}`, 'Format code', { font: 'captionBold' });
     ROWS.forEach(([label, value, numFmt], i) => {
       const r = head + 1 + i;
-      const code = typeof numFmt === 'number' ? `${BUILTIN_NUMFMT[numFmt]}  (built-in ${numFmt})` : numFmt;
+      const code = numFmt === null ? 'General'
+        : typeof numFmt === 'number' ? `${BUILTIN_NUMFMT[numFmt]}  (built-in ${numFmt})` : numFmt;
       s.set(`B${r}`, label);
       s.set(`C${r}`, value);
-      s.set(`D${r}`, value, { numFmt });
+      s.set(`D${r}`, value, numFmt === null ? {} : { numFmt });
       s.set(`F${r}`, code);
     });
     return s.build();

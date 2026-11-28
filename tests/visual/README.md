@@ -15,6 +15,17 @@ two more things are allowed:
 - The inputs under `packages/<fmt>/public/corpus/`. Git ignores them before
   the corpus is tracked, so the bootstrap may copy them in.
 
+## New public specimens
+
+A specimen added in the PR under test does not exist at the baseline
+revision, so the previous renderer has no image of it. With
+`VRT_ALLOW_NEW_CORPUS_INPUTS=1` for both the snapshot and the comparison run,
+the new `packages/<fmt>/public/corpus/*.{docx,xlsx,pptx}` files may be copied
+into the baseline worktree as untracked files. Nothing else is excused: a
+change to a tracked input, any other file in the corpus folders, and any
+renderer change still fail, and the manifest's SHA-256 binding rejects a
+copied input that differs from the candidate's.
+
 ## Fast private tier (PPTX/XLSX)
 
 The fast tier renders only the slides and sheets that a greedy cover of

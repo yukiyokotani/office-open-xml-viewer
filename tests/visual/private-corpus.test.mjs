@@ -239,6 +239,49 @@ test('a baseline checkout must be a clean Git checkout at the baseline revision'
   }
 });
 
+test('a new public corpus input may be copied into the baseline checkout only when allowed', () => {
+  const { root, first } = baselineRepository();
+  try {
+    const corpus = join(root, 'packages/xlsx/public/corpus');
+    mkdirSync(corpus, { recursive: true });
+    writeFileSync(join(corpus, 'xlsx-999-new.xlsx'), 'specimen');
+    withEnv({ VRT_ALLOW_NEW_CORPUS_INPUTS: undefined, VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
+      assert.throws(
+        () => verifyBaselineCheckout({ checkout: root, revision: first }),
+        /clean renderer checkout; changed paths at .*: packages\/xlsx\/public\/corpus\/xlsx-999-new\.xlsx/,
+      );
+    });
+    withEnv({ VRT_ALLOW_NEW_CORPUS_INPUTS: '1', VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
+      verifyBaselineCheckout({ checkout: root, revision: first });
+      // The allowance covers only specimen files directly in a corpus folder.
+      writeFileSync(join(corpus, 'patch.js'), 'export {};\n');
+      assert.throws(
+        () => verifyBaselineCheckout({ checkout: root, revision: first }),
+        /changed paths at .*: packages\/xlsx\/public\/corpus\/patch\.js/,
+      );
+      rmSync(join(corpus, 'patch.js'));
+      // It never excuses a renderer change.
+      writeFileSync(join(root, 'renderer.js'), 'export const version = 3;\n');
+      assert.throws(
+        () => verifyBaselineCheckout({ checkout: root, revision: first }),
+        /changed paths at .*: renderer\.js/,
+      );
+      git(root, 'checkout', '-q', '--', 'renderer.js');
+      // Nor a change to an input the baseline revision already tracks.
+      git(root, 'add', '-f', 'packages/xlsx/public/corpus/xlsx-999-new.xlsx');
+      git(root, 'commit', '-q', '-m', 'track specimen');
+      const tracked = git(root, 'rev-parse', 'HEAD');
+      writeFileSync(join(corpus, 'xlsx-999-new.xlsx'), 'edited');
+      assert.throws(
+        () => verifyBaselineCheckout({ checkout: root, revision: tracked }),
+        /changed paths at .*: packages\/xlsx\/public\/corpus\/xlsx-999-new\.xlsx/,
+      );
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('comparison runs read only a verified previous-renderer checkout', () => {
   const { root, first } = baselineRepository();
   const plain = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-baseline-plain-'));

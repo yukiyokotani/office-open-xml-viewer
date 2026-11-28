@@ -132,6 +132,10 @@ pnpm build:wasm                                                      # changed r
 VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:corpus
 ```
 
+When the branch adds specimens, copy the new input files into the baseline
+worktree before the snapshot and set `VRT_ALLOW_NEW_CORPUS_INPUTS=1` for both
+runs (`tests/visual/README.md`, "New public specimens").
+
 The comparison reads the baseline images from the baseline worktree itself,
 which must be a clean checkout at that revision (see `AGENTS.md`, "Visual
 regression"). Baselines live in the gitignored
