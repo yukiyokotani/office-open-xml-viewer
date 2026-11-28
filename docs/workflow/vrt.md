@@ -53,8 +53,10 @@ acceptance checks). Specs that need a private sample load it from
 
 Baselines are produced from a clean, detached worktree at the baseline
 revision. Snapshot mode rejects a dirty tracked checkout and writes a manifest
-binding the baseline to `VRT_BASELINE_REVISION`, the SHA-256 of each input and
-the exact page/sheet/slide set. The candidate run verifies that manifest and
+binding the baseline to `VRT_BASELINE_REVISION`, the SHA-256 of each input,
+the exact page/sheet/slide set and the browser locale every package
+Playwright config pins (`VRT_LOCALE`, default `en-US`; number separators and
+built-in date formats follow it). The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run:
 

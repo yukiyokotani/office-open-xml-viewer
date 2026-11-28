@@ -302,6 +302,19 @@ test('a verified baseline checkout detects a changed slide and accepts an unchan
   }
 });
 
+test('a baseline rendered under another browser locale is rejected', () => {
+  const fixture = selfVrtFixture();
+  try {
+    withEnv({ VRT_LOCALE: 'fr-FR' }, () => snapshot(fixture.base, fixture.revision));
+    withEnv({ VRT_LOCALE: undefined }, () => {
+      assert.throws(() => compare(fixture), /previous-renderer manifest mismatch/);
+    });
+    withEnv({ VRT_LOCALE: 'fr-FR' }, () => assert.equal(compare(fixture), null));
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
 test('bypass: a symlink in the baseline cannot redirect reads to other images', () => {
   const fixture = selfVrtFixture();
   try {

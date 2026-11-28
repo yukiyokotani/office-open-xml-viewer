@@ -30,6 +30,7 @@ import {
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import { adoptMessageHostLocale } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
   HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -196,6 +197,7 @@ const nativeRouteMeasurements = new Map<number, (lines: (NativeRouteNormalLine |
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
   const req = e.data;
+  adoptMessageHostLocale(req);
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);
     return;

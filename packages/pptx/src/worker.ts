@@ -1,5 +1,5 @@
 import { importFontDemandCollector } from './font-demand-collector.js';
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import { adoptMessageHostLocale, decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
   resourcePolicyForWasm,
@@ -61,6 +61,7 @@ self.onmessage = async (
   event: MessageEvent<PptxWorkerRequest | PullSessionCommand<number>>,
 ) => {
   const request = event.data;
+  adoptMessageHostLocale(request);
 
   if (isSlidePullCommand(request)) {
     await slidePull.dispatchSafely(request, post);

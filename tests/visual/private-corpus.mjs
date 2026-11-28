@@ -371,6 +371,14 @@ function assertExactManifest(actual, expected, path) {
   }
 }
 
+/** The browser locale every package Playwright config pins (`VRT_LOCALE`,
+ * default en-US). Number separators and built-in date formats follow it, so
+ * the corpus manifest records it and a baseline rendered under another
+ * locale, or by a harness that did not record one, fails closed. */
+export function vrtLocale() {
+  return process.env.VRT_LOCALE || 'en-US';
+}
+
 /** Fail closed on an empty/stale corpus and bind every baseline to an explicit
  * merge-base revision. This prevents a candidate server or unrelated old
  * snapshot from silently becoming its own regression oracle. */
@@ -386,6 +394,7 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot }) {
     format,
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
+    locale: vrtLocale(),
     files: corpusFiles(corpus, files),
   };
   if (snapshot) {

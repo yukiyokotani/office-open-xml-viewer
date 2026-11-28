@@ -65,6 +65,8 @@ export type PptxWorkerRequest =
        *  region, and dropping it silently preloads the `jp` default while the
        *  renderer paints the resolved one. */
       cjkFallback: import('@silurus/ooxml-core').CjkLang;
+      /** Main thread's host locale for number symbols (core `adoptHostLocale`). */
+      hostLocale?: string;
       /** Font sources are configured: the parse worker's preflight also
        * collects the font-source demand facts and scalars, with the
        * collector imported from this absolute sidecar URL (`''`: none
@@ -125,6 +127,8 @@ export type RenderWorkerRequest =
        * `useGoogleFonts`. */
       fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
+      /** Main thread's host locale for number symbols (core `adoptHostLocale`). */
+      hostLocale?: string;
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;
     }

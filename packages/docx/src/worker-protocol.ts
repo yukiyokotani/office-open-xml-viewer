@@ -138,6 +138,8 @@ export type RenderWorkerRequest =
       fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       allowFootnoteContinuation?: boolean;
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
+      /** Main thread's host locale for number symbols (core `adoptHostLocale`). */
+      hostLocale?: string;
       defaultCurrentDateMs: number;
       currentDateMs?: number;
       showTrackedChanges?: boolean;

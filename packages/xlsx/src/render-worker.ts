@@ -6,7 +6,7 @@ import {
 } from './internal/worksheet-policy.js';
 import { bindCellFontLanguage } from './internal/cell-font-language.js';
 import { hasOwnKey, nullRecord } from '@silurus/ooxml-core/internal/own-key';
-import type { CjkLang } from '@silurus/ooxml-core';
+import { adoptMessageHostLocale, type CjkLang } from '@silurus/ooxml-core';
 import { xlsxCjkFallback } from './font-requests.js';
 /**
  * Render-capable worker entry: parse → font load → (lazy) per-sheet parse →
@@ -256,6 +256,7 @@ self.onmessage = async (e: MessageEvent<
   RenderWorkerRequest | PullSessionCommand<number> | WorkerSvgDecodeResponse
 >) => {
   const req = e.data;
+  adoptMessageHostLocale(req);
 
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);

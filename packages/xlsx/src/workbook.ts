@@ -4,7 +4,7 @@ import {
   type NormalizedXlsxWorksheetPolicy,
 } from './internal/worksheet-policy.js';
 import { bindCellFontLanguage, snapshotJapaneseCellFonts } from './internal/cell-font-language.js';
-import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
+import { hostLocale, resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import { xlsxCjkFallback } from './font-requests.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
@@ -588,6 +588,7 @@ export class XlsxWorkbook {
               worksheetPolicy,
               ...(opts.fonts ? { fonts: optionFontSources(opts.fonts) } : {}),
               cjkFallback: this.cjkFallback,
+              hostLocale: hostLocale(),
               renderers: rendererDescriptors,
               japaneseCellFonts: this.japaneseCellFonts,
             } satisfies RenderWorkerRequest)

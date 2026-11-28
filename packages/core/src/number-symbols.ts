@@ -6,9 +6,12 @@
 // INTL-CHAR-DECIMAL-SEP as the fractional-seconds marker. Viewer policy
 // (#2346): paint those tokens with the host locale's separators, the locale
 // built-in format 14 already follows (`formatLocalizedExcelShortDate`):
-// `navigator.language`, which a worker sees as well as the main thread.
-// Neither specification names that locale; it stands in for the reader's
-// regional settings, which a browser library cannot read.
+// the main thread's `navigator.language`. Neither specification names that
+// locale; it stands in for the reader's regional settings, which a browser
+// library cannot read. A worker adopts the main thread's value from its parse
+// request (`adoptHostLocale`) rather than reading its own: browser locale
+// emulation (a test harness's per-page locale) does not reach dedicated
+// workers, and paint and font demand must agree across the two realms.
 //
 // Library policy and its limits:
 // - Only the two symbols are localized. Digits stay ASCII and groups stay
@@ -30,11 +33,30 @@ export interface NumberSymbols {
 export const INVARIANT_NUMBER_SYMBOLS: NumberSymbols = Object.freeze({ decimal: '.', group: ',' });
 
 const symbolCache = new Map<string, NumberSymbols>();
+let adoptedLocale: string | undefined;
+
+/** The host locale number symbols follow: the value adopted from the main
+ * thread in a worker, else this realm's `navigator.language`. Main-thread
+ * loaders send it with every worker parse request. */
+export function hostLocale(): string | undefined {
+  return adoptedLocale ?? (typeof navigator === 'undefined' ? undefined : navigator.language);
+}
+
+/** Adopt the main thread's host locale in a worker (a parse request's
+ * `hostLocale`). A non-string value leaves the current locale in place. */
+export function adoptHostLocale(locale: unknown): void {
+  if (typeof locale === 'string' && locale) adoptedLocale = locale;
+}
+
+/** Adopt `message.hostLocale` when a worker message carries one. */
+export function adoptMessageHostLocale(message: unknown): void {
+  if (message && typeof message === 'object' && 'hostLocale' in message) {
+    adoptHostLocale((message as { hostLocale?: unknown }).hostLocale);
+  }
+}
 
 /** The decimal and group separators of `locale` (host locale by default). */
-export function hostNumberSymbols(
-  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
-): NumberSymbols {
+export function hostNumberSymbols(locale = hostLocale()): NumberSymbols {
   const key = locale ?? '';
   const cached = symbolCache.get(key);
   if (cached) return cached;
