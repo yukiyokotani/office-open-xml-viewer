@@ -113,6 +113,8 @@ describe('ODP through the PPTX Node session', () => {
     }));
     const table = model.slides[0]!.elements[0]!;
     expect(table.type).toBe('table');
+    // ODF row heights keep the renderer's earlier row-growth rule.
+    expect(table.odfRowHeights).toBe(true);
     expect(table.cols).toEqual([cm(3), cm(3)]);
     expect(table.rows![0]!.cells[0]).toMatchObject({ gridSpan: 2, fill: { color: 'BFBFBF' }, borderL: { width: 6350, color: '000000' } });
     expect(table.rows![0]!.cells[1]!.hMerge).toBe(true);

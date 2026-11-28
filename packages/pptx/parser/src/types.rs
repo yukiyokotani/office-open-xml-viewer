@@ -99,6 +99,7 @@ mod group_transform_tests {
                 cols: vec![],
                 rows: vec![],
                 rtl: false,
+                odf_row_heights: false,
             }),
             SlideElement::Chart(ChartElement {
                 id: None,

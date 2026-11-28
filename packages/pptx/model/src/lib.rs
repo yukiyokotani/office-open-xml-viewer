@@ -285,6 +285,13 @@ pub struct TableElement {
     /// column 0 renders at the right edge. Skipped when false/absent.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rtl: bool,
+    /// The rows come from ODF `style:row-height` (OpenDocument 1.3 Part 3
+    /// §20.348, a fixed height) or `style:min-row-height` (a minimum) rather
+    /// than DrawingML `a:tr@h`. The renderer's PowerPoint row-growth rule is
+    /// measured against PowerPoint only, so such a table keeps the earlier
+    /// rule. Skipped when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub odf_row_heights: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -293,11 +300,6 @@ pub struct TableElement {
 pub struct TableRow {
     /// Row height in EMU
     pub height: i64,
-    /// ODF `style:row-height` (OpenDocument 1.3 Part 3 §20.348), which ODF
-    /// calls a fixed height, as opposed to `style:min-row-height`. DrawingML
-    /// `a:tr@h` never sets it. Skipped when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub fixed_height: bool,
     pub cells: Vec<TableCell>,
 }
 

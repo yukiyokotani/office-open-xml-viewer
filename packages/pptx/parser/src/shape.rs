@@ -2379,6 +2379,7 @@ pub(crate) fn parse_table(
         cols,
         rows,
         rtl,
+        odf_row_heights: false,
     })
 }
 
@@ -2408,11 +2409,7 @@ fn parse_table_row_with(
             )
         })
         .collect();
-    TableRow {
-        height,
-        fixed_height: false,
-        cells,
-    }
+    TableRow { height, cells }
 }
 
 /// A table cell outside any table-style context (tests).

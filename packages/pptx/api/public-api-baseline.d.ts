@@ -2365,10 +2365,10 @@ export interface TableElement {
     cols: number[];
     rows: TableRow[];
     rtl?: boolean;
+    odfRowHeights?: boolean;
 }
 export interface TableRow {
     height: number;
-    fixedHeight?: boolean;
     cells: TableCell[];
 }
 export interface TabStop {

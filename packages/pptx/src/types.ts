@@ -562,14 +562,15 @@ export interface TableElement {
   rows: TableRow[];
   /** `<a:tblPr rtl="1">` (ECMA-376 §21.1.3.13): right-to-left table — column 0 at the right edge. */
   rtl?: boolean;
+  /** Row heights come from ODF `style:row-height` / `style:min-row-height`
+   *  (OpenDocument 1.3 Part 3 §20.348) rather than DrawingML `a:tr@h`; the
+   *  renderer keeps its earlier row-growth rule for such a table. */
+  odfRowHeights?: boolean;
 }
 
 export interface TableRow {
   /** Row height in EMU */
   height: number;
-  /** ODF `style:row-height` (ODF 1.3 Part 3 §20.348): a fixed height rather
-   *  than a minimum. Never set for DrawingML `a:tr@h`. */
-  fixedHeight?: boolean;
   cells: TableCell[];
 }
 
