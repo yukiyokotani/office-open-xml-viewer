@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -166,5 +166,30 @@ test('fast tier loader refuses a named pipe as manifest or specimen without bloc
     assert.match(result.stdout, /not a regular file/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the corpus tools import without installed dependencies', () => {
+  // Copy the module and the relative modules it imports into a directory with
+  // no node_modules above it, then import it there.
+  const source = new URL('.', import.meta.url);
+  const target = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-standalone-'));
+  try {
+    const queue = ['corpus-features.mjs'];
+    const copied = new Set();
+    while (queue.length > 0) {
+      const name = queue.pop();
+      if (copied.has(name)) continue;
+      copied.add(name);
+      const text = readFileSync(new URL(name, source), 'utf8');
+      writeFileSync(join(target, name), text);
+      for (const [, relative] of text.matchAll(/from '\.\/([\w-]+\.mjs)'/g)) queue.push(relative);
+    }
+    const result = spawnSync(process.execPath, [
+      '--input-type=module', '-e', `await import(${JSON.stringify(join(target, 'corpus-features.mjs'))}); console.log('ok');`,
+    ], { encoding: 'utf8', timeout: 15000, cwd: target });
+    assert.equal(result.stdout.trim(), 'ok', result.stderr);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
   }
 });

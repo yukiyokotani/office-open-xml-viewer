@@ -144,7 +144,8 @@ VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base \
 `VRT_ALLOW_CORPUS_INPUT_CHANGES=1` admits only the copied specimens
 (`tests/visual/README.md`, "Added or changed public specimens"). When `$base`
 predates that allowance, bootstrap the harness first: copy
-`tests/visual/private-corpus.mjs`, `packages/*/tests/visual/visual.spec.ts`
+`tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
+`tests/visual/corpus-features.mjs`, `packages/*/tests/visual/visual.spec.ts`
 and `packages/*/tests/visual/fixture.html` into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
 
 The comparison reads the baseline images from the baseline worktree itself,

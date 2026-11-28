@@ -137,7 +137,7 @@ user decision covers is reported as unadjudicated, never as a pass.
 
 For the one-time bootstrap of a harness change against a baseline revision that
 predates it, copy only the allowlisted VRT harness files listed in
-`tests/visual/private-corpus.mjs` into the baseline worktree and set
+`tests/visual/private-corpus.mjs` (with `tests/visual/checked-read.mjs`) into the baseline worktree and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run.
 Renderer and parser changes remain forbidden.
 

@@ -16,7 +16,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { PNG } from 'pngjs';
+import { createHash } from 'node:crypto';
 import {
+  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
@@ -373,6 +375,7 @@ function inPackage(checkout, env, run) {
 function snapshot(checkout, revision, value = 7) {
   inPackage(checkout, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision }, () => {
     prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
+    beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
     assert.equal(captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(value), snapshot: true }), null);
     verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true });
   });
@@ -381,6 +384,7 @@ function snapshot(checkout, revision, value = 7) {
 function compare({ candidate, base, revision }, value = 7) {
   return inPackage(candidate, { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision }, () => {
     prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
+    beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
     const difference = captureOrCompareSelfVrtItem({
       ...DEMO, itemIndex: 0, actual: png(value), snapshot: false,
     });
@@ -396,15 +400,31 @@ test('the renderer is served only the input bytes its manifest records', () => {
       assert.throws(() => selfVrtInputBody({ corpus: 'demo', file: 'demo/unprepared.pptx' }), /was not prepared/);
       prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
       assert.equal(selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }).toString(), 'deck');
-      // A specimen replaced during capture is refused, so its image cannot be
-      // recorded for the input the manifest names.
+      // A public corpus serves the buffer preparation hashed, so a specimen
+      // replaced during capture cannot reach the renderer.
       writeFileSync('public/demo/deck.pptx', 'other');
-      assert.throws(
-        () => selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }),
-        /changed after its manifest recorded it/,
-      );
-      writeFileSync('public/demo/deck.pptx', 'deck');
       assert.equal(selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }).toString(), 'deck');
+    });
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a private corpus input is re-read and refused when it no longer has the prepared digest', () => {
+  const fixture = fastFixture();
+  try {
+    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
+      prepareSelfVrtCorpus({
+        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
+        selectionFiles: selectionFiles('private deck'),
+      });
+      const route = () => selfVrtInputBody({ corpus: 'private-fast', file: 'pptx/deck.pptx' });
+      assert.equal(route().toString(), 'private deck');
+      const path = 'public/private/pptx/deck.pptx';
+      writeFileSync(path, 'other');
+      assert.throws(route, /changed after its manifest recorded it/);
+      writeFileSync(path, 'private deck');
+      assert.equal(route().toString(), 'private deck');
     });
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
@@ -416,7 +436,7 @@ test('an item manifest requires its input to be prepared in this process', () =>
   try {
     inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
       assert.throws(
-        () => verifySelfVrtItemManifest({ ...DEMO, stem: 'demo/unprepared', itemCount: 1, snapshot: true }),
+        () => beginSelfVrtItems({ ...DEMO, stem: 'demo/unprepared', itemCount: 1, snapshot: true }),
         /was not prepared/,
       );
     });
@@ -517,6 +537,7 @@ test('bypass: a baseline checkout changed mid-run is caught at the next item', (
       { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision },
       () => {
         prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
+        beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
         writeFileSync(join(fixture.base, 'renderer.js'), 'export const version = 2;\n');
         assert.throws(
           () => captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: false }),
@@ -550,9 +571,17 @@ function fastFixture() {
   return fixture;
 }
 
-function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7 }) {
+function selectionFiles(content) {
+  return new Map([['pptx/deck.pptx', { unitCount: 4, units: [1, 3], sha256: createHash('sha256').update(content).digest('hex') }]]);
+}
+
+function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7, content = 'private deck' }) {
   return inPackage(checkout, env, () => {
-    prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest });
+    prepareSelfVrtCorpus({
+      ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest,
+      selectionFiles: selectionFiles(content),
+    });
+    beginSelfVrtItems({ ...FAST, itemCount: 4, snapshot, itemIndices: indices });
     const differences = indices.map((itemIndex) => captureOrCompareSelfVrtItem({
       ...FAST, itemIndex, actual: png(value), snapshot,
     })).filter(Boolean);
@@ -574,10 +603,13 @@ test('images captured for an input are refused after the input is replaced', () 
     // Snapshot preparation runs again for the replaced input, but its images are
     // not recaptured or re-verified; the comparison must not accept them.
     inPackage(fixture.base, baseEnv, () => {
-      prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a' });
+      prepareSelfVrtCorpus({
+        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
+        selectionFiles: selectionFiles('replaced deck'),
+      });
     });
     assert.throws(
-      () => fastRun(fixture.candidate, compareEnv, { snapshot: false }),
+      () => fastRun(fixture.candidate, compareEnv, { snapshot: false, content: 'replaced deck' }),
       /previous-renderer manifest mismatch/,
     );
   } finally {
@@ -612,14 +644,17 @@ test('fast tier and full corpora refuse each other\'s selection arguments', () =
       assert.throws(() => prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot: true }),
         /requires a selection digest/);
       assert.throws(() => prepareSelfVrtCorpus({
+        ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
+      }), /requires the selection's per-file digests/);
+      assert.throws(() => prepareSelfVrtCorpus({
         ...FAST, corpus: 'private', files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
       }), /does not take a selection digest/);
-      assert.throws(() => verifySelfVrtItemManifest({ ...FAST, itemCount: 4, snapshot: true }),
+      assert.throws(() => beginSelfVrtItems({ ...FAST, itemCount: 4, snapshot: true }),
         /requires the selected item indices/);
-      assert.throws(() => verifySelfVrtItemManifest({
+      assert.throws(() => beginSelfVrtItems({
         ...FAST, itemCount: 4, snapshot: true, itemIndices: [3, 1],
       }), /invalid slide selection/);
-      assert.throws(() => verifySelfVrtItemManifest({
+      assert.throws(() => beginSelfVrtItems({
         ...FAST, corpus: 'private', itemCount: 4, snapshot: true, itemIndices: [1],
       }), /does not take item indices/);
     });
@@ -779,7 +814,7 @@ test('a non-regular or symlinked candidate input is rejected without being read'
 
 test('a prepared input replaced by a named pipe is refused without blocking', (t) => {
   const { root, first } = baselineRepository();
-  const rel = 'packages/pptx/public/corpus';
+  const rel = 'packages/pptx/public/private/pptx';
   const module = new URL('./private-corpus.mjs', import.meta.url).href;
   try {
     mkdirSync(join(root, rel), { recursive: true });
@@ -797,11 +832,11 @@ test('a prepared input replaced by a named pipe is refused without blocking', (t
       import { unlinkSync } from 'node:fs';
       import { prepareSelfVrtCorpus, selfVrtInputBody } from ${JSON.stringify(module)};
       process.chdir(${JSON.stringify(join(root, 'packages/pptx'))});
-      prepareSelfVrtCorpus({ corpus: 'corpus', format: 'pptx', files: ['corpus/deck.pptx'], snapshot: true });
-      unlinkSync('public/corpus/deck.pptx');
-      execFileSync('mkfifo', ['public/corpus/deck.pptx']);
+      prepareSelfVrtCorpus({ corpus: 'private', format: 'pptx', files: ['pptx/deck.pptx'], snapshot: true });
+      unlinkSync('public/private/pptx/deck.pptx');
+      execFileSync('mkfifo', ['public/private/pptx/deck.pptx']);
       try {
-        selfVrtInputBody({ corpus: 'corpus', file: 'corpus/deck.pptx' });
+        selfVrtInputBody({ corpus: 'private', file: 'pptx/deck.pptx' });
         console.log('accepted');
       } catch (error) { console.log(error.message); }
     `], {
@@ -819,5 +854,93 @@ test('a prepared input replaced by a named pipe is refused without blocking', (t
     assert.match(result.stdout, /not a regular file/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a snapshot image swapped between capture and finalization is refused', () => {
+  const fixture = selfVrtFixture();
+  try {
+    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
+      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
+      beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: true });
+      captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: true });
+      writeFileSync('tests/visual/baseline/demo/deck/slide-1.png', png(9));
+      assert.throws(
+        () => verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: true }),
+        /snapshot image changed after capture/,
+      );
+      assert.equal(existsSync('tests/visual/baseline/demo/deck/manifest.json'), false);
+    });
+    // The failed run left no manifest, so no comparison can accept the swap.
+    assert.throws(() => compare(fixture, 9), /missing previous-renderer manifest/);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a baseline manifest and image substituted mid-comparison are not trusted, restored or not', () => {
+  const fixture = selfVrtFixture();
+  try {
+    snapshot(fixture.base, fixture.revision);
+    const directory = join(fixture.base, 'packages/pptx/tests/visual/baseline/demo/deck');
+    const manifest = readFileSync(join(directory, 'manifest.json'), 'utf8');
+    const image = readFileSync(join(directory, 'slide-1.png'));
+    inPackage(
+      fixture.candidate,
+      { VRT_BASELINE_CHECKOUT: fixture.base, VRT_BASELINE_REVISION: fixture.revision },
+      () => {
+        prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: false });
+        beginSelfVrtItems({ ...DEMO, itemCount: 1, snapshot: false });
+        // A consistent forgery: a different image and a manifest that records it.
+        const forged = png(8);
+        const record = JSON.parse(manifest);
+        record.items[0].sha256 = createHash('sha256').update(forged).digest('hex');
+        writeFileSync(join(directory, 'slide-1.png'), forged);
+        writeFileSync(join(directory, 'manifest.json'), JSON.stringify(record));
+        assert.throws(
+          () => captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: forged, snapshot: false }),
+          /changed since its snapshot/,
+        );
+        // Restoring the files afterwards does not erase the observed tampering
+        // from this run's validated record, and the genuine image still matches it.
+        writeFileSync(join(directory, 'slide-1.png'), image);
+        writeFileSync(join(directory, 'manifest.json'), manifest);
+        assert.equal(
+          captureOrCompareSelfVrtItem({ ...DEMO, itemIndex: 0, actual: png(7), snapshot: false }),
+          null,
+        );
+        verifySelfVrtItemManifest({ ...DEMO, itemCount: 1, snapshot: false });
+      },
+    );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a specimen replaced between selection load and preparation is refused, with or without selected items', () => {
+  const fixture = fastFixture();
+  try {
+    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
+      for (const units of [[1, 3], []]) {
+        const loaded = selectionFiles('private deck');
+        loaded.get('pptx/deck.pptx').units = units;
+        // The loader validated 'private deck'; the file is replaced before preparation.
+        writeFileSync('public/private/pptx/deck.pptx', 'replaced deck');
+        assert.throws(
+          () => prepareSelfVrtCorpus({
+            ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
+            selectionFiles: loaded,
+          }),
+          /changed between the fast-tier selection and corpus preparation/,
+        );
+        writeFileSync('public/private/pptx/deck.pptx', 'private deck');
+        prepareSelfVrtCorpus({
+          ...FAST, files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'selection-a',
+          selectionFiles: loaded,
+        });
+      }
+    });
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
   }
 });

@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
+  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
@@ -280,6 +281,9 @@ function describeSelfRegression(
         expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
         const pageCount = Number(await page.evaluate(() => document.body.dataset.pageCount));
         expect(pageCount, `${stem} must report its complete page count`).toBeGreaterThan(0);
+        beginSelfVrtItems({
+          corpus, format: 'docx', stem, itemKind: 'page', itemCount: pageCount, snapshot: SNAPSHOT,
+        });
         const differences: string[] = [];
         for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
           if (pageIndex > 0) {

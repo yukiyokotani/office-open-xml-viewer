@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
+  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
@@ -231,7 +232,7 @@ type SelfVrtCorpus = 'demo' | 'corpus' | 'private' | 'private-fast';
 // slides that add structural XML features, out of the file's slide count.
 type FastTierSelection = {
   digest: string;
-  files: Map<string, { unitCount: number; units: number[] }>;
+  files: Map<string, { unitCount: number; units: number[]; sha256: string }>;
 };
 
 // Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
@@ -305,6 +306,10 @@ function describeSelfRegression(
           );
         }
         const slideIndices = selected?.units ?? Array.from({ length: slideCount }, (_, index) => index);
+        beginSelfVrtItems({
+          corpus, format: 'pptx', stem, itemKind: 'slide', itemCount: slideCount, snapshot: SNAPSHOT,
+          ...(selected ? { itemIndices: selected.units } : {}),
+        });
         const differences: string[] = [];
         for (const slideIndex of slideIndices) {
           if (slideIndex !== firstSlide) {
@@ -355,6 +360,7 @@ if (process.env.VRT_PRIVATE_CORPUS === '1') {
   prepareSelfVrtCorpus({
     corpus: PPTX_PRIVATE_SELF_VRT, format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
     selectionDigest: PPTX_FAST_SELECTION?.digest,
+    selectionFiles: PPTX_FAST_SELECTION?.files,
   });
 }
 
@@ -393,6 +399,9 @@ test.describe('demo corpus scroll viewer self regression', () => {
       expect(inputServed(), `${stem}: the verified input route never served the document`).toBeGreaterThan(0);
       const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
       expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
+      beginSelfVrtItems({
+        corpus, format: 'pptx', stem, itemKind: 'slide', itemCount: slideCount, snapshot: SNAPSHOT,
+      });
       const differences: string[] = [];
       for (let slideIndex = 0; slideIndex < slideCount; slideIndex++) {
         const dataUrl = await page.evaluate((index) => (globalThis as unknown as {

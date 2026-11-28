@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import {
+  beginSelfVrtItems,
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
@@ -214,7 +215,7 @@ type SelfVrtCorpus = 'demo' | 'corpus' | 'private' | 'private-fast';
 // sheets that add structural XML features, out of the file's sheet count.
 type FastTierSelection = {
   digest: string;
-  files: Map<string, { unitCount: number; units: number[] }>;
+  files: Map<string, { unitCount: number; units: number[]; sha256: string }>;
 };
 
 // Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
@@ -289,6 +290,10 @@ function describeSelfRegression(
           );
         }
         const sheetIndices = selected?.units ?? Array.from({ length: sheetCount }, (_, index) => index);
+        beginSelfVrtItems({
+          corpus, format: 'xlsx', stem, itemKind: 'sheet', itemCount: sheetCount, snapshot: SNAPSHOT,
+          ...(selected ? { itemIndices: selected.units } : {}),
+        });
         const differences: string[] = [];
         for (const sheetIndex of sheetIndices) {
           if (sheetIndex !== firstSheet) {
@@ -340,6 +345,7 @@ if (process.env.VRT_PRIVATE_CORPUS === '1') {
   prepareSelfVrtCorpus({
     corpus: XLSX_PRIVATE_SELF_VRT, format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
     selectionDigest: XLSX_FAST_SELECTION?.digest,
+    selectionFiles: XLSX_FAST_SELECTION?.files,
   });
 }
 

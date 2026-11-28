@@ -1,12 +1,7 @@
 import {
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
   readdirSync,
   realpathSync,
   statSync,
@@ -17,25 +12,9 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
+import { readRegularFile } from './checked-read.mjs';
 
 const SCHEMA_VERSION = 2;
-
-/** Read a whole regular file through one descriptor. The open is non-blocking
- * and refuses a final symlink, and the descriptor is checked with fstat before
- * any read, so a path that turned into a named pipe or device after an earlier
- * check cannot block the worker or be read. */
-export function readRegularFile(path) {
-  const fd = openSync(
-    path,
-    constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
-  );
-  try {
-    if (!fstatSync(fd).isFile()) throw new Error(`self-VRT input is not a regular file: ${path}`);
-    return readFileSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
 
 // Bootstrap-only exception for running the current VRT harness against an old
 // renderer commit that predates the harness. No renderer/parser source is
@@ -63,6 +42,7 @@ const VRT_HARNESS_PATHS = new Set([
   'packages/pptx/vite.config.ts',
   'packages/pptx/tests/visual/visual.spec.ts',
   'tests/visual/private-corpus.mjs',
+  'tests/visual/checked-read.mjs',
   'tests/visual/corpus-features.mjs',
   // Only for the fixture font packages; see lockfileBootstrapDiffViolations.
   'pnpm-lock.yaml',
@@ -543,16 +523,34 @@ function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
-// SHA-256 of each input as prepareSelfVrtCorpus recorded it in this process.
-// selfVrtInputBody serves the renderer only bytes with that digest, so the
-// images captured or compared in this process belong to the manifest's input
-// even when the file on disk is replaced during the run.
+// Each input is read once by prepareSelfVrtCorpus, and that buffer is what the
+// manifest's SHA-256 describes. Public corpora (demo, demo-scroll, corpus) are
+// small, so their buffer is kept and later served to the renderer as is. A
+// private corpus can be large, so only the digest is kept there and the route
+// re-reads the file through the checked reader and serves that buffer only when
+// its digest matches. Either way the images captured or compared in this
+// process belong to the manifest's input even when the file on disk is
+// replaced during the run.
 const preparedInputs = new Map();
+const BODY_CACHED_CORPORA = new Set(['demo', 'demo-scroll', 'corpus']);
 
-function corpusFiles(corpus, files) {
+function corpusFiles(corpus, files, selectionFiles) {
   return files.map((name) => {
-    const digest = sha256(readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`));
-    preparedInputs.set(`${corpus}\0${name}`, digest);
+    const bytes = readRegularFile(`public/${selfVrtInputPath({ corpus, file: name })}`);
+    const digest = sha256(bytes);
+    if (selectionFiles) {
+      const selected = selectionFiles.get(name)?.sha256;
+      if (selected !== digest) {
+        throw new Error(
+          `${name} changed between the fast-tier selection and corpus preparation `
+          + `(selection ${selected}, prepared ${digest}); regenerate the selection`,
+        );
+      }
+    }
+    preparedInputs.set(`${corpus}\0${name}`, {
+      digest,
+      bytes: BODY_CACHED_CORPORA.has(corpus) ? bytes : null,
+    });
     return { name, sha256: digest };
   });
 }
@@ -562,11 +560,12 @@ function corpusFiles(corpus, files) {
  * Throws when the file no longer has the digest its manifest recorded.
  * @param {{ corpus: string, file: string }} options */
 export function selfVrtInputBody({ corpus, file }) {
-  const expected = preparedInputs.get(`${corpus}\0${file}`);
-  if (!expected) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
+  const prepared = preparedInputs.get(`${corpus}\0${file}`);
+  if (!prepared) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
+  if (prepared.bytes) return prepared.bytes;
   const path = `public/${selfVrtInputPath({ corpus, file })}`;
   const body = readRegularFile(path);
-  if (sha256(body) !== expected) {
+  if (sha256(body) !== prepared.digest) {
     throw new Error(`self-VRT input ${path} changed after its manifest recorded it`);
   }
   return body;
@@ -591,9 +590,14 @@ function assertExactManifest(actual, expected, path) {
  * merge-base revision. This prevents a candidate server or unrelated old
  * snapshot from silently becoming its own regression oracle. A subset corpus
  * (`private-fast`) is additionally bound to its selection manifest digest.
+ * `selectionFiles` (private-fast) carries the digest the selection loader
+ * validated for each file; every prepared input, including a file without any
+ * selected item, must hash to it.
  * @param {{ corpus: string, format: string, files: string[], snapshot: boolean,
- *   selectionDigest?: string }} options */
-export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectionDigest }) {
+ *   selectionDigest?: string, selectionFiles?: Map<string, { sha256: string }> }} options */
+export function prepareSelfVrtCorpus({
+  corpus, format, files, snapshot, selectionDigest, selectionFiles,
+}) {
   if (files.length === 0) {
     throw new Error(`${format} ${corpus} corpus is empty; zero-test self-VRT is not coverage`);
   }
@@ -602,6 +606,11 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
     throw new Error(selection
       ? `${corpus} self-VRT requires a selection digest`
       : `${corpus} self-VRT does not take a selection digest`);
+  }
+  if (Boolean(selection) !== Boolean(selectionFiles)) {
+    throw new Error(selection
+      ? `${corpus} self-VRT requires the selection's per-file digests`
+      : `${corpus} self-VRT does not take per-file selection digests`);
   }
   // Each corpus manifest is read afresh; a record from an earlier prepare must
   // not stand in for it.
@@ -615,7 +624,7 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
     ...(selection ? { selectionDigest } : {}),
-    files: corpusFiles(corpus, files),
+    files: corpusFiles(corpus, files, selectionFiles),
   };
   if (snapshot) {
     const copies = snapshotCorpusInputs(location.checkout);
@@ -685,22 +694,13 @@ function sortedItems(files, itemKind) {
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
 
-/** Verify that the baseline contains exactly the complete page/sheet/slide set
- * reported by the previous renderer (for a subset corpus, exactly the selected
- * `itemIndices`), each image unchanged since that checkout's snapshot run
- * recorded its SHA-256. An item-count reduction, a stale extra PNG or a
- * replaced image is therefore a hard failure.
- * @param {{ corpus: string, format: string, stem: string, itemKind: string,
- *   itemCount: number, snapshot: boolean, itemIndices?: number[] }} options */
-export function verifySelfVrtItemManifest({
-  corpus,
-  format,
-  stem,
-  itemKind,
-  itemCount,
-  snapshot,
-  itemIndices,
-}) {
+// Per document and run: the plan validated by beginSelfVrtItems, kept so that
+// capture, comparison and finalization all use that one object (a snapshot's
+// digests of the captured buffers; a comparison's single read of the baseline
+// manifest) instead of reading the disk again.
+const itemStates = new Map();
+
+function itemPlan({ corpus, format, stem, itemKind, itemCount, snapshot, itemIndices }) {
   const { selection, outputPrefix } = corpusConfig(corpus);
   if (Boolean(selection) !== Boolean(itemIndices)) {
     throw new Error(selection
@@ -713,47 +713,77 @@ export function verifySelfVrtItemManifest({
     throw new Error(`invalid ${itemKind} selection for ${stem}: ${JSON.stringify(indices)} of ${itemCount}`);
   }
   const inputName = `${stem}.${format}`;
-  const inputDigest = preparedInputs.get(`${corpus}\0${inputName}`);
-  if (!inputDigest) throw new Error(`self-VRT input ${inputName} was not prepared for the ${corpus} corpus`);
+  const prepared = preparedInputs.get(`${corpus}\0${inputName}`);
+  if (!prepared) throw new Error(`self-VRT input ${inputName} was not prepared for the ${corpus} corpus`);
   const location = baselineLocation({ snapshot });
   const directory = join(location.directory, `${outputPrefix}${stem}`);
-  const path = join(directory, 'manifest.json');
-  const names = indices.map((index) => `${itemKind}-${index + 1}.png`);
-  const header = {
-    schemaVersion: SCHEMA_VERSION,
-    format,
-    baselineRevision: baselineRevision(snapshot),
-    checkout: location.checkout,
-    input: { name: inputName, sha256: inputDigest },
-    itemKind,
-    itemCount,
+  return {
+    location,
+    directory,
+    path: join(directory, 'manifest.json'),
+    names: indices.map((index) => `${itemKind}-${index + 1}.png`),
+    header: {
+      schemaVersion: SCHEMA_VERSION,
+      format,
+      baselineRevision: baselineRevision(snapshot),
+      checkout: location.checkout,
+      input: { name: inputName, sha256: prepared.digest },
+      itemKind,
+      itemCount,
+    },
   };
+}
+
+/** Call once per document, after its item count is known and before the first
+ * item is captured or compared.
+ *
+ * Snapshot: prepares the output directory (removing stale images from an
+ * earlier snapshot) and starts recording the digest of every captured buffer.
+ * Comparison: reads the baseline's per-document manifest exactly once, checks
+ * its header (input digest, checkout, revision), its item set and the
+ * baseline directory's contents, and keeps the validated hashes; every image
+ * comparison then derives from this object. The baseline contains exactly the
+ * complete page/sheet/slide set the previous renderer reported (for a subset
+ * corpus, exactly the selected `itemIndices`), so an item-count reduction, a
+ * stale extra PNG or a replaced image is a hard failure.
+ * @param {{ corpus: string, format: string, stem: string, itemKind: string,
+ *   itemCount: number, snapshot: boolean, itemIndices?: number[] }} options */
+export function beginSelfVrtItems(options) {
+  const { corpus, stem, itemKind, snapshot } = options;
+  const plan = itemPlan(options);
+  const { location, directory, path, names, header } = plan;
+  const key = `${corpus}\0${stem}`;
   if (snapshot) {
+    mkdirSync(directory, { recursive: true });
     // A previous snapshot in this checkout may have rendered more items.
     for (const stale of sortedItems(readdirSync(directory), itemKind)) {
       if (!names.includes(stale)) unlinkSync(join(directory, stale));
     }
-    const present = sortedItems(readdirSync(directory), itemKind);
-    if (JSON.stringify(present) !== JSON.stringify(names)) {
-      throw new Error(
-        `snapshot item set mismatch at ${directory}\n`
-        + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
-      );
-    }
-    const items = names.map((name) => ({ name, sha256: sha256(readRegularFile(join(directory, name))) }));
-    writeFileSync(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
+    itemStates.set(key, { snapshot, names, header, digests: new Map() });
     return;
   }
   const recorded = readBaselineJson(location, path);
   const { items: recordedItems, ...recordedHeader } = recorded;
   assertExactManifest(recordedHeader, header, path);
   if (!Array.isArray(recordedItems)
-    || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)) {
+    || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)
+    || recordedItems.some((item) => typeof item?.sha256 !== 'string')) {
     throw new Error(
       `previous-renderer item set mismatch at ${path}\n`
       + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(recordedItems)}`,
     );
   }
+  assertBaselineItemSet({ location, directory, itemKind, names });
+  itemStates.set(key, {
+    snapshot,
+    names,
+    header,
+    expected: new Map(recordedItems.map((item) => [item.name, item.sha256])),
+    compared: new Set(),
+  });
+}
+
+function assertBaselineItemSet({ location, directory, itemKind, names }) {
   const verifiedDirectory = verifiedBaselinePath(location, directory);
   const actualItems = sortedItems(verifiedDirectory ? readdirSync(verifiedDirectory) : [], itemKind);
   if (JSON.stringify(actualItems) !== JSON.stringify(names)) {
@@ -762,18 +792,59 @@ export function verifySelfVrtItemManifest({
       + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(actualItems)}`,
     );
   }
-  for (const { name, sha256: expected } of recordedItems) {
-    const verified = verifiedBaselinePath(location, join(directory, name));
-    if (!verified || sha256(readRegularFile(verified)) !== expected) {
-      throw new Error(`previous-renderer image changed since its snapshot: ${join(directory, name)}`);
-    }
+}
+
+/** Finish a document's items. Same options as beginSelfVrtItems, which must
+ * have run first. Snapshot: every item must have been captured, the file
+ * written for it must still be the buffer that was captured, and the manifest
+ * records the captured buffers' digests. Comparison: every item must have been
+ * compared against the manifest beginSelfVrtItems validated; the baseline's
+ * item set is checked again, and no image content is read a second time. */
+export function verifySelfVrtItemManifest(options) {
+  const { corpus, stem, itemKind, snapshot } = options;
+  const key = `${corpus}\0${stem}`;
+  const state = itemStates.get(key);
+  if (!state || state.snapshot !== snapshot) {
+    throw new Error(`self-VRT items of ${stem} were not begun for this run`);
   }
+  const plan = itemPlan(options);
+  const { location, directory, path, names, header } = plan;
+  if (JSON.stringify(header) !== JSON.stringify(state.header)
+    || JSON.stringify(names) !== JSON.stringify(state.names)) {
+    throw new Error(`self-VRT items of ${stem} changed since they were begun`);
+  }
+  itemStates.delete(key);
+  if (snapshot) {
+    const present = sortedItems(readdirSync(directory), itemKind);
+    if (JSON.stringify(present) !== JSON.stringify(names)) {
+      throw new Error(
+        `snapshot item set mismatch at ${directory}\n`
+        + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
+      );
+    }
+    const items = names.map((name) => {
+      const digest = state.digests.get(name);
+      if (!digest) throw new Error(`snapshot item ${name} of ${stem} was never captured`);
+      if (sha256(readRegularFile(join(directory, name))) !== digest) {
+        throw new Error(`snapshot image changed after capture: ${join(directory, name)}`);
+      }
+      return { name, sha256: digest };
+    });
+    writeFileSync(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
+    return;
+  }
+  for (const name of names) {
+    if (!state.compared.has(name)) throw new Error(`${stem} ${name} was never compared`);
+  }
+  assertBaselineItemSet({ location, directory, itemKind, names });
 }
 
 /** Persist the candidate artifact and return a diagnostic instead of throwing,
  * so one changed item cannot prevent later items in the same document from
- * being rendered and compared. The baseline image must match the SHA-256 its
- * snapshot run recorded. */
+ * being rendered and compared. The baseline image is read once; its SHA-256
+ * must equal the one in the manifest beginSelfVrtItems validated, and the
+ * pixel comparison uses that same buffer. Snapshot runs record the digest of
+ * the captured buffer. */
 export function captureOrCompareSelfVrtItem({
   corpus,
   stem,
@@ -784,24 +855,27 @@ export function captureOrCompareSelfVrtItem({
 }) {
   const key = `${itemKind}-${itemIndex + 1}.png`;
   const { outputPrefix } = corpusConfig(corpus);
+  const state = itemStates.get(`${corpus}\0${stem}`);
+  if (!state || state.snapshot !== snapshot) {
+    throw new Error(`self-VRT items of ${stem} were not begun before capture`);
+  }
   const outputDirectory = `tests/visual/${snapshot ? 'baseline' : 'screenshots'}/${outputPrefix}${stem}`;
   mkdirSync(outputDirectory, { recursive: true });
   writeFileSync(`${outputDirectory}/${key}`, actual);
-  if (snapshot) return null;
+  if (snapshot) {
+    state.digests.set(key, sha256(actual));
+    return null;
+  }
   const location = baselineLocation();
-  const directory = join(location.directory, `${outputPrefix}${stem}`);
-  const manifestPath = join(directory, 'manifest.json');
-  const recorded = readBaselineJson(location, manifestPath);
-  const expected = Array.isArray(recorded.items)
-    ? recorded.items.find((item) => item?.name === key)?.sha256
-    : undefined;
-  const baselinePath = join(directory, key);
+  const baselinePath = join(location.directory, `${outputPrefix}${stem}`, key);
+  const expected = state.expected.get(key);
   const verified = verifiedBaselinePath(location, baselinePath);
   if (!verified || !expected) return `missing previous-renderer baseline: ${baselinePath}`;
   const baseline = readRegularFile(verified);
   if (sha256(baseline) !== expected) {
     throw new Error(`previous-renderer image changed since its snapshot: ${baselinePath}`);
   }
+  state.compared.add(key);
   return pngPixelsEqual(actual, baseline)
     ? null
     : `${stem} ${key} differs from the previous renderer`;
