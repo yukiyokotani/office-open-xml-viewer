@@ -39,6 +39,7 @@ import type {
   DrawingMLCollisionRegistrySnapshotPt,
   LayoutServices,
   FloatRegistryEntryPt,
+  LayoutRect,
   FloatRegistrySnapshotPt,
   DrawingMLCollisionEntryPt,
   SectionFlow,
@@ -108,8 +109,12 @@ import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitCon
 import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import {
   bodyTableAcquisitionState,
+  uprightBlockPaginates,
+  uprightDrawingLimits,
+  bodyUprightBlockLookAhead,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
+  planBodyUprightBlocks,
 } from './body-table-measurement.js';
 import {
   finishOwnerHostLayout,
@@ -146,11 +151,28 @@ import {
 } from './table-pagination.js';
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorCollisionBlockers, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
-import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
+import { WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_NO_GRID_PT, WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
+import type { UprightDrawingPin } from './body-layout-kernel.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
+import {
+  addUprightBlockBox,
+  addUprightBlockExclusion,
+  addUprightPageDrawing,
+  addUprightTableBox,
+  emptyUprightBlockPageIndex,
+  moveUprightPageDrawingsBelowTableBox,
+  uprightRegistrationTableBox,
+  uprightPrecedingDrawings,
+  uprightBlockExclusionsAhead,
+  uprightPageDrawingsNear,
+  type UprightBlockPageIndex,
+  type UprightBlockExclusion,
+  type UprightBlockRegistration,
+  type UprightTableBoxVersions,
+} from './upright-block-index.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
@@ -591,6 +613,7 @@ function acquireBodyParagraphAtLocation(
     boundary: null,
   }),
   retainedAnchorCollisions?: readonly DrawingMLCollisionEntryPt[],
+  plannedUprightTableBoxes?: readonly LayoutRect[],
 ) {
   const edges = bodyParagraphBorderEdgesFor(paragraph) ?? {
     top: 'top' as const,
@@ -632,6 +655,24 @@ function acquireBodyParagraphAtLocation(
       environment,
       exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
+      // `word-vertical-section-upright-block-table`: a wrapped drawing lies
+      // below the upright tables in place when its paragraph is laid out
+      // (AnchorReflowMoves).
+      // In a section that lays block tables out upright every body
+      // paragraph places its drawings this way, also where no table is in
+      // place yet, as the page-start prescan does (prescanBodyPageAnchors).
+      ...(source.path.length === 1
+        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes
+          || (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)))
+        && paragraph.runs.some((run) => run.type === 'anchorHost')
+        ? {
+            uprightTables: {
+              index: state.uprightBlockIndex,
+              ...(plannedUprightTableBoxes ? { planned: plannedUprightTableBoxes } : {}),
+              clearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
+            },
+          }
+        : {}),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
       trailingExtentPt: Math.max(
@@ -650,6 +691,9 @@ function acquireBodyParagraphAtLocation(
       hostFlowPageTranslationPt: BODY_HOST_FLOW_PAGE_TRANSLATION,
       ...(state.frozenAnchorFrames && state.frozenAnchorFrames.size > 0
         ? { frozenAnchorFrames: state.frozenAnchorFrames }
+        : {}),
+      ...(source.path.length === 1 && state.pinnedAnchorFrames && state.pinnedAnchorFrames.size > 0
+        ? { pinnedAnchorFrames: state.pinnedAnchorFrames }
         : {}),
     },
     continuation.boundary === null
@@ -1792,6 +1836,9 @@ function measureBodyParagraphEntry(
     floats: [...state.floats],
     pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
   };
+  addUprightBlockExclusionFloats(candidate, request.location, paragraph, request.besideUprightBlocks);
+  const plannedTableBox = request.besideUprightBlocks ? uprightRegistrationTableBox(request.besideUprightBlocks) : null;
+  const plannedTableBoxes = plannedTableBox ? Object.freeze([plannedTableBox.box]) : undefined;
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   const publicFloats =
     request.continuation.boundary === null
@@ -1812,6 +1859,7 @@ function measureBodyParagraphEntry(
     request.suppressSpaceBefore,
     request.continuation,
     sessionState.drawingCollisionRegistry.entries,
+    plannedTableBoxes,
   );
   const { measured, layout } = acquired;
   const markOnLineGrid =
@@ -1824,8 +1872,14 @@ function measureBodyParagraphEntry(
   // public wrapNone run therefore has no collision entry) until the Series
   // B/C bridge removal migrates those runs to the retained OOXML contract.
   const collisionEntries = ownedParagraphAnchorCollisions(layout);
+  // `word-vertical-section-upright-block-table`: the drawings whose
+  // exclusion was registered when the page started (the registry already
+  // holds them), with the geometry this acquisition gives them.
+  const uprightDrawingPins = collisionEntries.length === 0 || !state.registeredDrawings?.size
+    ? [] : registeredDrawingPins(state.registeredDrawings, layout, collisionEntries);
   return Object.freeze({
     layout,
+    ...(uprightDrawingPins.length > 0 ? { uprightDrawingPins: Object.freeze(uprightDrawingPins) } : {}),
     blockExtentPt: layout.advancePt,
     fragmentation: measured.markOnly
       ? Object.freeze({ kind: 'indivisible' as const })
@@ -2175,9 +2229,79 @@ function acquireSelectedNoteSeparatorBand(
   });
 }
 
+/** The location at which the flow reaches a block after the keep set
+ * before it: `request.precedingBlockExtentPt` further along the block axis. */
+function locationAfterKeepSet(
+  request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+): BodyAcquisitionLocation {
+  const precedingPt = request.precedingBlockExtentPt ?? 0;
+  if (precedingPt === 0) return request.location;
+  const reachedYPt = request.location.cursorPt.yPt + precedingPt;
+  const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
+  return Object.freeze({
+    ...request.location,
+    cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
+    availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
+  });
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: the wrapped drawings a
+ * keepNext paragraph after the first of its keep set anchors
+ * (uprightPrecedingDrawings), resolved where the keep set places it: past
+ * the paragraphs before it, with its own lines, so a drawing positioned
+ * relative to its paragraph, line or character lies where the placement
+ * of the table after the keep set meets it. `layout` is the paragraph as
+ * measured for the keep set's extents, at the keep set's start; where the
+ * paragraph starts further on and anchors drawings in an upright vertical
+ * section, it is acquired again there for them.
+ */
+function keptParagraphDrawings(
+  context: BodySessionDependencies,
+  request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+  paragraph: LayoutParagraphBlock,
+  layout: ParagraphLayout,
+  publicFloats: readonly FloatRegistryEntryPt[],
+): LayoutRect[] {
+  const { services, state, sessionState, publicAnchorBridge } = context;
+  // Only an upright block table reads them (bodyUprightBlockLookAhead).
+  if (layout.drawings.length === 0 || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return [];
+  if (!(request.precedingBlockExtentPt! > 0)) {
+    return uprightPrecedingDrawings(
+      [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
+    );
+  }
+  const reached = locationAfterKeepSet(request);
+  const candidate: BodyAcquisitionState = {
+    ...state,
+    floats: [...state.floats],
+    pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
+    retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
+  };
+  applyBodyAcquisitionLocationTo(services, candidate, reached);
+  addUprightBlockExclusionFloats(candidate, reached, paragraph);
+  const reachedFloats = acquirePublicParagraphFloats(
+    sessionState, publicAnchorBridge, paragraph, request.input.source, candidate,
+  );
+  const placed = acquireBodyParagraphAtLocation(
+    candidate,
+    paragraph,
+    request.input.source,
+    reached,
+    request.availableInlineExtentPt,
+    false,
+    undefined,
+    sessionState.drawingCollisionRegistry.entries,
+  ).layout;
+  return uprightPrecedingDrawings(
+    [...reachedFloats, ...retainedBodyParagraphFloatEntries(sessionState, placed)], placed,
+  );
+}
+
 function measureFollowingBodyBlock(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+  tableOperations: Parameters<typeof measureBodyTableEntry>[2],
 ): ReturnType<NonNullable<BodyLayoutSession['measureFollowingBlock']>> {
   const {
     dependencies,
@@ -2192,8 +2316,58 @@ function measureFollowingBodyBlock(
     retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
   };
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
+  if (request.input.kind !== 'paragraph' && candidate.verticalPhys
+    && uprightBlockPaginates(candidate.verticalPhys)) {
+    // `word-vertical-section-upright-block-table`: what an upright block
+    // table (a table, or the tables of one logical table) needs of the block
+    // axis to start after the keep set before it. It adds no flow advance,
+    // so it needs none of the block extent, here or on a fresh page; but its
+    // placement can start a fresh region (too wide for the block extent
+    // left, too tall for the inline extent below its start, or moved past
+    // the page to clear an earlier table), and the keep set then has to
+    // start there with it. The placement itself decides
+    // (bodyUprightBlockLookAhead).
+    // The block extent left after the keep set and the notes it refers to,
+    // which the placement after them has (the paginator takes their reserve
+    // from the table's location).
+    const afterKeepSet = locationAfterKeepSet(request);
+    const reservePt = request.precedingFootnoteReservePt ?? 0;
+    const reached = reservePt > 0 ? Object.freeze({
+      ...afterKeepSet,
+      availableBounds: Object.freeze({
+        ...afterKeepSet.availableBounds,
+        heightPt: Math.max(0, afterKeepSet.availableBounds.heightPt - reservePt),
+      }),
+    }) : afterKeepSet;
+    const upright = bodyUprightBlockLookAhead(context, {
+      input: request.input,
+      location: reached,
+      availableInlineExtentPt: request.availableInlineExtentPt,
+      availableBlockExtentPt: reached.availableBounds.heightPt,
+      freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
+      pageHasContent: true,
+      ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
+      ...(request.precedingDrawings ? { precedingDrawings: request.precedingDrawings } : {}),
+    }, tableOperations);
+    if (upright) {
+      return Object.freeze({
+        fullExtentPt: 0,
+        leadContentExtentPt: 0,
+        ...(upright.startsHere ? {} : { startsFreshRegion: true as const }),
+        ...(upright.blockEndPt === undefined ? {} : { uprightBlockEndPt: upright.blockEndPt }),
+        fullFootnoteReferenceIds: upright.footnoteReferenceIds,
+        leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
+          ...upright.layout,
+          rows: upright.layout.rows.slice(0, 1),
+        }),
+      });
+    }
+  }
   if (request.input.kind === 'adjacent-table-group') {
-    const records = computeAdjacentTablePtLayouts(candidate, request.input.tables.map((tableInput) => {
+    // A logical table of a vertical section is upright, as when it is
+    // measured (body-table-measurement.ts measureUprightTable).
+    const groupState = candidate.verticalPhys ? { ...candidate, uprightPhysicalTable: true } : candidate;
+    const records = computeAdjacentTablePtLayouts(groupState, request.input.tables.map((tableInput) => {
       const table = sourceElement(dependencies.source, tableInput.source);
       if (table.type !== 'table') throw new Error('Following table source kind mismatch');
       return { table, sourceIndex: tableInput.source.path[0]! };
@@ -2243,6 +2417,12 @@ function measureFollowingBodyBlock(
   const element = sourceElement(dependencies.source, request.input.source);
   if (request.input.kind === 'paragraph') {
     if (element.type !== 'paragraph') throw new Error('Following paragraph source kind mismatch');
+    addUprightBlockExclusionFloats(candidate, request.location, element);
+    // As measureParagraph acquires its floats, so that its wrapped drawings
+    // are known to an upright table the keep set ends with.
+    const publicFloats = acquirePublicParagraphFloats(
+      sessionState, context.publicAnchorBridge, element, request.input.source, candidate,
+    );
     const { layout } = acquireBodyParagraphAtLocation(
       candidate,
       element,
@@ -2292,6 +2472,10 @@ function measureFollowingBodyBlock(
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
+      ...(() => {
+        const precedingDrawings = keptParagraphDrawings(context, request, element, layout, publicFloats);
+        return precedingDrawings.length > 0 ? { precedingDrawings: Object.freeze(precedingDrawings) } : {};
+      })(),
     });
   }
   if (element.type !== 'table') throw new Error('Following table source kind mismatch');
@@ -2381,6 +2565,112 @@ function prescanBodyPageAnchors(
     }
     return paragraphIds.get(key)!;
   };
+  // `word-vertical-section-upright-block-table`: in a section that lays
+  // block tables out upright, a drawing registered when the page starts is
+  // placed here as its paragraph's own acquisition places it
+  // (anchorObstacleMove): clear of the upright tables in place (the page's
+  // pins) and of the drawings it may not overlap, in one search. Those
+  // drawings are the ones accepted on the page so far and the ones this
+  // prescan placed before it for the same or an earlier paragraph; a drawing
+  // of an earlier paragraph that is positioned from its text is not known
+  // yet. A drawing pinned by an earlier layout of the page is registered
+  // with the geometry that layout acquired, and its paragraph places it
+  // exactly there (request.drawingPins). Null outside such a section.
+  //
+  // The drawings placed so far are kept in a two-axis index of their own
+  // (the page index's drawing cells), so a search reads the drawings near
+  // its current place, not every drawing of the page.
+  type Placed = { anchorIndex: number; exclusion: LayoutRect; frame: LayoutRect; registeredFrame: LayoutRect };
+  const placed: Placed[] = [];
+  const placedCollisions = new WeakMap<object, DrawingMLCollisionEntryPt>();
+  // Built for the first search that asks: the drawings accepted on the page
+  // so far (of earlier paragraphs), then those placed here.
+  let placedIndex: UprightBlockPageIndex | null = null;
+  let acceptedRecorded = false;
+  const recordPlaced = (paragraphIndex: number, collision: DrawingMLCollisionEntryPt): void => {
+    const drawing: Placed = {
+      anchorIndex: paragraphIndex, exclusion: collision.bounds, frame: collision.bounds, registeredFrame: collision.bounds,
+    };
+    placedCollisions.set(drawing, collision);
+    placed.push(drawing);
+    if (placedIndex) addUprightPageDrawing(placedIndex, drawing, uprightDrawingLimits(state));
+  };
+  const recordAccepted = (): void => {
+    if (acceptedRecorded) return;
+    acceptedRecorded = true;
+    const accepted = sessionState.drawingCollisionRegistry.entries;
+    for (let at = 0; at < accepted.length; at += 1) recordPlaced(-1, accepted[at]!);
+  };
+  const placedNear = (rect: LayoutRect) => {
+    recordAccepted();
+    if (!placedIndex) {
+      placedIndex = emptyUprightBlockPageIndex();
+      for (let at = 0; at < placed.length; at += 1) {
+        addUprightPageDrawing(placedIndex, placed[at]!, uprightDrawingLimits(state));
+      }
+    }
+    return uprightPageDrawingsNear(
+      placedIndex, rect.yPt, rect.yPt + rect.heightPt, rect.xPt, rect.xPt + rect.widthPt,
+    );
+  };
+  const placeAmongObstacles = (
+    anchor: Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>,
+    drawing: Readonly<{
+      rect: LayoutRect;
+      exclusionBounds: LayoutRect;
+      horizontalOwnership: 'page' | 'host';
+      verticalOwnership: 'page' | 'host';
+      wrapped: boolean;
+      behavior: Readonly<{ allowOverlap: boolean | null; relativeHeight: number | null }>;
+    }>,
+  ): Readonly<{ move: Readonly<{ xPt: number; yPt: number }> | null; pin?: UprightDrawingPin }> => {
+    if (anchor.paragraphSource.path.length !== 1 || isPageObjectSource(anchor.paragraphSource)
+      || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return { move: null };
+    const paragraphIndex = anchor.paragraphSource.path[0]!;
+    const { allowOverlap, relativeHeight } = drawing.behavior;
+    const pin = request.drawingPins?.get(anchor.occurrenceId);
+    if (pin) {
+      if (!state.pinnedAnchorFrames) state.pinnedAnchorFrames = new Map();
+      state.pinnedAnchorFrames.set(anchor.occurrenceId, pin.bounds);
+    }
+    const blockersAmong = (candidates: readonly Readonly<{ anchorIndex: number }>[]) => anchorCollisionBlockers({
+      occurrenceId: anchor.occurrenceId,
+      allowOverlap: allowOverlap!,
+      relativeHeight: relativeHeight!,
+      verticalOwnership: drawing.verticalOwnership,
+      externalCollisions: candidates.flatMap((placed) =>
+        placed.anchorIndex < paragraphIndex ? [placedCollisions.get(placed)!] : []),
+      sameParagraphCollisions: candidates.flatMap((placed) =>
+        placed.anchorIndex === paragraphIndex ? [placedCollisions.get(placed)!] : []),
+    });
+    const move = pin || allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
+      occurrenceId: anchor.occurrenceId,
+      rect: drawing.rect,
+      exclusionBounds: drawing.exclusionBounds,
+      blockers: () => {
+        if (allowOverlap) return [];
+        recordAccepted();
+        return blockersAmong(placed);
+      },
+      near: (current) => allowOverlap ? [] : blockersAmong(placedNear(current)).map((blocker) => blocker.bounds),
+      inlineEndPt: state.pageWidth,
+      blockEndPt: state.pageH,
+      ...(drawing.wrapped ? {
+        uprightTables: { index: state.uprightBlockIndex, clearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT },
+      } : {}),
+    });
+    const collision = Object.freeze({
+      occurrenceId: anchor.occurrenceId,
+      bounds: pin ? pin.bounds : move && (move.xPt !== 0 || move.yPt !== 0)
+        ? Object.freeze({ ...drawing.rect, xPt: drawing.rect.xPt + move.xPt, yPt: drawing.rect.yPt + move.yPt })
+        : drawing.rect,
+      horizontalOwnership: drawing.horizontalOwnership,
+      verticalOwnership: drawing.verticalOwnership,
+      ...(relativeHeight === null ? {} : { relativeHeight }),
+    });
+    recordPlaced(paragraphIndex, collision);
+    return pin ? { move: null, pin } : { move };
+  };
   const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
     if (anchor.kind === 'frame') {
       // WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH: earlier text of the page wraps
@@ -2407,20 +2697,39 @@ function prescanBodyPageAnchors(
       const { carry } = anchor;
       if (!state.frozenAnchorFrames) state.frozenAnchorFrames = new Map();
       state.frozenAnchorFrames.set(anchor.occurrenceId, Object.freeze({ ...carry.bounds }));
+      // `word-vertical-section-upright-block-table`: from that frame the
+      // drawing lies below the upright tables in place, as its paragraph's
+      // own acquisition places it (paragraph.ts).
+      const carrier = sourceElement(dependencies.source, anchor.paragraphSource);
+      const behavior = carrier.type !== 'paragraph' ? undefined : carrier.runs.flatMap((run) =>
+        'anchorAcquisitionInput' in run && run.anchorAcquisitionInput?.occurrenceId === anchor.occurrenceId
+          ? [run.anchorAcquisitionInput.behavior] : [])[0];
+      const { move, pin } = !behavior ? { move: null } : placeAmongObstacles(anchor, {
+        rect: carry.bounds,
+        exclusionBounds: carry.exclusionBounds,
+        horizontalOwnership: carry.horizontalOwnership ?? 'host',
+        verticalOwnership: carry.verticalOwnership ?? 'host',
+        wrapped: true,
+        behavior,
+      });
+      const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
+        !move || (move.xPt === 0 && move.yPt === 0) ? rect
+          : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
       return [
         Object.freeze({
           kind: 'shape' as const,
           occurrenceId: anchor.occurrenceId,
           exclusionId: anchor.occurrenceId,
           paragraphId: paragraphIdFor(anchor.paragraphSource),
-          bounds: carry.bounds,
-          exclusionBounds: carry.exclusionBounds,
+          bounds: pin ? pin.bounds : shifted(carry.bounds),
+          exclusionBounds: pin ? pin.exclusionBounds : shifted(carry.exclusionBounds),
           ...(carry.horizontalOwnership ? { horizontalOwnership: carry.horizontalOwnership } : {}),
           ...(carry.verticalOwnership ? { verticalOwnership: carry.verticalOwnership } : {}),
           wrap: carry.wrap,
           wrapSide: carry.wrapSide ?? null,
           ...(carry.wrapDistances ? { wrapDistances: carry.wrapDistances } : {}),
-          ...(carry.wrapPolygon ? { wrapPolygon: carry.wrapPolygon } : {}),
+          ...(pin?.wrapPolygon ? { wrapPolygon: pin.wrapPolygon }
+            : carry.wrapPolygon && !pin ? { wrapPolygon: Object.freeze(carry.wrapPolygon.map(shifted)) } : {}),
           ...(carry.topEdgeInclusiveFromYPt === undefined
             ? {} : { topEdgeInclusiveFromYPt: carry.topEdgeInclusiveFromYPt }),
           ...(carry.anchorLineExemptTopPt === undefined
@@ -2582,12 +2891,25 @@ function prescanBodyPageAnchors(
     const retainedResult = verticalSpace
       ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
-    const wrapBounds = retainedResult.geometry.wrapBounds;
-    if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
+    const resolvedWrapBounds = retainedResult.geometry.wrapBounds;
+    const wrapped = resolvedWrapBounds !== null && retainedResult.geometry.wrap.kind !== 'none';
+    const { move, pin } = verticalSpace === undefined ? { move: null } : placeAmongObstacles(anchor, {
+      rect: retainedResult.geometry.objectFrame,
+      exclusionBounds: resolvedWrapBounds ?? retainedResult.geometry.objectFrame,
+      horizontalOwnership: anchorAxisOwnership(retainedResult, 'horizontal'),
+      verticalOwnership: anchorAxisOwnership(retainedResult, 'vertical'),
+      wrapped,
+      behavior: payloads[0]!.run.anchorAcquisitionInput.behavior,
+    });
+    if (resolvedWrapBounds === null || !wrapped) {
       return [];
     }
+    const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
+      !move || (move.xPt === 0 && move.yPt === 0) ? rect
+        : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
+    const wrapBounds = pin ? pin.exclusionBounds : shifted(resolvedWrapBounds);
     const polygon =
-      retainedResult.geometry.wrap.polygon?.points ??
+      (pin ? pin.wrapPolygon : retainedResult.geometry.wrap.polygon?.points.map(shifted)) ??
       Object.freeze([
         Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt }),
         Object.freeze({ xPt: wrapBounds.xPt + wrapBounds.widthPt, yPt: wrapBounds.yPt }),
@@ -2602,7 +2924,7 @@ function prescanBodyPageAnchors(
         kind: 'shape' as const,
         occurrenceId: anchor.occurrenceId,
         paragraphId: paragraphIdFor(anchor.paragraphSource),
-        bounds: retainedResult.geometry.objectFrame,
+        bounds: pin ? pin.bounds : shifted(retainedResult.geometry.objectFrame),
         exclusionBounds: wrapBounds,
         wrap: retainedResult.geometry.wrap.kind,
         wrapSide: retainedResult.geometry.wrap.side,
@@ -2612,6 +2934,15 @@ function prescanBodyPageAnchors(
     ];
   });
   publicParagraphs.forEach((paragraph) => state.pageAnchorPrescanned?.add(paragraph));
+  // What each drawing is registered with, by occurrence, for its paragraph
+  // to compare with what it acquires (registeredDrawingPins).
+  if (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)) {
+    const registered = state.registeredDrawings ?? (state.registeredDrawings = new Map());
+    for (let at = 0; at < entries.length; at += 1) {
+      const entry = entries[at]!;
+      if (entry.kind === 'shape') registered.set(entry.occurrenceId, entry);
+    }
+  }
   if (entries.length === 0) return null;
   return Object.freeze({
     floats: Object.freeze({
@@ -2669,6 +3000,9 @@ function resetBodyPageAcquisition(
   state.floatParaSeq = 0;
   state.pageAnchorPrescanned = new Set();
   state.frozenAnchorFrames = new Map();
+  state.pinnedAnchorFrames = new Map();
+  state.registeredDrawings = new Map();
+  state.uprightBlockIndex = emptyUprightBlockPageIndex();
   sessionState.floatRegistry = Object.freeze({
     coordinateSpace: 'logical-page-points' as const,
     flowDomainId: pageRegistryFlowDomainId(next.pageIndex),
@@ -2797,6 +3131,131 @@ function commitBodyFlowRegistryDelta(
   sessionState.drawingCollisionRegistry = nextDrawingCollisionRegistry;
 }
 
+/** The wrap rectangle of an upright block's text exclusion
+ * (`word-vertical-section-upright-block-table`): a square exclusion that a
+ * line strip ending exactly at its block start meets too. `ordinal` numbers
+ * the page's upright exclusions; it gives each its own float paragraph id, so
+ * the same-paragraph overlap rule never pairs it with another float. */
+function uprightBlockExclusionFloat(
+  exclusion: UprightBlockExclusion,
+  ordinal: number,
+  leastBoundedGapPt: number,
+): FloatRect {
+  const { xPt, yPt, widthPt, heightPt } = exclusion.bounds;
+  return {
+    kind: 'frame',
+    mode: 'square',
+    imageKey: exclusion.id,
+    imageX: xPt,
+    imageY: yPt,
+    imageW: widthPt,
+    imageH: heightPt,
+    xLeft: xPt,
+    xRight: xPt + widthPt,
+    yTop: yPt,
+    yBottom: yPt + heightPt,
+    side: 'bothSides',
+    distLeft: 0,
+    distRight: 0,
+    distTop: 0,
+    distBottom: 0,
+    paraId: -1 - ordinal,
+    bandStartInclusive: true,
+    leastBoundedGapPt,
+  };
+}
+
+/** By layout services, which every pass of one layout execution shares and
+ * whose acquisition cache the versions key. */
+const uprightTableBoxVersionsByServices = new WeakMap<object, UprightTableBoxVersions>();
+
+/**
+ * BodyLayoutSession.commitUprightBlocks. Upright blocks are kept beside the
+ * float registry, not in it: a registration appends one box to the page's
+ * upright block index, its slots, its text exclusions and its entry in the
+ * history of placed tables, each in constant time however many blocks the
+ * page already holds. Every line laid out afterwards wraps around them
+ * (addUprightBlockExclusionFloats), and a wrapped drawing anchored after a
+ * table does not cover it (uprightDrawingMovePt). Positioned tables
+ * read the float registry and do not avoid upright block tables.
+ */
+function commitBodyUprightBlocks(
+  context: BodySessionDependencies,
+  registration: UprightBlockRegistration,
+): void {
+  const { state } = context;
+  const index = state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
+  if (registration.box) {
+    if (registration.boxOrder === undefined) throw new Error('An upright block box requires its body order');
+    addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, registration.boxOrder);
+  }
+  for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
+  if (registration.segmentPin) index.segmentPins.set(registration.segmentPin.key, registration.segmentPin.bounds);
+  for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
+  if (registration.tail) {
+    index.tail = registration.tail;
+  }
+  const tableBox = uprightRegistrationTableBox(registration);
+  if (tableBox) {
+    let versions = uprightTableBoxVersionsByServices.get(context.services);
+    if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
+    addUprightTableBox(index, tableBox.sourceIndex, tableBox.box, versions);
+    moveUprightPageDrawingsBelowTableBox(index, tableBox, uprightDrawingLimits(state));
+  }
+}
+
+/**
+ * Adds to `candidate.floats`, the wrap rectangles one paragraph is laid out
+ * against, the upright block exclusions its lines can meet from `location`
+ * on (uprightBlockExclusionsAhead), and those of `planned` blocks
+ * (`word-vertical-section-upright-table-rewrapped-strip`: the upright blocks
+ * planned after a fragment exclude its text as registered ones do). The
+ * page's exclusions are not part of `state.floats`, so a paragraph neither
+ * copies nor scans the exclusions of blocks it cannot reach.
+ *
+ * The inline band searched is the column's, widened on both sides by the
+ * paragraph's largest negative indent (§17.3.1.12: start, first line or
+ * hanging, end): such a line leaves the column band and can reach a block of
+ * the neighbouring column. The indents are the resolved ones the paragraph
+ * is laid out with (resolveBodyParagraphLayoutContext), so those of its
+ * style and of its numbering level (§17.9.6) count like its own.
+ */
+function addUprightBlockExclusionFloats(
+  candidate: BodyAcquisitionState,
+  location: BodyAcquisitionLocation,
+  paragraph: ParagraphLayoutSource,
+  planned?: UprightBlockRegistration,
+): void {
+  const index = candidate.uprightBlockIndex;
+  const fromIndex = index !== undefined && index.exclusionCount > 0;
+  if (!fromIndex && !planned?.exclusions.length) return;
+  const band = location.availableBounds;
+  const bandEndPt = band.xPt + band.widthPt;
+  const context = resolveBodyParagraphLayoutContext(candidate, paragraph);
+  // `word-vertical-section-upright-block-table`: a strip that meets a table
+  // has no text in less than the least room (with and without a line grid)
+  // between the table and what bounds that room along the strip: the
+  // column's end or a wrapped object below the table, the column's start or
+  // a wrapped object above a table stacked below another.
+  const leastRoomPt = context.lineGrid.active
+    ? WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT : WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_NO_GRID_PT;
+  const float = (exclusion: UprightBlockExclusion, ordinal: number): FloatRect =>
+    uprightBlockExclusionFloat(exclusion, ordinal, leastRoomPt);
+  if (fromIndex) {
+    const startPt = context.physicalIndentLeftPt;
+    const outdentPt = Math.max(
+      0, -startPt, -(startPt + context.firstIndentPt), -context.physicalIndentRightPt,
+    );
+    for (const entry of uprightBlockExclusionsAhead(
+      index, location.cursorPt.yPt, band.xPt - outdentPt, bandEndPt + outdentPt,
+    )) candidate.floats.push(float(entry.exclusion, entry.ordinal));
+  }
+  const ordinal = index?.exclusionCount ?? 0;
+  planned?.exclusions.forEach((exclusion, at) => {
+    candidate.floats.push(float(exclusion, ordinal + at));
+  });
+}
+
 function acquirePublicParagraphFloats(
   sessionState: BodySessionDependencies['sessionState'],
   publicAnchorBridge: ConcreteBodyKernelContext['publicAnchorBridge'],
@@ -2806,16 +3265,19 @@ function acquirePublicParagraphFloats(
   onlyOccurrenceIds?: ReadonlySet<string>,
   paragraphId = sessionState.floatRegistry.nextParagraphId,
 ): readonly FloatRegistryEntryPt[] {
-  const committedOccurrenceIds = new Set(
+  // Read for the first bridged run only: a paragraph without one does not
+  // read the page's registry.
+  let committedOccurrenceIds: Set<string> | undefined;
+  const committed = (occurrenceId: string): boolean => (committedOccurrenceIds ??= new Set(
     sessionState.floatRegistry.entries.map((entry) => entry.occurrenceId),
-  );
+  )).has(occurrenceId);
   const publicRuns = paragraph.runs.flatMap((run, runIndex) => {
     if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
     const bridge = publicAnchorBridge(source, runIndex);
     if (
       !bridge ||
       (onlyOccurrenceIds && !onlyOccurrenceIds.has(bridge.occurrenceId)) ||
-      committedOccurrenceIds.has(bridge.occurrenceId) ||
+      committed(bridge.occurrenceId) ||
       (bridge.pageOwned && candidate.pageAnchorPrescanned?.has(paragraph))
     )
       return [];
@@ -2869,6 +3331,47 @@ function acquirePublicParagraphFloats(
       });
     }),
   );
+}
+
+/** The wrapped drawings of `layout` that were registered when the page
+ * started (`registered`, by occurrence), with the frame, text exclusion and
+ * wrap polygon the acquisition gave them, and whether the registered frame
+ * or exclusion differs from those (AcquiredParagraphBlock.uprightDrawingPins).
+ * Only the paragraph's own drawings are looked up. */
+function registeredDrawingPins(
+  registered: ReadonlyMap<string, Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>>,
+  layout: ParagraphLayout,
+  collisions: readonly DrawingMLCollisionEntryPt[],
+): ReadonlyArray<Readonly<{ occurrenceId: string; pin: UprightDrawingPin; differs: boolean }>> {
+  const differ = (first: LayoutRect, second: LayoutRect) =>
+    Math.abs(first.xPt - second.xPt) > 1e-6 || Math.abs(first.yPt - second.yPt) > 1e-6
+    || Math.abs(first.widthPt - second.widthPt) > 1e-6 || Math.abs(first.heightPt - second.heightPt) > 1e-6;
+  let frames: Map<string, Extract<NonNullable<ParagraphLayout['anchorFrames']>[number], { status: 'resolved' }>> | null = null;
+  const pins: Array<Readonly<{ occurrenceId: string; pin: UprightDrawingPin; differs: boolean }>> = [];
+  for (let at = 0; at < collisions.length; at += 1) {
+    const collision = collisions[at]!;
+    const entry = registered.get(collision.occurrenceId);
+    if (!entry) continue;
+    if (!frames) {
+      frames = new Map();
+      for (const frame of layout.anchorFrames ?? []) {
+        if (frame.status === 'resolved') frames.set(frame.occurrenceId, frame);
+      }
+    }
+    const frame = frames.get(collision.occurrenceId);
+    if (!frame || !frame.geometry.wrapBounds || frame.geometry.wrap.kind === 'none') continue;
+    const exclusionBounds = frame.geometry.wrapBounds;
+    pins.push(Object.freeze({
+      occurrenceId: collision.occurrenceId,
+      pin: Object.freeze({
+        bounds: collision.bounds,
+        exclusionBounds,
+        ...(frame.geometry.wrap.polygon ? { wrapPolygon: frame.geometry.wrap.polygon.points } : {}),
+      }),
+      differs: differ(entry.bounds, collision.bounds) || differ(entry.exclusionBounds, exclusionBounds),
+    }));
+  }
+  return pins;
 }
 
 function retainedBodyParagraphFloatEntries(
@@ -3206,6 +3709,10 @@ function openConcreteBodyLayoutSession(
     effectiveTablePositioning,
   };
 
+  const tableOperations = {
+    setBodyAcquisitionLocation, sourceElement, computeTablePtLayout, computeAdjacentTablePtLayouts,
+    ordinaryAcquisitionInputForAdjacentGroup, reacquireBodyTableBlock,
+  };
   const session: BodyLayoutSession = {
     hasPaginationFields: source.hasPaginationFields,
     measureParagraph(
@@ -3216,11 +3723,11 @@ function openConcreteBodyLayoutSession(
     measureTable(
       request: Parameters<NonNullable<BodyLayoutSession['measureTable']>>[0],
     ): ReturnType<NonNullable<BodyLayoutSession['measureTable']>> {
-      return measureBodyTableEntry(sessionDependencies, request, {
-        setBodyAcquisitionLocation, sourceElement, computeTablePtLayout, computeAdjacentTablePtLayouts,
-        ordinaryAcquisitionInputForAdjacentGroup, reacquireBodyTableBlock,
-      });
+      return measureBodyTableEntry(sessionDependencies, request, tableOperations);
     },
+    planUprightBlocks: (request) => planBodyUprightBlocks(sessionDependencies, request, tableOperations),
+    commitUprightBlocks: (registration) => commitBodyUprightBlocks(sessionDependencies, registration),
+    uprightOccupiedBlockEndPt: () => sessionDependencies.state.uprightBlockIndex?.occupiedBlockEndPt ?? Number.NEGATIVE_INFINITY,
     layoutStory: (request) => acquireBodyStoryLayout(storyAcquisitionContext, request),
     layoutNotes(
       request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],
@@ -3230,7 +3737,7 @@ function openConcreteBodyLayoutSession(
     measureFollowingBlock(
       request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
     ): ReturnType<NonNullable<BodyLayoutSession['measureFollowingBlock']>> {
-      return measureFollowingBodyBlock(sessionDependencies, request);
+      return measureFollowingBodyBlock(sessionDependencies, request, tableOperations);
     },
     prescanPageAnchors(
       request: Parameters<NonNullable<BodyLayoutSession['prescanPageAnchors']>>[0],

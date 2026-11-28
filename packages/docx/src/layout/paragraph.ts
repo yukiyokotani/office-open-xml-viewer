@@ -213,6 +213,8 @@ export {
 export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
+import { uprightDrawingMovePt, type UprightBlockPageIndex } from './upright-block-index.js';
+import { drawingMLCollisionEntriesVersion } from './drawingml-collision-registry.js';
 import type {
   DrawingLayout,
   DrawingPaintCommand,
@@ -2544,6 +2546,22 @@ export interface ParagraphAcquisitionOptions {
   readonly exclusions: readonly WrapExclusion[];
   /** Effective prior DrawingML objects in this flow domain. */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
+  /** `word-vertical-section-upright-block-table`: the page's upright block
+   * tables, and the boxes of tables planned after this paragraph that its
+   * drawings have to clear as well. A wrapped drawing the paragraph anchors
+   * is moved along the inline axis to lie below every such box it would
+   * cover (uprightDrawingMovePt); how that move and the
+   * paragraph's own anchor reflow are resolved together is stated at
+   * AnchorReflowMoves. */
+  readonly uprightTables?: Readonly<{
+    index: UprightBlockPageIndex | undefined;
+    planned?: readonly LayoutRect[];
+    /** How far past a table's far edge a drawing moved along the block
+     * axis lies (UprightDrawingLimits.tableClearancePt). */
+    clearancePt: number;
+  }>;
+  /** Set by acquireParagraphResult only, for one reflow pass. */
+  readonly anchorReflowMoves?: AnchorReflowMoves;
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
@@ -2586,6 +2604,10 @@ export interface ParagraphAcquisitionOptions {
   /** WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: carried first-placement object
    * frames keyed by anchor occurrence. */
   readonly frozenAnchorFrames?: ReadonlyMap<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: the frames of the
+   * drawings pinned for this layout of their page, by occurrence. A pinned
+   * drawing lies there and is not moved for a table or another drawing. */
+  readonly pinnedAnchorFrames?: ReadonlyMap<string, LayoutRect>;
   /** Cell-grid wrap preserves an empty carrier's insertion reference while
    * its paragraph flow is admitted below the grid. Paragraph-local points. */
   readonly paragraphAnchorReferenceDeltaPt?: number;
@@ -4939,7 +4961,7 @@ function resizeResolvedAnchorGeometry(
 }
 
 
-function anchorAxisOwnership(
+export function anchorAxisOwnership(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
   axis: 'horizontal' | 'vertical',
   layoutInCell = false,
@@ -4961,6 +4983,109 @@ function anchorAxisOwnership(
     || diagnostic.referenceFrame === 'character'
     ? 'host'
     : 'page';
+}
+
+/**
+ * How far an anchored drawing resolved at `rect` moves for what it may not
+ * cover: the drawings it collides with (ECMA-376 §20.4.2.3, `allowOverlap`
+ * false) and, for a wrapped drawing where upright block tables are in place
+ * (`uprightTables`), those tables. The paragraph's own acquisition and the
+ * page-start prescan of a page-positioned drawing both place it with this,
+ * so the exclusion registered when the page starts is where the drawing
+ * lies.
+ *
+ * `word-vertical-section-upright-block-table`: the tables and the drawings
+ * are cleared in one search (uprightDrawingMovePt), so clearing one never
+ * leaves the drawing over the other. Where no place it tries is on the
+ * page, the drawing takes its place among the drawings alone, as where no
+ * table is, if that place is on the page, and otherwise keeps its position:
+ * no move takes a drawing off its page. `clearOfTables`: the search moved
+ * it.
+ */
+export function anchorObstacleMove(input: Readonly<{
+  occurrenceId: string;
+  /** The drawing's frame and text exclusion as resolved. */
+  rect: LayoutRect;
+  exclusionBounds: LayoutRect;
+  /** The drawings it may not cover (anchorCollisionBlockers). `near`, when
+   * given, returns those of them that can meet a rectangle, so the search
+   * reads only the drawings near its current place. */
+  blockers: () => readonly FloatPlacementParticipant[];
+  near?: (current: LayoutRect) => readonly LayoutRect[];
+  /** The inline end of the drawing's page or cell, and the block end of its page. */
+  inlineEndPt: number;
+  blockEndPt: number;
+  uprightTables?: Readonly<{
+    index: UprightBlockPageIndex | undefined; planned?: readonly LayoutRect[]; clearancePt: number;
+  }>;
+}>): Readonly<{ xPt: number; yPt: number; clearOfTables: boolean }> {
+  const { occurrenceId, rect } = input;
+  if (input.uprightTables) {
+    const move = uprightDrawingMovePt(
+      input.uprightTables.index, Number.POSITIVE_INFINITY, rect,
+      {
+        inlineEndPt: input.inlineEndPt, blockEndPt: input.blockEndPt,
+        tableClearancePt: input.uprightTables.clearancePt,
+      },
+      input.uprightTables.planned, input.near ?? input.blockers().map((blocker) => blocker.bounds),
+    );
+    if (move) return { ...move, clearOfTables: move.xPt !== 0 || move.yPt !== 0 };
+  }
+  const none = { xPt: 0, yPt: 0, clearOfTables: false };
+  const blockers = input.blockers();
+  if (blockers.length === 0) return none;
+  const { displacement } = resolveFloatPlacement({
+    moving: {
+      occurrenceId,
+      kind: 'drawingml',
+      paragraphId: 1,
+      bounds: rect,
+      exclusionBounds: input.exclusionBounds,
+    },
+    blockers,
+    avoidance: { kind: 'drawingml-normative' },
+    rightBoundaryPt: input.inlineEndPt,
+  });
+  // Where upright tables are in place, a place among the drawings alone is
+  // taken only on the page; past its end the drawing keeps its position.
+  if (input.uprightTables && (rect.xPt + displacement.xPt + rect.widthPt > input.inlineEndPt
+    || rect.yPt + displacement.yPt + rect.heightPt > input.blockEndPt)) return none;
+  return { xPt: displacement.xPt, yPt: displacement.yPt, clearOfTables: false };
+}
+
+/** The drawings an anchored drawing may not cover, among those accepted
+ * before it (`externalCollisions`, of other paragraphs, and
+ * `sameParagraphCollisions`). None for a drawing that may overlap. */
+export function anchorCollisionBlockers(input: Readonly<{
+  occurrenceId: string;
+  allowOverlap: boolean;
+  relativeHeight: number;
+  /** Whether its block axis follows the page or its host (anchorAxisOwnership). */
+  verticalOwnership: 'page' | 'host';
+  externalCollisions: readonly DrawingMLCollisionEntryPt[];
+  sameParagraphCollisions: readonly DrawingMLCollisionEntryPt[];
+}>): FloatPlacementParticipant[] {
+  if (input.allowOverlap) return [];
+  // ECMA-376 §20.4.2.3: object collision is independent of text wrapping.
+  // A drawing that may overlap keeps its resolved position; one that may
+  // not is displaced for every object accepted before it. The objects of
+  // its own paragraph are blockers except under
+  // `word-lower-layer-same-paragraph-anchor-composition`.
+  const sameParagraphBlockers = input.sameParagraphCollisions.filter((entry) =>
+    !wordPreservesLowerLayerSameParagraphComposition(
+      input.verticalOwnership,
+      input.relativeHeight,
+      entry.relativeHeight,
+    ));
+  return [...input.externalCollisions, ...sameParagraphBlockers]
+    .filter((entry) => entry.occurrenceId !== input.occurrenceId)
+    .map((entry) => ({
+      occurrenceId: entry.occurrenceId,
+      kind: 'drawingml',
+      paragraphId: 0,
+      bounds: entry.bounds,
+      exclusionBounds: entry.bounds,
+    }));
 }
 
 interface AnchorLineReference {
@@ -5232,60 +5357,55 @@ function acquireAnchorOccurrence(
       const delta = { xPt: frozenFrame.xPt - placedRect.xPt, yPt: frozenFrame.yPt - placedRect.yPt };
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
-    const effectiveWrapBounds = placedResult.geometry.wrapBounds;
-    const normativeCollision = !allowOverlap;
-    if (normativeCollision) {
-      // §20.4.2.3 object collision is independent of text wrapping. An
-      // allowOverlap=true object keeps its resolved position: Word controls
-      // (issue #1623) never move such a picture away from pictures anchored in
-      // other paragraphs, in either compatibility mode, wrap kind, or reference.
-      // ECMA-376 §20.4.2.3 requires displacement for every existing object
-      // whose allowOverlap behavior makes it a collision participant.
-      // Word has one narrower composition exception: a source-later page-owned
-      // member below the already-authored layers in this SAME anchor paragraph
-      // retains its authored position. Cross-paragraph entries remain blockers.
-      const movingVerticalOwnership = anchorAxisOwnership(
-        placedResult,
-        'vertical',
-        layoutInCell && options.anchorCellBounds !== undefined,
-      );
-      const sameParagraphBlockers = sameParagraphCollisions.filter((entry) =>
-        // `word-lower-layer-same-paragraph-anchor-composition`
-        !wordPreservesLowerLayerSameParagraphComposition(
-          movingVerticalOwnership,
-          behavior.relativeHeight!,
-          entry.relativeHeight,
-        ));
-      const blockers: FloatPlacementParticipant[] = [...externalCollisions, ...sameParagraphBlockers]
-        .filter((entry) => entry.occurrenceId !== occurrenceId)
-        .map((entry) => ({
-          occurrenceId: entry.occurrenceId,
-          kind: 'drawingml',
-          paragraphId: 0,
-          bounds: entry.bounds,
-          exclusionBounds: entry.bounds,
-        }));
-      const page = options.anchorFrames?.page;
-      const rightBoundary = layoutInCell
-        && options.anchorCellBounds
-        ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
-        : page
-          ? page.xPt + page.widthPt
-          : Number.POSITIVE_INFINITY;
-      const displaced = resolveFloatPlacement({
-        moving: {
+    const page = options.anchorFrames?.page;
+    const wrapped = placedResult.geometry.wrapBounds !== null && placedResult.geometry.wrap.kind !== 'none';
+    const moves = wrapped ? options.anchorReflowMoves : undefined;
+    const held = moves?.held.get(occurrenceId);
+    // `word-vertical-section-upright-block-table`: a drawing pinned for
+    // this layout of its page lies where its text exclusion was registered
+    // when the page started (body-paginator.ts).
+    const pinnedFrame = options.pinnedAnchorFrames?.get(occurrenceId);
+    if (pinnedFrame) {
+      translateAnchor({ xPt: pinnedFrame.xPt - placedRect.xPt, yPt: pinnedFrame.yPt - placedRect.yPt });
+      moves?.placed.set(occurrenceId, Object.freeze({ xPt: placedRect.xPt, yPt: placedRect.yPt, moved: false }));
+    } else if (held && moves!.exact) {
+      // The hold pass: the drawing lies where the last pass left it.
+      translateAnchor({ xPt: held.xPt - placedRect.xPt, yPt: held.yPt - placedRect.yPt });
+    } else {
+      const uprightTables = wrapped ? options.uprightTables : undefined;
+      // A drawing that a table has moved does not move back, along either
+      // axis, when its own text wraps differently in a later pass.
+      if (uprightTables && held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
+        translateAnchor({
+          xPt: Math.max(0, held.xPt - placedRect.xPt),
+          yPt: Math.max(0, held.yPt - placedRect.yPt),
+        });
+      }
+      const move = anchorObstacleMove({
+        occurrenceId,
+        rect: placedRect,
+        exclusionBounds: placedResult.geometry.wrapBounds ?? placedRect,
+        blockers: () => anchorCollisionBlockers({
           occurrenceId,
-          kind: 'drawingml',
-          paragraphId: 1,
-          bounds: placedRect,
-          exclusionBounds: effectiveWrapBounds ?? placedRect,
-        },
-        blockers,
-        avoidance: { kind: 'drawingml-normative' },
-        rightBoundaryPt: rightBoundary,
+          allowOverlap,
+          relativeHeight: behavior.relativeHeight!,
+          verticalOwnership: anchorAxisOwnership(
+            placedResult, 'vertical', layoutInCell && options.anchorCellBounds !== undefined,
+          ),
+          externalCollisions,
+          sameParagraphCollisions,
+        }),
+        inlineEndPt: layoutInCell && options.anchorCellBounds
+          ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
+          : page ? page.xPt + page.widthPt : Number.POSITIVE_INFINITY,
+        blockEndPt: page ? page.yPt + page.heightPt : Number.POSITIVE_INFINITY,
+        ...(uprightTables ? { uprightTables } : {}),
       });
-      const delta = displaced.displacement;
-      if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
+      if (move.xPt !== 0 || move.yPt !== 0) translateAnchor(move);
+      moves?.placed.set(occurrenceId, Object.freeze({
+        xPt: placedRect.xPt, yPt: placedRect.yPt,
+        moved: uprightTables !== undefined && (held !== undefined || move.clearOfTables),
+      }));
     }
     return Object.freeze({
       acquiredShapeTextBoxes,
@@ -6176,6 +6296,52 @@ export function acquireShapeTextBoxLayout(
   }
 }
 
+/**
+ * How the anchor reflow of a paragraph ends (acquireParagraphResult), and
+ * how the move of a wrapped drawing below upright block tables
+ * (`word-vertical-section-upright-block-table`) is resolved with it. Library
+ * solver policy, for every story a paragraph is acquired in: body, table
+ * cell, header and footer, note, text box and frame.
+ *
+ * Each reflow pass lays the paragraph's lines out against the drawings
+ * where the pass before left them, then places every drawing from those
+ * lines. A drawing positioned relative to its character or line follows its
+ * text, so its own exclusion can move it; and one that a table has moved
+ * lies in other text than the one it was positioned from, so the two can
+ * feed each other.
+ *
+ * Table moves. A drawing that a table has moved never moves back. From the
+ * pass in which a table first moves it, it takes, along each axis, the
+ * farther of the position its text gives it and the position it had after
+ * the pass before (`held`), and is then moved clear of the tables it covers
+ * there, and of the drawings it may not overlap, in one search that moves
+ * it forward along either axis only (uprightDrawingMovePt). The set of drawings a table has moved only grows, and their
+ * positions only grow along both axes, so no pass returns such a drawing
+ * to an earlier position: a table move cannot make the passes repeat.
+ *
+ * Convergence. The passes end at the first one that leaves every drawing
+ * where the pass before left it; its lines are then laid out against the
+ * drawings exactly where they lie. What can keep them from ending is the
+ * reflow of the drawings no table moved (positions that repeat with a
+ * period longer than one pass), or positions that keep changing past the
+ * pass limit. Either ends in the hold pass (`exact`): one more pass lays
+ * the lines out against the drawings of the last pass and places every
+ * wrapped drawing where that pass left it, whatever its text now gives.
+ * That pass depends on no further one, so a paragraph takes at most the
+ * pass limit plus one passes and its reflow always ends; every position a
+ * pass leaves is clear of the upright tables, so the held ones are too.
+ */
+export type AnchorReflowMoves = Readonly<{
+  /** Where each drawing lay after the pass before, by occurrence: those a
+   * table has moved, or in the hold pass every wrapped drawing. */
+  held: ReadonlyMap<string, Readonly<{ xPt: number; yPt: number }>>;
+  /** The hold pass: a drawing lies exactly at its `held` position. */
+  exact: boolean;
+  /** Written by the pass: where each wrapped drawing lies after it, and
+   * whether a table has moved it in this pass or an earlier one. */
+  placed: Map<string, Readonly<{ xPt: number; yPt: number; moved: boolean }>>;
+}>;
+
 /** Single acquisition seam from public/parser paragraph input to retained geometry.
  * Existing `measureParagraph` remains the sole segment and line-break owner. */
 class ParagraphAnchorReflowNonConvergenceError extends LayoutInvariantError {
@@ -6227,6 +6393,8 @@ function wrapExclusionFloatRects(exclusions: readonly WrapExclusion[]): FloatRec
       ? {} : { exemptLineTopPt: exclusion.anchorLineExemptTopPt }),
     ...(exclusion.topEdgeInclusiveFromYPt === undefined
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
+    ...(exclusion.bandStartInclusive === true ? { bandStartInclusive: true as const } : {}),
+    ...(exclusion.leastBoundedGapPt === undefined ? {} : { leastBoundedGapPt: exclusion.leastBoundedGapPt }),
   }));
 }
 
@@ -6485,6 +6653,8 @@ function exclusionSetState(exclusions: readonly WrapExclusion[]): string {
     ...(exclusion.topEdgeInclusiveFromYPt === undefined
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
     ...(exclusion.wordMode14TightAnchor === true ? { wordMode14TightAnchor: true } : {}),
+    ...(exclusion.bandStartInclusive === true ? { bandStartInclusive: true } : {}),
+    ...(exclusion.leastBoundedGapPt === undefined ? {} : { leastBoundedGapPt: exclusion.leastBoundedGapPt }),
   })));
 }
 
@@ -6532,6 +6702,23 @@ function mergeAnchorCollisions(
   ]);
 }
 
+/** The entries of `frames` for the anchor occurrences of `paragraph`, in
+ * run order, as a key; null when it holds none of them. */
+function ownAnchorFramesKey(
+  paragraph: ParagraphAcquisitionInput,
+  frames: ReadonlyMap<string, LayoutRect> | undefined,
+): string | null {
+  if (!frames || frames.size === 0) return null;
+  let own: Array<readonly [string, LayoutRect]> | null = null;
+  for (const run of paragraph.runs) {
+    if (!anchoredPayloadRun(run)) continue;
+    const occurrenceId = run.anchorAcquisitionInput!.occurrenceId;
+    const frame = frames.get(occurrenceId);
+    if (frame) (own ??= []).push([occurrenceId, frame]);
+  }
+  return own ? JSON.stringify(own) : null;
+}
+
 /**
  * The line key keeps the weak-map paragraph identity (runs, paragraph mark,
  * numbering) plus every input read by measureParagraph/buildSegments/layoutLines:
@@ -6544,6 +6731,8 @@ function mergeAnchorCollisions(
  * inputs. Active line grids and wrap authorities are gated below before line
  * reuse; the exact key still includes all of their original facts.
  */
+const NO_ANCHOR_COLLISIONS: readonly DrawingMLCollisionEntryPt[] = Object.freeze([]);
+
 function paragraphAcquisitionKey(
   cache: ParagraphAcquisitionRuntimeCache,
   paragraph: ParagraphAcquisitionInput,
@@ -6726,11 +6915,24 @@ function paragraphAcquisitionKey(
       ] : []),
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
-    lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
+    // By a number that stands for the entries' exact content
+    // (drawingMLCollisionEntriesVersion): a page's registry grows by the
+    // drawings of each paragraph, and spelling it out for every anchoring
+    // paragraph made the keys of a page quadratic in its drawings.
+    lineOnly || !hasAnchoredPayload ? null
+      : drawingMLCollisionEntriesVersion(cache, options.anchorCollisions ?? NO_ANCHOR_COLLISIONS),
+    // By the version of the page's table boxes, which stands for their
+    // content: a later pass that places the same tables reuses the
+    // acquisition.
+    ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null] : [
+      options.uprightTables.index?.tableBoxesVersion ?? 0,
+      options.uprightTables.planned ? JSON.stringify(options.uprightTables.planned) : null,
+    ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
-    lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
-      ? null
-      : JSON.stringify([...options.frozenAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),
+    // By the frames of this paragraph's own anchors only: the frames kept
+    // for the other drawings of its page do not reach its acquisition.
+    lineOnly || !hasAnchoredPayload ? null : ownAnchorFramesKey(paragraph, options.frozenAnchorFrames),
+    lineOnly || !hasAnchoredPayload ? null : ownAnchorFramesKey(paragraph, options.pinnedAnchorFrames),
     continuation ? JSON.stringify(continuation) : null,
     lineOnly ? null : options.paragraphBorderEdges
       ? [options.paragraphBorderEdges.top, options.paragraphBorderEdges.bottom]
@@ -6937,6 +7139,7 @@ export function acquireParagraphResult(
   const externallyOwnedOccurrenceIds = externalExclusionOccurrenceIds(options.exclusions);
   const occurrenceIds = new Set(paragraph.runs.flatMap((run) =>
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
+  const anchorsPayload = occurrenceIds.size > 0;
   for (const occurrenceId of externallyOwnedOccurrenceIds) occurrenceIds.delete(occurrenceId);
   const occurrenceCapacity = occurrenceIds.size;
   const ownsUnresolvedFloatFrame = occurrenceCapacity > 0 && options.exclusions.length === 0
@@ -6999,10 +7202,24 @@ export function acquireParagraphResult(
   // WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: decided once from the pass that laid
   // every host line out without its own objects.
   let anchorLineExemptions: ReadonlyMap<string, number> | undefined;
+  // AnchorReflowMoves: the drawings a table has moved so far, where the
+  // last pass left them; the last completed pass with every drawing's
+  // place; whether the pass being run is the hold pass; and whether a pass
+  // is running (an error from inside a pass is not the passes not ending).
+  let heldMoves: AnchorReflowMoves['held'] = new Map();
+  let lastPass: Readonly<{ pass: Pass; placed: AnchorReflowMoves['placed'] }> | undefined;
+  let holdPass = false;
+  let passRunning = false;
+  let reflowPass!: (previous: Pass | null) => Pass;
   try {
-    const result = convergeExactState<Pass>({
+    const converged = (): Pass => convergeExactState<Pass>({
       seedState: exclusionSetState(initialExclusions),
-      step: (previous) => {
+      step: reflowPass = (previous) => {
+        passRunning = true;
+        // A paragraph that anchors nothing places no drawing: its first
+        // pass leaves the exclusions it was laid out against.
+        const anchorReflowMoves: AnchorReflowMoves | undefined = anchorsPayload
+          ? { held: heldMoves, exact: holdPass, placed: new Map() } : undefined;
         const effectiveExclusions = mergeParagraphExclusions(
           options.exclusions,
           previous?.ownedExclusions ?? initialOwnedExclusions,
@@ -7010,8 +7227,13 @@ export function acquireParagraphResult(
         const measured = lineTemplate
           ? placeCachedLineBreaking(lineTemplate, options.placement)
           : measureWithExclusions(effectiveExclusions);
-        const projectionOptions = anchorLineExemptions && anchorLineExemptions.size > 0
-          ? { ...acquisitionOptions, anchorLineExemptions } : acquisitionOptions;
+        const projectionOptions = (anchorLineExemptions && anchorLineExemptions.size > 0) || anchorReflowMoves
+          ? {
+              ...acquisitionOptions,
+              ...(anchorLineExemptions && anchorLineExemptions.size > 0 ? { anchorLineExemptions } : {}),
+              ...(anchorReflowMoves ? { anchorReflowMoves } : {}),
+            }
+          : acquisitionOptions;
         let layout = projectAcquiredParagraph(
           paragraph, projectionOptions, measured, lineReferences,
         );
@@ -7125,7 +7347,17 @@ export function acquireParagraphResult(
         if (exclusionSetState(layout.exclusions) !== state) {
           throw new Error('Paragraph retained exclusions differ from the measured exclusion authority');
         }
-        return Object.freeze({ measured, layout, ownedExclusions, state });
+        const pass = Object.freeze({ measured, layout, ownedExclusions, state });
+        if (anchorReflowMoves && !holdPass) {
+          let held: Map<string, Readonly<{ xPt: number; yPt: number }>> | undefined;
+          for (const [occurrenceId, place] of anchorReflowMoves.placed) {
+            if (place.moved) (held ??= new Map(heldMoves)).set(occurrenceId, place);
+          }
+          if (held) heldMoves = held;
+          lastPass = { pass, placed: anchorReflowMoves.placed };
+        }
+        passRunning = false;
+        return pass;
       },
       stateOf: (pass) => pass.state,
       // Operational fail-closed resource guard. The exact-state/cycle checks
@@ -7133,6 +7365,16 @@ export function acquireParagraphResult(
       // geometry orbit from consuming unbounded work.
       limit: 16,
     }).value;
+    let result: Pass;
+    try {
+      result = converged();
+    } catch (error) {
+      if (!(error instanceof ExactConvergenceError) || passRunning || !lastPass) throw error;
+      // The hold pass (AnchorReflowMoves).
+      holdPass = true;
+      heldMoves = lastPass.placed;
+      result = reflowPass(lastPass.pass);
+    }
     // A cache hit may cross convergence passes. Retain an immutable measurement
     // envelope without recursively freezing caller-owned capabilities such as
     // the wrap oracle referenced by placement.

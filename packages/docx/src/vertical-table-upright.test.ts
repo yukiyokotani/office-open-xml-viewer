@@ -25,8 +25,9 @@ import { testFontSnapshot } from './layout/test-font-snapshot.js';
 //   - `trHeight hRule="exact"` clips overflow at the physical row height,
 //   - auto row height GROWS to enclose the content.
 // The table block sits upright at the flow position: its physical top edge is
-// the top content margin (the column axis start) and it advances the vertical
-// flow by its PHYSICAL WIDTH (columns progress right→left past it).
+// the top content margin (the column axis start) and it adds no flow advance
+// (`word-vertical-section-upright-block-table`): the text after it takes the
+// next line strip and starts below the table.
 //
 // Word ground truth = the batch-3 vertical-table fixture PDF (two 1-cell
 // 1-in-wide fixed tables, exact 2 in vs auto): both cells lay their long CJK
@@ -258,13 +259,13 @@ function verticalNestedFloatingTableDoc(
       insideV: null,
     };
   }
-  const leading = fixedTable('', 20);
-  leading.colWidths = [100];
-  leading.rows[0]!.cells[0]!.widthPt = 100;
+  // An upright table adds no flow advance, so line strips fill the page until
+  // less than the outer table's width is left of the 146 pt flow budget.
+  const leading = Array.from({ length: 9 }, () => ({ type: 'paragraph', ...bodyParagraph('zz') }));
   return {
     section: PHYS,
     body: [
-      ...(relocate ? [{ type: 'table', ...leading }] : []),
+      ...(relocate ? leading : []),
       { type: 'table', ...outer },
     ],
     headers: { default: null, first: null, even: null },
@@ -321,16 +322,16 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     expect(Math.max(...autoRuns.map((r) => r.y))).toBeGreaterThan(COL_TOP + 80);
   });
 
-  it('the table advances the flow by its PHYSICAL WIDTH; body text stays vertical', async () => {
+  it('the table adds no flow advance; body text stays vertical in the first line strip', async () => {
     const { runs } = await renderRuns();
     const afterExact = runs.find((r) => r.text === 'zz');
     expect(afterExact).toBeDefined();
     // Body text on a vertical page keeps the rotated overlay placement.
     expect(afterExact!.transform).toBe('rotate(90deg)');
-    // The paragraph after the exact table starts one TABLE-WIDTH (50, the
-    // physical width) past the flow top — NOT one logical-row-height (80) past:
-    // place.left = cssW − (flowTop + tableW) = 200 − 80 = 120.
-    expect(afterExact!.x).toBeCloseTo(CSS_W - (FLOW_TOP + TABLE_W), 1);
+    // The paragraph after the exact table takes the first line strip, at the
+    // flow top: place.left = cssW − flowTop = 170, not one table width (50)
+    // further left.
+    expect(afterExact!.x).toBeCloseTo(CSS_W - FLOW_TOP, 1);
     // And the following auto table + paragraph keep flowing right→left.
     const afterAuto = runs.find((r) => r.text === 'qq');
     expect(afterAuto).toBeDefined();
@@ -338,13 +339,13 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     expect(afterAuto!.x).toBeLessThan(afterExact!.x);
   });
 
-  it('pagination charges the physical table width as the flow footprint', () => {
+  it('pagination does not charge the logical row height as the flow footprint', () => {
     const { canvas } = makeRecordingCanvas();
     const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
     // Logical flow budget = physical pageWidth − logical top/bottom insets
     // (30 + 24) = 146. A leading ~12 pt line + a 140 pt-EXACT-row table:
     // charging the logical row height (140) overflows onto page 2, while the
-    // upright footprint (tableW = 50) fits page 1 beside it.
+    // upright table (tableW = 50) fits page 1 beside it.
     const body = [
       { type: 'paragraph', ...bodyParagraph('zz') },
       { type: 'table', ...fixedTable(CELL_TEXT_1, 140) },
@@ -367,11 +368,11 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
     // §17.6.20: the upright table's rows remain in physical coordinates, so
     // the exact row owns an 80 pt physical row stack. The surrounding vertical
-    // story advances by the table's 50 pt physical width instead.
+    // story does not advance past the table.
     expect(exact.advancePt).toBeCloseTo(80, 6);
     expect(auto.advancePt).toBeGreaterThan(80);
-    expect(exact.flowBounds.heightPt).toBeCloseTo(TABLE_W, 6);
-    expect(auto.flowBounds.heightPt).toBeCloseTo(TABLE_W, 6);
+    expect(exact.flowBounds.heightPt).toBe(0);
+    expect(auto.flowBounds.heightPt).toBe(0);
 
     const paint = makeRecordingCanvas();
     await renderDocumentToCanvas(doc, paint.canvas, 0, {
@@ -513,18 +514,36 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     });
   });
 
+  it('resolves a nested float against the cell of a parent whose indent is not applied', () => {
+    // `word-vertical-section-upright-block-table`: the upright parent's
+    // indent does not move it, so the float's text-relative x is taken from
+    // the cell where it is finally placed.
+    const doc = verticalNestedFloatingTableDoc(false, false, true);
+    (doc.body[0] as unknown as { tblInd: number }).tblInd = 10;
+    const layout = documentLayout(doc);
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table' || !('resolvedFloatingTables' in table)) {
+      throw new Error('expected an indented upright parent with a nested float');
+    }
+    const fragment = table as TableFragmentLayout;
+    const [placement] = fragment.resolvedFloatingTables;
+    const widthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+    expect(fragment.flowBounds.xPt).toBeCloseTo(CSS_W - FLOW_TOP - widthPt, 6);
+    expect(placement!.bounds.xPt).toBeCloseTo(fragment.rows[0]!.cells[0]!.flowBounds.xPt + 5, 6);
+  });
+
   it('records the destination column on an upright retained placement', () => {
-    const wide = fixedTable('', 20);
-    wide.colWidths = [140];
-    wide.rows[0].cells[0].widthPt = 140;
     const narrow = fixedTable('', 20);
     const physical = {
       ...PHYS,
       columns: { count: 2, spacePt: 10, equalWidth: true, sep: false, cols: [] },
     } as SectionProps;
+    // An upright table adds no flow advance: fifteen 10 pt line strips fill
+    // the 146 pt first column and continue in the second.
     const body = [
-      { type: 'table', ...wide },
       { type: 'table', ...narrow },
+      ...Array.from({ length: 15 }, () => ({ type: 'paragraph', ...bodyParagraph('zz') })),
+      { type: 'table', ...fixedTable('', 20) },
     ] as unknown as BodyElement[];
     const measure = makeRecordingCanvas();
     const layout = layoutBodyModel(

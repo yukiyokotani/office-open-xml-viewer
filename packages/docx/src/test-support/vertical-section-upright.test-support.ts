@@ -1,0 +1,361 @@
+/// <reference types="node" />
+
+import { readFile } from 'node:fs/promises';
+import init, { DocxArchive } from '../wasm/docx_parser.js';
+import type { DocxDocumentModel } from '../types.js';
+import { normalizeInternalDocumentModel } from '../parser-model.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
+import { storeZip } from '../conformance/generate.js';
+
+// Synthetic vertical sections for `word-vertical-section-upright-block-table`,
+// in the geometry of its Word controls: A4, margins left 40, right 90, top 60,
+// bottom 80 pt, an 18 pt line grid, 10.5 pt text and single-bordered tables
+// 72 + 108 pt wide. Table heights come from the test metrics.
+
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+export const PAGE_W = 11906 / 20;
+export const MARGIN = { left: 40, right: 90, top: 60 };
+export const PITCH = 18;
+/** Physical y of the column end: page height less the 80 pt bottom margin. */
+export const COLUMN_END = 16838 / 20 - 80;
+export const TABLE_W = 180;
+const encoder = new TextEncoder();
+const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
+
+export const paragraph = (text: string) =>
+  `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+export const P = paragraph('あいうえお');
+const cell = (width: number, text: string) =>
+  `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
+export const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
+  + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((edge) => `<w:${edge} w:val="single" w:sz="4"/>`).join('')
+  + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>'
+  + Array.from({ length: rows }, (_, row) =>
+    `<w:tr>${rowHeightPt === undefined ? '' : `<w:trPr><w:trHeight w:val="${rowHeightPt * 20}" w:hRule="atLeast"/></w:trPr>`}`
+    + `${cell(1440, `A${row + 1}`)}${cell(2160, `B${row + 1}`)}</w:tr>`).join('')
+  + '</w:tbl>';
+export const T = table(2);
+
+/** A paragraph run anchoring a square-wrapped rectangle at page position
+ * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' or 'line' makes
+ * y relative to the anchoring paragraph or the anchor's line instead, and
+ * `horizontalFrom` 'character' makes x relative to the anchor's character.
+ * `allowOverlap` false makes it avoid the drawings before it (§20.4.2.3). */
+export const anchoredRectangle = (
+  x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' | 'line' = 'page',
+  horizontalFrom: 'page' | 'character' = 'page',
+  allowOverlap = true,
+) =>
+  '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+  + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1"'
+  + ` allowOverlap="${allowOverlap ? 1 : 0}">`
+  + '<wp:simplePos x="0" y="0"/>'
+  + `<wp:positionH relativeFrom="${horizontalFrom}"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
+  + `<wp:positionV relativeFrom="${verticalFrom}"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`
+  + `<wp:extent cx="${width * 12700}" cy="${height * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
+  + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+  + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+  + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
+  + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${width * 12700}" cy="${height * 12700}"/></a:xfrm>`
+  + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
+  + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+
+/** A one-row table, one 12 pt wide column, whose cell holds `paragraphs`
+ * paragraphs of a PAGE field, in roman numerals unless `format` says
+ * otherwise: one character to a line, so the cell's text is as many lines
+ * long as the page number has characters. `rowPt` is the row's minimum
+ * height. */
+export const romanPageTable = (paragraphs: number, rowPt: number, format: 'Roman' | 'Arabic' = 'Roman') => {
+  const field = `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>`
+    + `<w:fldSimple w:instr=" PAGE \\* ${format} "><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p>`;
+  return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+    + '<w:tblGrid><w:gridCol w:w="240"/></w:tblGrid>'
+    + `<w:tr><w:trPr><w:trHeight w:val="${rowPt * 20}" w:hRule="atLeast"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="240" w:type="dxa"/>`
+    + '<w:tcMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar></w:tcPr>'
+    + `${field.repeat(paragraphs)}</w:tc></w:tr></w:tbl>`;
+};
+
+export type Direction = 'tbRl' | 'tbLrV';
+/** The block content of the section's default header and footer, and of
+ * the footnote that `FOOTNOTE_REFERENCE` refers to. */
+export type Stories = Readonly<{
+  header?: string; footer?: string; footnote?: string;
+  /** Lets a footnote continue on the next page (the viewer's default). */
+  continueFootnotes?: boolean;
+  /** How many footnotes there are, each with the content `footnote`
+   * (ids 1 to this; one when absent). */
+  footnoteCount?: number;
+  /** The content of endnote 1, which `ENDNOTE_REFERENCE` refers to; endnotes
+   * sit at the end of the document (the default w:endnotePr). */
+  endnote?: string;
+  /** The document's compatibility mode (w:compatSetting compatibilityMode). */
+  compatibilityMode?: number;
+}>;
+/** A run referring to footnote `id` (1 to `Stories.footnoteCount`). */
+export const footnoteReference = (id: number) =>
+  `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
+export const FOOTNOTE_REFERENCE = footnoteReference(1);
+/** A run referring to endnote 1 (`Stories.endnote`). */
+export const ENDNOTE_REFERENCE =
+  '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r>';
+
+function docx(
+  direction: Direction,
+  body: readonly string[],
+  columns = 1,
+  linePitch = 360,
+  numberingLevel?: string,
+  styles?: string,
+  stories: Stories = {},
+): Uint8Array {
+  const storyKinds = (['header', 'footer'] as const).filter((kind) => stories[kind] !== undefined);
+  const document = `<w:document xmlns:w="${W}" xmlns:r="${REL}"><w:body>${body.join('')}`
+    + '<w:sectPr>'
+    + storyKinds.map((kind) => `<w:${kind}Reference w:type="default" r:id="rId${kind}"/>`).join('')
+    + '<w:pgSz w:w="11906" w:h="16838"/>'
+    + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
+    + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
+    + `<w:textDirection w:val="${direction}"/>`
+    + (linePitch === 0 ? '' : `<w:docGrid w:type="lines" w:linePitch="${linePitch}"/>`)
+    + '</w:sectPr></w:body></w:document>';
+  return storeZip(new Map([
+    ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + (numberingLevel === undefined ? ''
+        : '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>')
+      + (styles === undefined ? ''
+        : '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>')
+      + storyKinds.map((kind) => `<Override PartName="/word/${kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`).join('')
+      + (stories.footnote === undefined ? ''
+        : '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>')
+      + (stories.endnote === undefined ? ''
+        : '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>')
+      + (stories.compatibilityMode === undefined ? ''
+        : '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>')
+      + '</Types>')],
+    ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
+    ['word/document.xml', xml(document)],
+    ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0
+      && stories.footnote === undefined && stories.endnote === undefined
+      && stories.compatibilityMode === undefined ? [] : [
+      ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
+        + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
+        + storyKinds.map((kind) => `<Relationship Id="rId${kind}" Type="${REL}/${kind}" Target="${kind}1.xml"/>`).join('')
+        + (stories.footnote === undefined ? ''
+          : `<Relationship Id="rIdFootnotes" Type="${REL}/footnotes" Target="footnotes.xml"/>`)
+        + (stories.endnote === undefined ? ''
+          : `<Relationship Id="rIdEndnotes" Type="${REL}/endnotes" Target="endnotes.xml"/>`)
+        + (stories.compatibilityMode === undefined ? ''
+          : `<Relationship Id="rIdSettings" Type="${REL}/settings" Target="settings.xml"/>`)
+        + '</Relationships>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.compatibilityMode === undefined ? [] : [
+      ['word/settings.xml', xml(`<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode"`
+        + ` w:uri="http://schemas.microsoft.com/office/word" w:val="${stories.compatibilityMode}"/></w:compat></w:settings>`)],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.footnote === undefined ? [] : [
+      ['word/footnotes.xml', xml(`<w:footnotes xmlns:w="${W}">`
+        + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        + '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+        + Array.from({ length: stories.footnoteCount ?? 1 }, (_, at) =>
+          `<w:footnote w:id="${at + 1}">${stories.footnote}</w:footnote>`).join('')
+        + '</w:footnotes>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.endnote === undefined ? [] : [
+      ['word/endnotes.xml', xml(`<w:endnotes xmlns:w="${W}">`
+        + '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
+        + '<w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>'
+        + `<w:endnote w:id="1">${stories.endnote}</w:endnote></w:endnotes>`)],
+    ] as Array<[string, Uint8Array]>),
+    ...storyKinds.map((kind): [string, Uint8Array] => [
+      `word/${kind}1.xml`,
+      xml(`<w:${kind === 'header' ? 'hdr' : 'ftr'} xmlns:w="${W}">${stories[kind]}</w:${kind === 'header' ? 'hdr' : 'ftr'}>`),
+    ]),
+    ...(numberingLevel === undefined ? [] : [
+      ['word/numbering.xml', xml(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0">${numberingLevel}</w:abstractNum>`
+        + '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(styles === undefined ? [] : [
+      ['word/styles.xml', xml(`<w:styles xmlns:w="${W}">${styles}</w:styles>`)],
+    ] as Array<[string, Uint8Array]>),
+  ]));
+}
+
+function measureContext(): CanvasRenderingContext2D {
+  let font = '10px serif';
+  return {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    letterSpacing: '0px',
+    fontKerning: 'normal',
+    measureText: (text: string) => {
+      const px = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+      return {
+        width: [...text].length * px,
+        fontBoundingBoxAscent: px * 0.8,
+        fontBoundingBoxDescent: px * 0.2,
+        actualBoundingBoxAscent: px * 0.8,
+        actualBoundingBoxDescent: px * 0.2,
+      } as TextMetrics;
+    },
+  } as unknown as CanvasRenderingContext2D;
+}
+
+export interface Page {
+  /** Upright table boxes on the physical page, in source order: the grid's
+   * left edge and the physical x extent its vertical rules paint. */
+  readonly tables: Array<Readonly<{
+    left: number;
+    top: number;
+    bottom: number;
+    paintedLeft: number;
+    paintedRight: number;
+  }>>;
+  /** Line strips per body paragraph, in source order: the strip's distance
+   * from the first strip of the page along the block axis, and the physical
+   * y at which its inline flow starts. */
+  readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
+  /** Anchored drawings, in source order: the physical left, top, width and
+   * height of their frame. */
+  readonly drawings: Array<Readonly<{ left: number; top: number; width: number; height: number }>>;
+  /** For each of `drawings`, the body index of the paragraph that anchors it. */
+  readonly drawingParagraphs: number[];
+  /** Where the page's footnote band starts along the block axis, as a
+   * distance from the first strip like `strips[].block`; null without notes. */
+  noteStart: number | null;
+  /** The page's body nodes in order. */
+  readonly order: Array<'table' | 'paragraph'>;
+}
+
+/** `linePitch`: the section's line grid pitch in twentieths of a point (0:
+ * no line grid).
+ * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1.
+ * `styles`: the `w:style` elements of the styles part.
+ * `stories`: the section's default header and footer. */
+export function layOutPages(
+  direction: Direction,
+  body: readonly string[],
+  columns = 1,
+  linePitch = 360,
+  numberingLevel?: string,
+  styles?: string,
+  stories?: Stories,
+): Page[] {
+  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel, styles, stories));
+  let model: DocxDocumentModel;
+  try {
+    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+  const layout = layoutDocument(
+    model,
+    createLayoutServices(model, {
+      measureContext: measureContext(),
+      ...(stories?.continueFootnotes ? { allowFootnoteContinuation: true } : {}),
+    }),
+    { currentDateMs: 0 },
+  );
+  // The section-logical block origin: the right margin in tbRl (lines advance
+  // leftward from it), the left margin in tbLrV.
+  const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
+  // Each column's strips restart at the block origin.
+  return layout.pages.map((laidOut) => {
+  const page: Page = { tables: [], strips: [], drawings: [], drawingParagraphs: [], noteStart: null, order: [] };
+  for (const note of laidOut.layers.notes) {
+    const start = note.flowBounds.yPt - blockOrigin;
+    page.noteStart = page.noteStart === null ? start : Math.min(page.noteStart, start);
+  }
+  for (const node of laidOut.layers.body) {
+    if (node.kind === 'table' || node.kind === 'paragraph') page.order.push(node.kind);
+    if (node.kind === 'table') {
+      const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
+      page.tables.push({
+        left: node.flowBounds.xPt,
+        top: node.flowBounds.yPt,
+        bottom: node.flowBounds.yPt + node.advancePt,
+        paintedLeft: Math.min(...rules.map((rule) => rule.from.xPt - rule.widthPt / 2)),
+        paintedRight: Math.max(...rules.map((rule) => rule.from.xPt + rule.widthPt / 2)),
+      });
+    } else if (node.kind === 'paragraph') {
+      page.strips.push(node.lines.map((line) => ({
+        block: line.bounds.yPt - blockOrigin,
+        inlineStart: line.bounds.xPt,
+      })));
+      for (const drawing of node.drawings) {
+        page.drawingParagraphs.push(node.source.path[0]!);
+        // Section-logical frame: x inline (physical y), y block.
+        page.drawings.push({
+          left: direction === 'tbRl'
+            ? PAGE_W - drawing.flowBounds.yPt - drawing.flowBounds.heightPt : drawing.flowBounds.yPt,
+          top: drawing.flowBounds.xPt,
+          width: drawing.flowBounds.heightPt,
+          height: drawing.flowBounds.widthPt,
+        });
+      }
+    }
+  }
+  return page;
+  });
+}
+
+
+/** Loads the parser the fixtures are parsed with. */
+export async function loadParser(): Promise<void> {
+  await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) });
+}
+
+// Checks shared by the tests of tables and square-wrapped drawings.
+
+export type Drawing = Page['drawings'][number];
+export type Placed = Page['tables'][number];
+export const shared = (startA: number, endA: number, startB: number, endB: number) =>
+  Math.min(endA, endB) - Math.max(startA, startB) > 1e-6;
+export const covers = (drawing: Drawing, placed: Placed) =>
+  shared(drawing.left, drawing.left + drawing.width, placed.paintedLeft, placed.paintedRight)
+  && shared(drawing.top, drawing.top + drawing.height, placed.top, placed.bottom);
+/** Physical page height. */
+export const PAGE_H = COLUMN_END + 80;
+/** Whether the page has no place for `drawing` clear of what it may not
+ * cover: some such rectangle leaves it no room below itself before the
+ * page's bottom edge, and some none past its far edge before the page's
+ * side edge. A drawing keeps its place over a table only then. The
+ * rectangles are the page's tables and, where drawings may not overlap
+ * (`avoidsDrawings`), its other drawings. */
+export const hasNoPlace = (direction: Direction, page: Page, drawing: Drawing, avoidsDrawings: boolean) => {
+  // Past a table's far edge a drawing lies the 7.14 pt text clearance from it.
+  const obstacles = [
+    ...page.tables.map((placed) =>
+      ({ left: placed.paintedLeft - 7.14, right: placed.paintedRight + 7.14, bottom: placed.bottom })),
+    ...(avoidsDrawings ? page.drawings.filter((other) => other !== drawing).map((other) =>
+      ({ left: other.left, right: other.left + other.width, bottom: other.top + other.height })) : []),
+  ];
+  return obstacles.some((obstacle) => obstacle.bottom + drawing.height > PAGE_H + 1e-6)
+    && obstacles.some((obstacle) => direction === 'tbRl'
+      ? obstacle.left - drawing.width < -1e-6 : obstacle.right + drawing.width > PAGE_W + 1e-6);
+};
+/** Every table box sharing an area with another table or a drawing of
+ * its page; with `direction`, not with a drawing the page has no place
+ * for. */
+export const collisions = (
+  pages: readonly Page[], direction?: Direction, avoidsDrawings = false,
+) => pages.flatMap((page, pageIndex) => [
+  ...page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) =>
+    shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
+      && shared(first.top, first.bottom, second.top, second.bottom)
+      ? [{ pageIndex, first, second }] : [])),
+  ...page.drawings.flatMap((drawing) => page.tables.flatMap((placed) =>
+    covers(drawing, placed) && !(direction && hasNoPlace(direction, page, drawing, avoidsDrawings))
+      ? [{ pageIndex, drawing, placed }] : [])),
+]);
+
+/** A paragraph of `characters` characters whose last runs anchor `rectangles`. */
+export const anchoring = (characters: number, ...rectangles: string[]) =>
+  paragraph('あ'.repeat(characters)).replace('</w:p>', `${rectangles.join('')}</w:p>`);

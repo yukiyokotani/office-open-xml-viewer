@@ -20,6 +20,7 @@ import type {
   NoteLayout,
   TableLayout,
 } from './types.js';
+import type { UprightBlockRegistration } from './upright-block-index.js';
 
 /** A note can occur in multiple column bands of one physical page. */
 export function noteBandKey(bandId: string, noteId: string): string {
@@ -62,6 +63,12 @@ export interface BodyParagraphAcquisitionInput {
   readonly availableInlineExtentPt: number;
   readonly suppressSpaceBefore: boolean;
   readonly continuation: ParagraphFragmentCursor;
+  /** `word-vertical-section-upright-table-rewrapped-strip`: upright blocks
+   * planned after this fragment (BodyLayoutSession.planUprightBlocks) whose
+   * text exclusions this acquisition wraps around although they are not
+   * registered yet, and below whose box the wrapped drawings it anchors
+   * lie, as below a registered one. */
+  readonly besideUprightBlocks?: UprightBlockRegistration;
 }
 
 export interface AdjacentTableGroupCursor {
@@ -105,6 +112,14 @@ export interface BodyTableAcquisitionInput {
   readonly freshPageBlockExtentPt: number;
   /** Whether flow content already occupies the current page. */
   readonly pageHasContent?: boolean;
+  /** Whether no further column of the page follows the current one. */
+  readonly lastColumnOfPage?: boolean;
+  /** `word-vertical-section-upright-block-table`: the text exclusions of the
+   * wrapped drawings that the paragraph fragment before the table anchors,
+   * in section-logical page points, when the table is planned with that
+   * fragment (BodyLayoutSession.planUprightBlocks) before the fragment and
+   * its drawings are committed. */
+  readonly precedingDrawings?: readonly LayoutRect[];
   readonly cursor?: BodyTableContinuationCursor;
 }
 
@@ -120,6 +135,15 @@ export interface AcquiredParagraphBlock {
   /** Grid-only leading below a mark's own natural/authored box. */
   readonly markGridAfterLeadingPt?: number;
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
+  /** `word-vertical-section-upright-block-table`: the wrapped drawings of
+   * this acquisition whose text exclusion was registered when the page
+   * started, with the geometry the acquisition gives them, and whether that
+   * differs from what was registered (a drawing of an earlier paragraph,
+   * positioned from its text, was not known then, or the drawing's own size
+   * was fitted to its text). The paginator pins them (body-paginator.ts). */
+  readonly uprightDrawingPins?: readonly Readonly<{
+    occurrenceId: string; pin: UprightDrawingPin; differs: boolean;
+  }>[];
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body';
     xPt: number;
@@ -163,6 +187,19 @@ export interface AcquiredTableBlock {
    * not the next column. */
   readonly requiresFreshPage?: boolean;
   readonly retryAtBlockStartPt?: number;
+  /** `word-vertical-section-upright-block-table`: what accepting this
+   * fragment adds to the page's upright blocks
+   * (BodyLayoutSession.commitUprightBlocks). */
+  readonly uprightBlocks?: UprightBlockRegistration;
+  /** `word-vertical-section-upright-block-table`: where the placed
+   * fragment's box ends along the block axis. It charges no flow advance,
+   * so the footnotes it refers to are admitted against this. */
+  readonly uprightBlockEndPt?: number;
+  /** `word-vertical-section-upright-block-table`: the fragment's block lies
+   * over a column laid out before its own. Registered when the page's layout
+   * starts (commitUprightBlocks), it makes the text of that column flow
+   * around the block and the table take this position again. */
+  readonly uprightPagePin?: UprightBlockRegistration;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body' | 'upright-physical';
     xPt: number;
@@ -255,11 +292,32 @@ export interface FollowingBodyBlockMeasurementInput {
     | BodyTableAcquisitionInput['input'];
   readonly location: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
+  /** Block extent of the keep set between `location` and this block: where
+   * the flow reaches the block. Read for a block whose placement depends on
+   * it (`word-vertical-section-upright-block-table`). */
+  readonly precedingBlockExtentPt?: number;
+  /** Footnote reserve of the references in the keep set before this block,
+   * which are not admitted yet. A table is placed in the block extent left
+   * after them, as when the flow reaches it
+   * (`word-vertical-section-upright-block-table`). */
+  readonly precedingFootnoteReservePt?: number;
+  /** Block extent of a fresh page, as given to measureTable. */
+  readonly freshPageBlockExtentPt?: number;
+  /** As given to measureTable. */
+  readonly lastColumnOfPage?: boolean;
+  /** The wrapped drawings the keep set before this block anchors, which are
+   * not committed yet (BodyTableAcquisitionInput.precedingDrawings). Given
+   * for a table only: a paragraph does not read them. */
+  readonly precedingDrawings?: readonly LayoutRect[];
 }
 
 export interface FollowingBodyBlockMeasurement {
   readonly fullExtentPt: number;
   readonly leadContentExtentPt: number;
+  /** `word-vertical-section-upright-block-table`: where the box of an
+   * upright block table (with the tables that run on from it) ends along
+   * the block axis when it starts here. */
+  readonly uprightBlockEndPt?: number;
   /** Retained first-line slice for reservation-aware grid admission. Only
    * acquired for grid lines; later paragraph decoration is excluded. */
   readonly leadGridParagraph?: ParagraphLayout;
@@ -269,6 +327,14 @@ export interface FollowingBodyBlockMeasurement {
   readonly fullFootnoteReferenceIds?: readonly string[];
   /** References painted by the first indivisible content admitted with keepNext. */
   readonly leadFootnoteReferenceIds?: readonly string[];
+  /** The block does not start in this flow region after the keep set before
+   * it, whatever block extent is left: its extents are those it has in a
+   * fresh region, and a keep set ending with it starts there too
+   * (`word-vertical-section-upright-block-table`). */
+  readonly startsFreshRegion?: true;
+  /** Paragraph only: the text exclusions of the wrapped drawings it anchors
+   * (uprightPrecedingDrawings), which its keep set is not committed with. */
+  readonly precedingDrawings?: readonly LayoutRect[];
   /** Paragraph only: page-owned drawing occurrence keys anchored on each
    * measured line, so keepNext can honour an anchor-line deferral. */
   readonly pageOwnedAnchorKeysByLine?: readonly (readonly string[])[];
@@ -320,7 +386,22 @@ export interface PageAnchorPrescanInput {
   )[];
   readonly location: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
+  /** `word-vertical-section-upright-block-table`: the drawings of this page
+   * that are registered with the geometry an earlier layout of the page
+   * acquired for them, instead of being placed here
+   * (AcquiredParagraphBlock.uprightDrawingPins); their paragraphs place them
+   * exactly there. */
+  readonly drawingPins?: ReadonlyMap<string, UprightDrawingPin>;
 }
+
+/** `word-vertical-section-upright-block-table`: the frame, text exclusion
+ * and wrap polygon a paragraph's acquisition gave a drawing whose exclusion
+ * is registered when its page starts, in section-logical page points. */
+export type UprightDrawingPin = Readonly<{
+  bounds: LayoutRect;
+  exclusionBounds: LayoutRect;
+  wrapPolygon?: readonly PointPt[];
+}>;
 
 export interface LineNumberGlyphMetrics {
   readonly widthPt: number;
@@ -344,6 +425,22 @@ export interface BodyLayoutSession {
   moveAcquisitionCursor(location: BodyAcquisitionLocation): void;
   flowRegistrySnapshot(): BodyFlowRegistrySnapshotPt;
   commitFlowRegistryDelta(delta: BodyFlowRegistryDeltaPt): void;
+  /**
+   * `word-vertical-section-upright-block-table`: the upright block tables
+   * that are placed whole on this page if the flow reaches `request.input`
+   * at `request.location`, or null when that table is not such a block or is
+   * not placed whole there. Reads the page's upright blocks and changes
+   * nothing; the paginator commits the result once the paragraph fragment
+   * before the table is accepted wrapped around it.
+   */
+  planUprightBlocks?(request: BodyTableAcquisitionInput): UprightBlockRegistration | null;
+  /** Registers accepted upright blocks on the current page. */
+  commitUprightBlocks?(registration: UprightBlockRegistration): void;
+  /** `word-vertical-section-upright-block-table`: the far block edge of the
+   * upright blocks registered on the current page (negative infinity when
+   * there is none). They add no flow advance, so the flow position alone
+   * does not say how far the page's content reaches. */
+  uprightOccupiedBlockEndPt?(): number;
 }
 
 /** Document-private acquisition adapter. Page construction and transition

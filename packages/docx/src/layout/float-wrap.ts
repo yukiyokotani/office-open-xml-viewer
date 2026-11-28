@@ -106,6 +106,14 @@ interface FloatRectCore {
   /** WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: the line starting exactly at this
    * top ignores this float. */
   exemptLineTopPt?: number;
+  /** A square rectangle that a line band also meets when it ends exactly at
+   * yTop, that is on the half-open interval [yTop, yBottom)
+   * (WrapExclusion.bandStartInclusive). */
+  bandStartInclusive?: true;
+  /** A free gap of a line band that this rectangle bounds on either side
+   * holds text only when it is at least this wide
+   * (WrapExclusion.leastBoundedGapPt). */
+  leastBoundedGapPt?: number;
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
   /** Absolute X of the object box in the consuming wrap context's linear unit
@@ -332,6 +340,9 @@ interface ExactAttributedGap {
   readonly r: ExactRational;
   readonly leftSquareBoundary: boolean;
   readonly rightSquareBoundary: boolean;
+  /** FloatRect.leastBoundedGapPt of the object at each edge (0: none). */
+  readonly leftLeastGapPt: number;
+  readonly rightLeastGapPt: number;
 }
 
 /** Snapshot and compile geometry once at the line-wrap oracle boundary. */
@@ -417,6 +428,7 @@ function floatBlockedIntervals(
       }];
   if (projected.length === 0) return [];
   const squareBoundary = polygon === null;
+  const leastGapPt = float.leastBoundedGapPt ?? 0;
   const objectLeft = projected.reduce((minimum, interval) =>
     compareExactRational(interval.l, minimum) < 0 ? interval.l : minimum,
   projected[0]!.l);
@@ -429,17 +441,23 @@ function floatBlockedIntervals(
       r: unreducedExactFromNumber(paragraphRightPt),
       leftSquareBoundary: squareBoundary,
       rightSquareBoundary: false,
+      leftLeastGapPt: leastGapPt,
+      rightLeastGapPt: 0,
     }];
     case 'right': return [{
       l: unreducedExactFromNumber(paragraphLeftPt),
       r: objectRight,
       leftSquareBoundary: false,
       rightSquareBoundary: squareBoundary,
+      leftLeastGapPt: 0,
+      rightLeastGapPt: leastGapPt,
     }];
     case 'bothSides': return projected.map((interval) => ({
       ...interval,
       leftSquareBoundary: squareBoundary,
       rightSquareBoundary: squareBoundary,
+      leftLeastGapPt: leastGapPt,
+      rightLeastGapPt: leastGapPt,
     }));
   }
 }
@@ -541,6 +559,8 @@ function mergeAttributedIntervals(
     r: ExactRational;
     leftSquareBoundary: boolean;
     rightSquareBoundary: boolean;
+    leftLeastGapPt: number;
+    rightLeastGapPt: number;
   }> = [];
   for (const interval of sorted) {
     const previous = merged.at(-1);
@@ -551,14 +571,17 @@ function mergeAttributedIntervals(
     if (compareExactRational(interval.l, previous.l) === 0) {
       previous.leftSquareBoundary = previous.leftSquareBoundary
         && interval.leftSquareBoundary;
+      previous.leftLeastGapPt = Math.max(previous.leftLeastGapPt, interval.leftLeastGapPt);
     }
     const rightComparison = compareExactRational(interval.r, previous.r);
     if (rightComparison > 0) {
       previous.r = interval.r;
       previous.rightSquareBoundary = interval.rightSquareBoundary;
+      previous.rightLeastGapPt = interval.rightLeastGapPt;
     } else if (rightComparison === 0) {
       previous.rightSquareBoundary = previous.rightSquareBoundary
         && interval.rightSquareBoundary;
+      previous.rightLeastGapPt = Math.max(previous.rightLeastGapPt, interval.rightLeastGapPt);
     }
   }
   return merged;
@@ -584,27 +607,32 @@ function firstUsableFreeGap(
     l: ExactRational;
     r: ExactRational;
     squareConstrained: boolean;
+    leastGapPt: number;
   }> = [];
   const consider = (
     l: ExactRational,
     r: ExactRational,
     squareConstrained: boolean,
+    leastGapPt: number,
   ): void => {
     const clippedLeft = compareExactRational(exactLeft, l) >= 0 ? exactLeft : l;
     const clippedRight = compareExactRational(exactRight, r) <= 0 ? exactRight : r;
     if (compareExactRational(clippedRight, clippedLeft) > 0) {
-      gaps.push({ l: clippedLeft, r: clippedRight, squareConstrained });
+      gaps.push({ l: clippedLeft, r: clippedRight, squareConstrained, leastGapPt });
     }
   };
   let cursor = exactLeft;
   let cursorSquareBoundary = false;
+  // The least width an object bounding the gap at the cursor asks for.
+  let cursorLeastGapPt = 0;
   for (const interval of merged) {
     if (compareExactRational(interval.r, exactLeft) <= 0) {
       cursorSquareBoundary = interval.rightSquareBoundary;
+      cursorLeastGapPt = interval.rightLeastGapPt;
       continue;
     }
     if (compareExactRational(interval.l, exactRight) >= 0) {
-      consider(cursor, exactRight, cursorSquareBoundary);
+      consider(cursor, exactRight, cursorSquareBoundary, cursorLeastGapPt);
       cursor = exactRight;
       break;
     }
@@ -613,28 +641,34 @@ function firstUsableFreeGap(
         cursor,
         interval.l,
         cursorSquareBoundary || interval.leftSquareBoundary,
+        Math.max(cursorLeastGapPt, interval.leftLeastGapPt),
       );
     }
     const rightComparison = compareExactRational(interval.r, cursor);
     if (rightComparison > 0) {
       cursor = interval.r;
       cursorSquareBoundary = interval.rightSquareBoundary;
+      cursorLeastGapPt = interval.rightLeastGapPt;
     } else if (rightComparison === 0) {
       cursorSquareBoundary = cursorSquareBoundary && interval.rightSquareBoundary;
+      cursorLeastGapPt = Math.max(cursorLeastGapPt, interval.rightLeastGapPt);
     }
     if (compareExactRational(cursor, exactRight) >= 0) break;
   }
   if (compareExactRational(cursor, exactRight) < 0) {
-    consider(cursor, exactRight, cursorSquareBoundary);
+    consider(cursor, exactRight, cursorSquareBoundary, cursorLeastGapPt);
   }
   // WORD_FLOAT_GAP_FLOW selects physical gaps in reading order;
   // width admission belongs to the next
   // indivisible text atom, not a universal one-inch threshold (#1670).
   for (const gap of readingDirection === 'rtl' ? gaps.reverse() : gaps) {
     const width = subtractUnreducedExact(gap.r, gap.l);
+    // A gap an object bounds with a least width (FloatRect.leastBoundedGapPt)
+    // holds no text below that width, whatever the text would need.
     const requirement = Math.max(
       MIN_LINE_GAP,
       gap.squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
+      gap.leastGapPt,
     );
     if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0
       && (admitsGap === undefined || admitsGap(gap))) {
@@ -703,6 +737,30 @@ function tightEdgeTouch(
   return null;
 }
 
+/** How far before a `bandStartInclusive` rectangle's block start a line band
+ * may end and still meet it. The band's end and the rectangle's start are
+ * the same block position reached by different sums (line advances against
+ * a flow cursor), which agree only to within floating-point rounding; this
+ * is far wider than that rounding and far narrower than any line. */
+const BAND_START_TOLERANCE_PT = 1e-6;
+
+/** Whether the line band [exactTop, exactBottom] meets a square rectangle's
+ * block interval: a strict overlap, or for a `bandStartInclusive` rectangle a
+ * band ending at its top (within BAND_START_TOLERANCE_PT) as well. */
+function bandMeetsRectY(
+  rect: Readonly<FloatRect>,
+  exactTop: ExactRational,
+  exactBottom: ExactRational,
+): boolean {
+  const fromBottom = compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom));
+  if (rect.bandStartInclusive === true && rect.mode === 'square') {
+    return fromBottom < 0 && compareExactRational(
+      exactBottom, unreducedExactFromNumber(rect.yTop - BAND_START_TOLERANCE_PT),
+    ) >= 0;
+  }
+  return fromBottom < 0 && compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0;
+}
+
 /**
  * The vertical test `lineWindowAtY` uses to decide whether `float` affects a
  * line band [topY, topY + heightPt]: a strict overlap, or a touched tight
@@ -718,8 +776,7 @@ export function createFloatLineBandPredicate(
   return (topY, heightPt) => {
     const exactTop = unreducedExactFromNumber(topY);
     const exactBottom = addUnreducedExact(exactTop, unreducedExactFromNumber(heightPt));
-    const overlaps = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0
-      && compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom)) < 0;
+    const overlaps = bandMeetsRectY(rect, exactTop, exactBottom);
     if (rect.mode === 'topAndBottom') return overlaps;
     if (rect.exemptLineTopPt === topY) return false;
     return overlaps || tightEdgeTouch(prepared, exactTop, exactBottom) !== null;
@@ -803,8 +860,7 @@ function lineWindowAtY(
     if (rect.mode !== 'square') continue;
     if (rect.exemptLineTopPt === topY) continue;
     const edge = tightEdgeTouch(float, exactTop, exactBottom);
-    if (edge === null && (compareExactRational(exactBottom, exactRectY(rect.yTop)) <= 0
-      || compareExactRational(exactTop, exactRectY(rect.yBottom)) >= 0)) continue;
+    if (edge === null && !bandMeetsRectY(rect, exactTop, exactBottom)) continue;
     if (!floatOverlapsColumnX(rect as FloatRect, paraXLeft, paraXRight)) continue;
     const intervals = edge === null
       ? floatBlockedIntervals(float, topY, probeH, paraXLeft, paraXRight, reference)
@@ -949,6 +1005,10 @@ interface AffineBoundary {
     intercept: ExactRational;
   }>;
   readonly square: boolean;
+  /** FloatRect.leastBoundedGapPt of the object this boundary belongs to;
+   * an envelope takes the largest of its candidates' (it only adds sweep
+   * candidates, which lineWindowAtY then decides). */
+  readonly leastGapPt?: number;
 }
 
 interface AffineBlockedInterval {
@@ -1061,7 +1121,8 @@ function selectEnvelope(
       );
     }
   }
-  return { exact: winner.exact, square };
+  const leastGapPt = Math.max(0, ...candidates.map((candidate) => candidate.leastGapPt ?? 0));
+  return { exact: winner.exact, square, ...(leastGapPt > 0 ? { leastGapPt } : {}) };
 }
 
 function constantBoundary(value: number, square = false): AffineBoundary {
@@ -1086,6 +1147,8 @@ function objectAffineIntervals(
   diagnostics: MutableLineFloatSweepDiagnostics | null,
 ): AffineBlockedInterval[] {
   const { rect, polygon } = prepared;
+  const least = rect.leastBoundedGapPt !== undefined && rect.leastBoundedGapPt > 0
+    ? { leastGapPt: rect.leastBoundedGapPt } : {};
   const midpoint = exactBinary64Midpoint(lower, upper);
   const exactMidpoint = unreducedExactFromNumber(midpoint);
   const exactMidpointBottom = addUnreducedExact(
@@ -1102,12 +1165,12 @@ function objectAffineIntervals(
   let intervals: AffineBlockedInterval[] = polygon
     ? polygonBandExactIntervalFunctions(polygon, probeH, lower, upper)
       .map((interval) => ({
-        left: { exact: interval.left, square: false },
-        right: { exact: interval.right, square: false },
+        left: { exact: interval.left, square: false, ...least },
+        right: { exact: interval.right, square: false, ...least },
       }))
     : [{
-        left: constantBoundary(rect.xLeft, true),
-        right: constantBoundary(rect.xRight, true),
+        left: { ...constantBoundary(rect.xLeft, true), ...least },
+        right: { ...constantBoundary(rect.xRight, true), ...least },
       }];
   if (intervals.length === 0) return [];
   const objectLeft = selectEnvelope(
@@ -1182,6 +1245,8 @@ function mergeAffineIntervalsAtRight(
       ? {
           exact: previous.left.exact,
           square: previous.left.square && interval.left.square,
+          ...(Math.max(previous.left.leastGapPt ?? 0, interval.left.leastGapPt ?? 0) > 0
+            ? { leastGapPt: Math.max(previous.left.leastGapPt ?? 0, interval.left.leastGapPt ?? 0) } : {}),
         }
       : previous.left;
     merged[merged.length - 1] = { left, right };
@@ -1247,7 +1312,7 @@ function nextLocalSweepEvent(
       intercept: subtractUnreducedExact(right.exact.intercept, left.exact.intercept),
     };
     gaps.push({ exactWidth });
-    const requirement = Math.max(
+    const baseRequirement = Math.max(
       MIN_LINE_GAP,
       squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
     );
@@ -1255,17 +1320,22 @@ function nextLocalSweepEvent(
       multiplyUnreducedExact(exactWidth.slope, unreducedExactFromNumber(lower)),
       exactWidth.intercept,
     );
-    if (compareExactRational(
-      widthAtLower,
-      unreducedExactFromNumber(requirement),
-    ) < 0 && exactWidth.slope.numerator > 0n) {
-      appendLocalRoot(
-        roots,
-        exactAffineRoot(right.exact, left.exact, requirement),
-        lower,
-        upper,
-        diagnostics,
-      );
+    // The width at which the gap opens for the text, and the larger width
+    // an object bounding it may ask for (firstUsableFreeGap).
+    const leastGapPt = Math.max(left.leastGapPt ?? 0, right.leastGapPt ?? 0);
+    for (const requirement of leastGapPt > baseRequirement ? [baseRequirement, leastGapPt] : [baseRequirement]) {
+      if (compareExactRational(
+        widthAtLower,
+        unreducedExactFromNumber(requirement),
+      ) < 0 && exactWidth.slope.numerator > 0n) {
+        appendLocalRoot(
+          roots,
+          exactAffineRoot(right.exact, left.exact, requirement),
+          lower,
+          upper,
+          diagnostics,
+        );
+      }
     }
   };
   let gapLeft = pageLeft;

@@ -58,6 +58,12 @@ export function bodyRootFloatingTablePlacementKey(
   return `table:${source.path.join('.')}:root:${pageIndex}:${rowIndex}:${rowFragmentIndex}`;
 }
 
+/** Identity of an upright block table of a vertical section
+ * (`word-vertical-section-upright-block-table`). */
+export function uprightBlockTableKey(source: SourceRef): string {
+  return `upright-table:${sourceKey(source)}`;
+}
+
 export function imageResourceKey(source: SourceRef, partPath: string): string {
   return `image:${sourceKey(source)}:${encodeURIComponent(partPath)}`;
 }
@@ -78,6 +84,16 @@ export function chartResourceKey(source: SourceRef): string {
 
 export function anchorOccurrenceKey(source: SourceRef, parserLocalId: string): string {
   return `anchor:${sourceKey(source)}:${encodeURIComponent(parserLocalId)}`;
+}
+
+/** The top-level index of the story block that owns an anchor occurrence key
+ * of `story` (the inverse of the key above for a block of that story), or
+ * null for a key of another story or shape. */
+export function anchorOccurrenceBlockIndex(occurrenceId: string, story: SourceRef): number | null {
+  const prefix = `anchor:${story.story}:${encodeURIComponent(story.storyInstance)}:`;
+  if (!occurrenceId.startsWith(prefix)) return null;
+  const index = Number.parseInt(occurrenceId.slice(prefix.length), 10);
+  return Number.isInteger(index) ? index : null;
 }
 
 /** Separate ownership permits the same part to have different fill/pen effects. */

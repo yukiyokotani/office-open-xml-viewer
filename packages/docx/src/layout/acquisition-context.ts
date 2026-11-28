@@ -22,6 +22,7 @@ import type {
   RetainedTableAcquisitionDependencies,
 } from './table-acquisition.js';
 import type { LayoutRect, LayoutServices, WritingMode } from './types.js';
+import type { UprightBlockPageIndex } from './upright-block-index.js';
 
 /** One acquired body-table occurrence and the point-space placement facts that
  * bind it to the current retained-layout session. */
@@ -82,6 +83,14 @@ export interface AnchorFloatRegistrationState extends FloatRegistrationState {
    * drawings carried to this page, keyed by anchor occurrence. The anchor
    * paragraph keeps the carried frame instead of re-resolving it. */
   frozenAnchorFrames?: Map<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: frames of the drawings
+   * pinned for this layout of the page, keyed by anchor occurrence; the
+   * anchor paragraph places each exactly there. */
+  pinnedAnchorFrames?: Map<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: the frame and text
+   * exclusion of each wrapped drawing registered when this page started,
+   * keyed by anchor occurrence, as registered. */
+  registeredDrawings?: Map<string, Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>>;
   verticalCJK?: boolean;
   verticalAllRotated?: boolean;
   verticalPhys?: PhysicalAnchorFrame;
@@ -150,6 +159,9 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
   /** Set only while acquiring a body table that is placed upright in the
    * physical page (identity paint root); its cells take that frame. */
   uprightPhysicalTable?: boolean;
+  /** `word-vertical-section-upright-block-table`: the upright blocks placed
+   * on the current page (upright-block-index.ts). */
+  uprightBlockIndex?: UprightBlockPageIndex;
   kinsoku: KinsokuRules;
   defaultTabPt: number;
   currentDateMs?: number;
