@@ -1220,7 +1220,11 @@ impl<'a> Reader<'a> {
                     lang: text.lang.clone(),
                     lang_east_asia: text.lang_east_asia.clone(),
                     lang_bidi: text.lang_bidi.clone(),
-                    lang_script_class: language.or(text.lang_script_class.clone()),
+                    lang_script_class: match language {
+                        Some(tag) => properties
+                            .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty())),
+                        None => text.lang_script_class.clone(),
+                    },
                     ..FieldRun::default()
                 }))]
             }
@@ -1248,8 +1252,9 @@ impl<'a> Reader<'a> {
             } => {
                 let mut run = properties.text_run();
                 run.text = base.clone();
-                if language.is_some() {
-                    run.lang_script_class = language;
+                if let Some(tag) = language {
+                    run.lang_script_class = properties
+                        .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
                 }
                 run.ruby = Some(RubyAnnotation {
                     text: text.clone(),
@@ -1793,8 +1798,27 @@ impl RunProperties {
             lang: self.lang.as_deref().map(str::to_string),
             lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
             lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
-            lang_script_class: Some(self.script_language.as_deref().unwrap_or("").to_string()),
+            lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..TextRun::default()
+        }
+    }
+
+    /// The model's script-class language for text of these properties whose
+    /// class language is `language`: the tag, or an empty string where the
+    /// class names none while another class does (the renderer would
+    /// otherwise pick one of the axes by its own slot table). Absent when the
+    /// styles name no language at all: such text is the same with or without
+    /// the fact, and a document without languages stays free of it.
+    fn class_language_fact(&self, language: Option<&str>) -> Option<String> {
+        match language {
+            Some(tag) => Some(tag.to_string()),
+            None if self.lang.is_some()
+                || self.lang_east_asia.is_some()
+                || self.lang_bidi.is_some() =>
+            {
+                Some(String::new())
+            }
+            None => None,
         }
     }
 
@@ -1816,7 +1840,7 @@ impl RunProperties {
             lang: self.lang.as_deref().map(str::to_string),
             lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
             lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
-            lang_script_class: Some(self.script_language.as_deref().unwrap_or("").to_string()),
+            lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..RunFontFacts::default()
         }
     }

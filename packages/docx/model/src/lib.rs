@@ -2884,8 +2884,8 @@ pub struct RunFontFacts {
     /// style:language-complex). When present it names the language of every
     /// character for language-sensitive glyph forms, instead of the
     /// §17.3.2.26 slot choice among the axes above; an empty string records a
-    /// class that names no language. The axes keep their own values (regional
-    /// font selection reads `lang_east_asia`).
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3111,8 +3111,8 @@ pub struct FieldRun {
     /// style:language-complex). When present it names the language of every
     /// character for language-sensitive glyph forms, instead of the
     /// §17.3.2.26 slot choice among the axes above; an empty string records a
-    /// class that names no language. The axes keep their own values (regional
-    /// font selection reads `lang_east_asia`).
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
     pub background: Option<String>,
@@ -3331,8 +3331,8 @@ pub struct TextRun {
     /// style:language-complex). When present it names the language of every
     /// character for language-sensitive glyph forms, instead of the
     /// §17.3.2.26 slot choice among the axes above; an empty string records a
-    /// class that names no language. The axes keep their own values (regional
-    /// font selection reads `lang_east_asia`).
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_script_class: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section

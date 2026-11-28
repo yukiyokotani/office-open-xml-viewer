@@ -206,8 +206,8 @@ fn the_script_class_language_is_a_fact_beside_the_style_axes() {
     // ODF Table 22: U+31C0 is Asian like U+5B57 and U+1D11E Latin, whatever
     // slot the renderer's §17.3.2.26 table gives them. The class language is
     // its own fact; every run keeps the style's three axes, so regional font
-    // selection still reads the Asian setting. The unstyled "x" records that
-    // its class names no language.
+    // selection still reads the Asian setting. The unstyled "x" names no
+    // language on any axis and carries no fact.
     let axes = [Some("fr-FR"), Some("zh-CN"), Some("ar-SA")];
     assert_eq!(
         runs,
@@ -215,7 +215,42 @@ fn the_script_class_language_is_a_fact_beside_the_style_axes() {
             ("a\u{1D11E}".to_string(), Some("fr-FR"), axes),
             ("\u{31C0}\u{5B57}".to_string(), Some("zh-CN"), axes),
             ("\u{0627}".to_string(), Some("ar-SA"), axes),
-            ("x".to_string(), Some(""), [None; 3]),
+            ("x".to_string(), None, [None; 3]),
+        ]
+    );
+}
+
+#[test]
+fn a_class_without_a_language_is_recorded_only_beside_another_class_language() {
+    let automatic = r#"<style:style style:name="A" style:family="text"><style:text-properties style:language-asian="zh" style:country-asian="CN"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p><text:span text:style-name=\"A\">a\u{5B57}<text:page-number>1</text:page-number></text:span>b<text:page-number>2</text:page-number></text:p>",
+        ..Fixture::default()
+    });
+    let items: Vec<(String, Option<&str>)> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Field(field) => {
+                Some(("<page>".to_string(), field.lang_script_class.as_deref()))
+            }
+            DocRun::Text(text) => Some((text.text.clone(), text.lang_script_class.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            // Latin text of a style that names only an Asian language: the
+            // empty fact keeps the renderer from using the Asian axis.
+            ("a".to_string(), Some("")),
+            ("\u{5B57}".to_string(), Some("zh-CN")),
+            ("<page>".to_string(), Some("")),
+            // No language on any axis: no fact, as in a document without
+            // languages.
+            ("b".to_string(), None),
+            ("<page>".to_string(), None),
         ]
     );
 }
