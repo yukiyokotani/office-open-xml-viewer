@@ -1380,20 +1380,42 @@ pub(super) fn parse_classic_impl(
     let first_series = ser_nodes.first().copied();
     let shared_category_formula =
         first_series.and_then(|series| external_reference_formula(series, category_tag));
-    let resolved_category_levels = first_series
-        .and_then(|series| collect_multi_level_str_cache(series, category_tag))
-        .or_else(|| {
-            shared_category_formula
-                .as_deref()
-                .and_then(|formula| references.resolve_string_levels(formula))
-        });
-    let categories: Vec<String> = resolved_category_levels
+    let authored_category_levels =
+        first_series.and_then(|series| collect_multi_level_str_cache(series, category_tag));
+    let category_levels_are_authored = authored_category_levels.is_some();
+    let resolved_category_levels = authored_category_levels.or_else(|| {
+        shared_category_formula
+            .as_deref()
+            .and_then(|formula| references.resolve_string_levels(formula))
+    });
+    // The labels and the branch that supplies them are unchanged; each branch
+    // also states the provenance of the labels it returned
+    // (`ChartModel::categories_numeric`): an authored hierarchy is text, a
+    // single resolved level is the worksheet range itself, and anything else
+    // is the first series' own source.
+    let (categories, categories_are_numeric): (Vec<String>, bool) = match resolved_category_levels
         .as_ref()
         .and_then(|levels| levels.first().cloned())
-        .or_else(|| {
-            first_series.and_then(|series| collect_string_source(series, category_tag, references))
-        })
-        .unwrap_or_default();
+    {
+        Some(labels) => {
+            let single_resolved_level = !category_levels_are_authored
+                && resolved_category_levels
+                    .as_ref()
+                    .is_some_and(|levels| levels.len() == 1);
+            let numeric = single_resolved_level
+                && labels_carry_decimal_point(&labels)
+                && shared_category_formula.as_deref().is_some_and(|formula| {
+                    resolved_labels_are_numbers(&labels, formula, references)
+                });
+            (labels, numeric)
+        }
+        None => first_series
+            .and_then(|series| {
+                collect_string_source_with_provenance(series, category_tag, references)
+            })
+            .unwrap_or_default(),
+    };
+    let categories_numeric = categories_are_numeric.then_some(true);
     let category_levels = resolved_category_levels.filter(|levels| levels.len() > 1);
     let category_source_hidden =
         first_series.and_then(|series| collect_source_hidden(series, category_tag, references));
@@ -1540,25 +1562,33 @@ pub(super) fn parse_classic_impl(
             // copies. `ChartSeries.categories = None` explicitly means to fall
             // back to `ChartModel.categories` (the shared TS contract). Authored
             // caches/literals and genuinely distinct formulas remain per-series.
-            let series_categories: Option<Vec<String>> = {
+            let (series_categories, series_categories_numeric): (
+                Option<Vec<String>>,
+                Option<bool>,
+            ) = {
                 let own_formula = external_reference_formula(*ser, own_category_tag);
                 let shares_chart_categories = own_category_tag == category_tag
                     && (series_position == 0
                         || (own_formula.is_some()
                             && own_formula.as_deref() == shared_category_formula.as_deref()));
                 if shares_chart_categories {
-                    None
+                    (None, None)
                 } else {
                     let has_own_source = ser.children().any(|node| {
                         node.is_element() && node.tag_name().name() == own_category_tag
                     });
-                    match collect_string_source(*ser, own_category_tag, references) {
-                        Some(own) if series_is_scatter_like || !own.is_empty() => Some(own),
+                    match collect_string_source_with_provenance(*ser, own_category_tag, references)
+                    {
+                        Some((own, numeric)) if series_is_scatter_like || !own.is_empty() => {
+                            (Some(own), numeric.then_some(true))
+                        }
                         // A distinct scatter/bubble X source that cannot be
                         // resolved must not inherit the first series' X values.
                         // `Some([])` explicitly suppresses that fallback.
-                        None if series_is_scatter_like && has_own_source => Some(Vec::new()),
-                        _ => None,
+                        None if series_is_scatter_like && has_own_source => {
+                            (Some(Vec::new()), None)
+                        }
+                        _ => (None, None),
                     }
                 }
             };
@@ -2096,6 +2126,7 @@ pub(super) fn parse_classic_impl(
                 // path that currently consumes this separate color array.
                 data_label_colors: None,
                 categories: series_categories,
+                categories_numeric: series_categories_numeric,
                 bubble_x_source_is_string,
                 bubble_sizes,
                 bubble_3d_group_default,
@@ -3165,6 +3196,7 @@ pub(super) fn parse_classic_impl(
         categories,
         category_source_hidden,
         category_levels,
+        categories_numeric,
         series,
         plot_groups: Some(plot_groups),
         vary_colors,

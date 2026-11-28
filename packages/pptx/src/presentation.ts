@@ -1,6 +1,6 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
 import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
-import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
+import { hostLocale, resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import type { DimOptions, PptxComment, Slide } from './types';
 import {
   renderSlideWithEmbeddedFonts,
@@ -598,8 +598,8 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, renderers } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: fontDemandCollectorUrl() } : {}) } satisfies PptxWorkerRequest),
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, hostLocale: hostLocale(), renderers } satisfies RenderWorkerRequest)
+          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, hostLocale: hostLocale(), ...(fonts && !renderers ? { collectFontDemand: fontDemandCollectorUrl() } : {}) } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
     );
@@ -719,7 +719,7 @@ export class PptxPresentation {
       // its preflight in Window (below) rather than in the worker — but the
       // request carries it so no parse can reach the worker without it.
       (id) => ({
-        kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback,
+        kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, hostLocale: hostLocale(),
         progressiveLayout: true,
       }) satisfies PptxWorkerRequest,
       [buffer],
@@ -805,7 +805,7 @@ export class PptxPresentation {
       (id) => {
         this._parseRequestId = id;
         return {
-          kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, renderers,
+          kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, hostLocale: hostLocale(), renderers,
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },

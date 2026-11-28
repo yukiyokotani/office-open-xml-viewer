@@ -7,6 +7,7 @@ import { bubblePointIsThreeD, effectiveMarkerSymbol, markerFillColorFor, markerF
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
 import { chartStyleDirectFillDecision, chartStyleDirectLineDecision, chartStyleFillDecision, chartStyleLineDecision } from '../style-paint.js';
 import { axisLineWidthPx } from '../axis-style.js';
+import { localizedCategoryText } from '../chart-number-format.js';
 import { resolveNativeFill as resolveFill } from '../../shape/paint.js';
 import { drawingmlLineDashArray } from '../../draw/dash.js';
 import { chartVariesColorsByPoint, legendEntryGlobalIndex, legendEntryRanges, legendIsCategoryDriven } from '../legend-entry-plan.js';
@@ -581,6 +582,11 @@ export function buildLegendEntries(
     const first = series[0];
     const n = first ? first.values.length : 0;
     const cats = first?.categories ?? chartCategories;
+    // Provenance of `cats`: the series' own list, else the chart's shared
+    // list, which is what every caller that names a chart passes.
+    const catsNumeric = first?.categories != null
+      ? first.categoriesNumeric
+      : chart && chartCategories === chart.categories ? chart.categoriesNumeric : undefined;
     const sourceSeriesIndex = chart && first
       ? Math.max(0, chartSeriesSourceIndex(chart, first))
       : 0;
@@ -630,7 +636,7 @@ export function buildLegendEntries(
         ? pieSliceColor(i, first, pieVaryColors, 0)
         : legendEntryColor(chartType, series, i, varyByPoint, pieVaryColors);
       return {
-        label: (cats[i] ?? `Item ${i + 1}`).toString(),
+        label: cats[i] == null ? `Item ${i + 1}` : localizedCategoryText(cats[i].toString(), catsNumeric),
         color: resolvedFill?.fillType === 'solid'
           ? (resolvedFill.color.startsWith('#') ? resolvedFill.color : `#${resolvedFill.color}`)
           : legacyColor,

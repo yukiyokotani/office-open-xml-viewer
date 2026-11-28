@@ -607,13 +607,21 @@ export function wrapMeasuredText(
   return paragraphs.flatMap(paragraph => wrapMeasuredLine(ctx, paragraph, maxWidth, singleTokenOverhangPx));
 }
 
+// NBSP, NARROW NBSP and FIGURE SPACE, built from code points (not literals) so
+// the painter-literal font-demand guard does not read them as painted text.
+const NO_BREAK_SPACES = String.fromCharCode(0xa0, 0x202f, 0x2007);
+const BREAKABLE_SPACE = new RegExp(`[^\\S${NO_BREAK_SPACES}]+`);
+
 function wrapMeasuredLine(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number,
   singleTokenOverhangPx: number,
 ): string[] {
-  const words = text.trim().split(/\s+/).filter(Boolean);
+  // Break only at breakable whitespace: a no-break space (U+00A0), a narrow
+  // no-break space (U+202F, fr-FR's group separator) and a figure space
+  // (U+2007) stay inside their token, so a grouped number never splits there.
+  const words = text.trim().split(BREAKABLE_SPACE).filter(Boolean);
   if (words.length === 0) return [''];
   const lines: string[] = [];
   let line = '';
@@ -648,6 +656,12 @@ function wrapMeasuredLine(
           high = mid - 1;
         }
       }
+      // Never break beside a no-break space: keep it with both neighbours
+      // (back off first; where that would make no progress, extend forward).
+      const forbidden = (at: number): boolean => at < chars.length
+        && (NO_BREAK_SPACES.includes(chars[at - 1]) || NO_BREAK_SPACES.includes(chars[at]));
+      while (end > start + 1 && forbidden(end)) end--;
+      while (end < chars.length && forbidden(end)) end++;
       const chunk = chars.slice(start, end).join('');
       start = end;
       if (start < chars.length) lines.push(chunk);

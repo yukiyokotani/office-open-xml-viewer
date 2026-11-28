@@ -604,6 +604,108 @@ mod tests {
         assert_eq!(chart.series[0].categories, None);
     }
 
+    fn parse_two_category_series(
+        first: &str,
+        second: &str,
+        references: Option<&mut dyn ChartReferenceResolver>,
+    ) -> ChartModel {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/><c:cat>{first}</c:cat>
+                <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+              <c:ser><c:idx val="1"/><c:order val="1"/><c:cat>{second}</c:cat>
+                <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                references: std::cell::Cell::new(references),
+                ..Default::default()
+            },
+        )
+        .expect("bar chart parses")
+    }
+
+    // `categories_numeric` states where the label strings came from; it never
+    // changes them.
+    #[test]
+    fn category_provenance_follows_the_authored_snapshot_that_supplied_the_labels() {
+        let number = r#"<c:numRef><c:f>S!A1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:numCache></c:numRef>"#;
+        let number_literal =
+            r#"<c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2.5</c:v></c:pt></c:numLit>"#;
+        let text = r#"<c:strRef><c:f>S!B1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:strCache></c:strRef>"#;
+        let whole =
+            r#"<c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2024</c:v></c:pt></c:numLit>"#;
+
+        let numbers = parse_two_category_series(number, number_literal, None);
+        assert_eq!(numbers.categories, vec!["1.2"]);
+        assert_eq!(numbers.categories_numeric, Some(true));
+        assert_eq!(numbers.series[0].categories, None);
+        assert_eq!(numbers.series[0].categories_numeric, None);
+        assert_eq!(numbers.series[1].categories, Some(vec!["2.5".to_string()]));
+        assert_eq!(numbers.series[1].categories_numeric, Some(true));
+
+        // The same characters from a text source carry no provenance, and
+        // each list keeps its own.
+        let text_then_number = parse_two_category_series(text, number_literal, None);
+        assert_eq!(text_then_number.categories, vec!["1.2"]);
+        assert_eq!(text_then_number.categories_numeric, None);
+        assert_eq!(text_then_number.series[1].categories_numeric, Some(true));
+        let number_then_text = parse_two_category_series(number, text, None);
+        assert_eq!(number_then_text.categories_numeric, Some(true));
+        assert_eq!(
+            number_then_text.series[1].categories,
+            Some(vec!["1.2".to_string()])
+        );
+        assert_eq!(number_then_text.series[1].categories_numeric, None);
+
+        // Nothing to repaint: no label carries a decimal point.
+        assert_eq!(
+            parse_two_category_series(whole, whole, None).categories_numeric,
+            None
+        );
+    }
+
+    /// Worksheet A1:A3 = 3, `second`, 1.5 for every formula.
+    struct WorksheetColumn {
+        second: Option<f64>,
+    }
+
+    impl ChartReferenceResolver for WorksheetColumn {
+        fn resolve_strings(&mut self, _formula: &str) -> Option<Vec<String>> {
+            Some(vec!["3".into(), "1.2".into(), "1.5".into()])
+        }
+        fn resolve_numbers(&mut self, _formula: &str) -> Option<Vec<Option<f64>>> {
+            Some(vec![Some(3.0), self.second, Some(1.5)])
+        }
+    }
+
+    #[test]
+    fn live_worksheet_categories_are_numeric_only_when_every_cell_is_a_number() {
+        let reference = r#"<c:numRef><c:f>S!$A$1:$A$3</c:f></c:numRef>"#;
+        let other = r#"<c:numRef><c:f>S!$B$1:$B$3</c:f></c:numRef>"#;
+        let labels = vec!["3".to_string(), "1.2".to_string(), "1.5".to_string()];
+
+        let mut numbers = WorksheetColumn { second: Some(1.2) };
+        let chart = parse_two_category_series(reference, other, Some(&mut numbers));
+        assert_eq!(chart.categories, labels);
+        assert_eq!(chart.categories_numeric, Some(true));
+        assert_eq!(chart.series[1].categories, Some(labels.clone()));
+        assert_eq!(chart.series[1].categories_numeric, Some(true));
+
+        // A text cell reading "1.2" keeps the list textual; the labels are
+        // the same either way.
+        let mut mixed = WorksheetColumn { second: None };
+        let chart = parse_two_category_series(reference, other, Some(&mut mixed));
+        assert_eq!(chart.categories, labels);
+        assert_eq!(chart.categories_numeric, None);
+        assert_eq!(chart.series[1].categories, Some(labels));
+        assert_eq!(chart.series[1].categories_numeric, None);
+    }
+
     #[test]
     fn plot_visible_only_preserves_source_masks_and_precedes_statistical_error_bars() {
         let xml = format!(

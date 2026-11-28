@@ -370,6 +370,8 @@ export function drawSecondaryCategoryAxis(
   py0: number,
   pw: number,
   ptToPx: number,
+  /** Provenance of `categories` (`categoriesNumeric` of that list). */
+  categoriesNumeric?: boolean,
 ): void {
   if (axis.hidden || categories.length === 0) return;
   const { color, width } = resolveAxisLine(axis.lineColor, axis.lineWidthEmu, ptToPx);
@@ -421,7 +423,7 @@ export function drawSecondaryCategoryAxis(
       ctx.textAlign = anchor.textAlign;
       fillAuthoredText(
         ctx,
-        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors),
+        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, categoriesNumeric),
         px0 + anchor.fraction * pw,
         py0 - labelGap,
         axisLabelLineHeightPx(fontPx),
@@ -437,7 +439,7 @@ export function drawSecondaryCategoryAxis(
       px0 + pw / 2,
       py0 - (axis.tickLabelPos === 'none'
         ? 0
-        : fontPx + secondaryCategoryLabelExtraH(categories, axis, chart, fontPx)
+        : fontPx + secondaryCategoryLabelExtraH(categories, axis, chart, fontPx, categoriesNumeric)
           + categoryLabelOffsetPx(
             categoryTickLabelGapPx(fontPx),
             axis.labelOffsetPercent,
@@ -478,12 +480,13 @@ export function secondaryCategoryLabelExtraH(
   axis: SecondaryValueAxis,
   chart: ChartModel,
   fontPx: number,
+  categoriesNumeric?: boolean,
 ): number {
   if (axis.tickLabelPos === 'none') return 0;
   const labelSkip = Math.max(1, Math.floor(axis.tickLabelSkip ?? 1));
   const labels: string[] = [];
   for (let index = 0; index < categories.length; index += labelSkip) {
-    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors));
+    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, categoriesNumeric));
   }
   return authoredExtraLinesHeight(labels, axisLabelLineHeightPx(fontPx));
 }

@@ -200,7 +200,7 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
       ...chart,
       series: chart.series.flatMap((series, seriesIndex) => {
         const effective = series.categories == null
-          ? { ...series, categories: chart.categories }
+          ? { ...series, categories: chart.categories, categoriesNumeric: chart.categoriesNumeric }
           : series;
         const hidden = effective.sourceHidden;
         const plan = hidden && makeVisibilityPlan(hidden, pointCount(effective));

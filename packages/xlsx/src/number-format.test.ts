@@ -320,6 +320,50 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
     }
   });
 
+  it('paints the host locale decimal and group separators (#2346)', () => {
+    // §18.8.30's `.` and `,` tokens paint the host locale's separators
+    // (number-symbols.ts). fr-FR groups with U+202F (Intl/CLDR).
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    try {
+      expect(fmt(1234.5, '#,##0.00')).toBe('1\u202f234,50');
+      expect(formatCellValue(numCell(0.5), styles('General'))).toBe('0,5');
+      expect(formatCellValue(numCell(0.5), builtinStyles(0))).toBe('0,5');
+      expect(fmt(0.125, '0.00%')).toBe('12,50%');
+      expect(fmt(12345, '0.00E+00')).toBe('1,23E+04');
+      // A quoted literal keeps its own characters.
+      expect(fmt(2.5, '0.0" km."')).toBe('2,5 km.');
+      expect(formatGeneralNumber(123456789012.5)).toBe('1,23457E+11');
+      expect(formatCellValue(numCell(2.5), builtinStyles(49))).toBe('2,5');
+      // [MS-OI29500] §2.1.712(b): fractional seconds use the same separator.
+      expect(fmt(62.345 / 86400, 'mm:ss.00')).toBe('01:02,35');
+      expect(fmt(62.345 / 86400, '[ss].00')).toBe('62,35');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    vi.stubGlobal('navigator', { language: 'de-DE' });
+    try {
+      expect(fmt(1234567.5, '#,##0.00')).toBe('1.234.567,50');
+      // The rows of public corpus specimen xlsx-001 that a comma-decimal host
+      // tells apart:
+      // General, grouping with decimals, and a quoted literal dot.
+      expect(formatCellValue(numCell(39.37007874), styles('General'))).toBe('39,37007874');
+      expect(fmt(1609.344, '#,##0.000')).toBe('1.609,344');
+      expect(fmt(3.785411784, '0.00" l."')).toBe('3,79 l.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the invariant separators for an en-US host', () => {
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      expect(fmt(1234.5, '#,##0.00')).toBe('1,234.50');
+      expect(formatCellValue(numCell(0.5), builtinStyles(0))).toBe('0.5');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('reuses the localized short-date formatter for cells in the same UI locale', () => {
     vi.stubGlobal('navigator', { language: 'ko-KR' });
     const NativeDateTimeFormat = Intl.DateTimeFormat;

@@ -189,6 +189,27 @@ afterEach(() => {
 });
 
 describe('DOCX render worker bitmap surface', () => {
+  it('adopts the parse request locale for what the worker paints, and keeps its own without one', async () => {
+    const parse = (id: number, extra: Record<string, unknown>) => ({
+      type: 'parse', id, data: new ArrayBuffer(1), defaultCurrentDateMs: 0,
+      resourcePolicy: { maxArchiveEntryBytes: null, maxTotalInflatedBytes: null, maxArchiveEntries: null },
+      ...extra,
+    });
+    // A page paint in the worker realm: the painter formats a built-in short
+    // date (chart category and cell text) with the worker's adopted locale.
+    const painted: Array<{ date: string }> = [];
+    mocks.render.mockImplementation(async () => {
+      const core = await import('@silurus/ooxml-core');
+      painted.push({ date: core.formatLocalizedExcelShortDate(45_659, false) });
+    });
+    const { document, dispatch } = await loadWorker(false);
+    await dispatch(parse(101, {}));
+    await document.renderPageToBitmap(0, { dpr: 1 });
+    await dispatch(parse(102, { hostLocale: 'fr-FR' }));
+    await document.renderPageToBitmap(0, { dpr: 1 });
+    expect(painted.map(entry => entry.date)).toEqual(['1/2/2025', '02/01/2025']);
+  });
+
   it('retains ordinary progressive page reuse metadata after source dispatch is shared', async () => {
     const { worker, dispatch } = await loadWorker();
     await dispatch({

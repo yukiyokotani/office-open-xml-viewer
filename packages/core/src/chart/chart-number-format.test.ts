@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   formatChartVal,
   formatChartValWithCode,
   formatCategoryLabel,
   formatLocalizedExcelShortDate,
+  localizedCategoryText,
 } from './chart-number-format.js';
 
 describe('formatChartVal (General)', () => {
@@ -234,5 +235,87 @@ describe('scientific and fraction sections', () => {
     // The search does not grow with the denominator's digits.
     expect(formatChartValWithCode(1, '# ?/???????')).toBe('1');
     expect(formatChartValWithCode(1 / 3, '# ?/???????')).toBe('1/3');
+  });
+});
+
+describe('chart labels paint the host locale separators (#2346)', () => {
+  it('uses the fr-FR decimal and group separators like worksheet cells', () => {
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    try {
+      expect(formatChartValWithCode(1234.5, '#,##0.00')).toBe('1 234,50');
+      expect(formatChartVal(0.5)).toBe('0,5');
+      expect(formatChartValWithCode(0.125, '0.00%')).toBe('12,50%');
+      // The mantissa that rounds up to the next power is read back through
+      // the localized separators.
+      expect(formatChartValWithCode(9.96, '0.0E+0')).toBe('1,0E+1');
+      // General's integer path: String() of a large integer is exponential.
+      expect(formatChartVal(1.25e21)).toBe('1,25e+21');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the invariant separators for en-US', () => {
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      expect(formatChartValWithCode(1234.5, '#,##0.00')).toBe('1,234.50');
+      expect(formatChartVal(0.5)).toBe('0.5');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('raw category text paints the host decimal separator (#2346)', () => {
+  const labels = (locale: string) => {
+    vi.stubGlobal('navigator', { language: locale });
+    try {
+      return {
+        // No code: the raw string, whose `.` is localized for a numeric list only.
+        numericRaw: formatCategoryLabel('1.2', null, false, null, true),
+        textRaw: formatCategoryLabel('1.2', null),
+        unknownRaw: formatCategoryLabel('1.2', null, false, null, undefined),
+        // Not a number, or nothing to repaint.
+        numericListText: formatCategoryLabel('v1.2', null, false, null, true),
+        exponent: localizedCategoryText('1E+20', true),
+        // A code formats any number-looking category, as before; provenance
+        // plays no part.
+        numericCode: formatCategoryLabel('1.2', '0.00', false, null, true),
+        textCode: formatCategoryLabel('1.2', '0.00'),
+      };
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it('fr-FR', () => {
+    expect(labels('fr-FR')).toEqual({
+      numericRaw: '1,2', textRaw: '1.2', unknownRaw: '1.2', numericListText: 'v1.2', exponent: '1E+20',
+      numericCode: '1,20', textCode: '1,20',
+    });
+  });
+
+  it('en-US is unchanged whatever the provenance', () => {
+    expect(labels('en-US')).toEqual({
+      numericRaw: '1.2', textRaw: '1.2', unknownRaw: '1.2', numericListText: 'v1.2', exponent: '1E+20',
+      numericCode: '1.20', textCode: '1.20',
+    });
+  });
+});
+
+describe('built-in short dates follow the adopted host locale', () => {
+  it('defaults to the locale a worker adopted, not its own navigator', async () => {
+    vi.resetModules();
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      const { adoptHostLocale } = await import('../number-symbols');
+      const { formatLocalizedExcelShortDate } = await import('./chart-number-format');
+      expect(formatLocalizedExcelShortDate(45_659, false)).toBe('1/2/2025');
+      adoptHostLocale('fr-FR');
+      expect(formatLocalizedExcelShortDate(45_659, false)).toBe('02/01/2025');
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 });

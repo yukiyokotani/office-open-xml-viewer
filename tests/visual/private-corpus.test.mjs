@@ -239,7 +239,7 @@ function png(value) {
   return PNG.sync.write(image);
 }
 
-function selfVrtFixture() {
+function selfVrtFixture(committedFiles = {}) {
   const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-e2e-'));
   const base = join(scratch, 'base');
   mkdirSync(join(base, 'packages/pptx/public/demo'), { recursive: true });
@@ -252,6 +252,10 @@ function selfVrtFixture() {
   );
   writeFileSync(join(base, 'packages/pptx/public/demo/deck.pptx'), 'deck');
   writeFileSync(join(base, 'renderer.js'), 'export const version = 1;\n');
+  for (const [path, content] of Object.entries(committedFiles)) {
+    mkdirSync(join(base, path, '..'), { recursive: true });
+    writeFileSync(join(base, path), content);
+  }
   git(base, 'add', '.');
   git(base, 'commit', '-q', '-m', 'renderer');
   const revision = git(base, 'rev-parse', 'HEAD');
@@ -297,6 +301,58 @@ test('a verified baseline checkout detects a changed slide and accepts an unchan
     snapshot(fixture.base, fixture.revision);
     assert.equal(compare(fixture), null);
     assert.match(compare(fixture, 8), /differs from the previous renderer/);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a baseline rendered under another browser locale is rejected', () => {
+  const fixture = selfVrtFixture();
+  try {
+    withEnv({ VRT_LOCALE: 'fr-FR' }, () => snapshot(fixture.base, fixture.revision));
+    withEnv({ VRT_LOCALE: undefined }, () => {
+      assert.throws(() => compare(fixture), /previous-renderer manifest mismatch/);
+    });
+    withEnv({ VRT_LOCALE: 'fr-FR' }, () => assert.equal(compare(fixture), null));
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+/** Remove `locale` from the demo corpus manifest, as a harness that predates
+ * the field would have written it. */
+function dropManifestLocale(base) {
+  const path = join(base, 'packages/pptx/tests/visual/baseline/demo/manifest.json');
+  const { locale, ...manifest } = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(locale, 'en-US');
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+test('a baseline from a harness that predates the locale field is an en-US capture', () => {
+  // The fixture's baseline revision commits no harness: it predates the field.
+  const fixture = selfVrtFixture();
+  try {
+    snapshot(fixture.base, fixture.revision);
+    dropManifestLocale(fixture.base);
+    assert.equal(compare(fixture), null);
+    assert.match(compare(fixture, 8), /differs from the previous renderer/);
+    withEnv({ VRT_LOCALE: 'fr-FR' }, () => {
+      assert.throws(() => compare(fixture), /previous-renderer manifest mismatch/);
+    });
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('a missing locale is rejected when the baseline revision records one', () => {
+  const fixture = selfVrtFixture({
+    'tests/visual/private-corpus.mjs': 'export function vrtLocale() { return \'en-US\'; }\n',
+  });
+  try {
+    snapshot(fixture.base, fixture.revision);
+    assert.equal(compare(fixture), null);
+    dropManifestLocale(fixture.base);
+    assert.throws(() => compare(fixture), /previous-renderer manifest mismatch/);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }

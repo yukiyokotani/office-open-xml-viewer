@@ -523,6 +523,7 @@ export interface ChartModel {
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
+    categoriesNumeric?: boolean;
     series: ChartSeries[];
     plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;
@@ -881,6 +882,7 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
+    categoriesNumeric?: boolean;
     bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;

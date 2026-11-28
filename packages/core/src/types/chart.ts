@@ -138,6 +138,9 @@ export interface ChartSeries {
    * `ChartModel.categories` as X.
    */
   categories?: string[] | null;
+  /** Provenance of this series' own `categories`, as
+   *  `ChartModel.categoriesNumeric` is for the shared list. */
+  categoriesNumeric?: boolean;
   /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
    * exposes such a lone bubble series as one legend entry per point while a
    * numeric X source keeps the ordinary one-entry-per-series legend. */
@@ -852,6 +855,16 @@ export interface ChartModel {
    * of its category span.
    */
   categoryLevels?: string[][] | null;
+  /**
+   * Provenance of `categories`, which holds numbers and text alike as
+   * strings: `true` when every non-empty label is the invariant text of a
+   * number (a `c:numCache` / `c:numLit` point, or a numeric worksheet cell)
+   * and at least one carries a decimal point. Its only use is painting that
+   * `.` as the host locale's decimal separator where the label is drawn
+   * without a number format (`localizedCategoryText`); it selects neither
+   * text nor format. Absent: text, a mixed range, or nothing to repaint.
+   */
+  categoriesNumeric?: boolean;
   series: ChartSeries[];
   /** Ordered classic chart groups. Absent keeps legacy public models on the
    * existing single-family compatibility path. */

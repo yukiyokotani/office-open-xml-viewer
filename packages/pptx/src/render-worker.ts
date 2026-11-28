@@ -1,5 +1,5 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
-import type { CjkLang } from '@silurus/ooxml-core';
+import { adoptMessageHostLocale, type CjkLang } from '@silurus/ooxml-core';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxSlideOfficeFontRequests } from './font-requests';
@@ -371,6 +371,7 @@ function executeArchiveFromNew(
 
 self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecodeResponse>) => {
   const request = event.data;
+  adoptMessageHostLocale(request);
   if (isWorkerSvgDecodeResponse(request)) {
     svgDecodeClient.accept(request);
     return;

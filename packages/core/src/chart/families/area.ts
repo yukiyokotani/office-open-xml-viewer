@@ -57,7 +57,7 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawCategoryDataLabels } from '../shared/data-labels.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
@@ -78,6 +78,7 @@ export function renderAreaChart(
 ): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
+  const catsNumeric = chartCategoriesNumeric(chart);
   const n = cats.length; if (n === 0) return;
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
   // A plot area can contain both `<c:areaChart>` and `<c:lineChart>` groups.
@@ -462,7 +463,7 @@ export function renderAreaChart(
     ? dateAxisPlan.majorTicks.map(tick =>
       formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelSkip) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
+      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them (an authored inner
   // rectangle already leaves its own label band). Exactly 0 without breaks.
@@ -791,6 +792,7 @@ export function renderAreaChart(
           isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
         ),
         shapeRotationDeg,
+        catsNumeric,
       );
     }
   }
@@ -880,6 +882,7 @@ export function renderAreaChart(
         isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
       ),
       shapeRotationDeg,
+      catsNumeric,
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
@@ -1007,7 +1010,7 @@ export function renderAreaChart(
       : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
         const ci = index * authoredSkip;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric),
           x: toX(ci),
           categoryIndex: ci,
         };

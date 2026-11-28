@@ -7,6 +7,8 @@ import { chartExXlsxBytes } from '../../../../tests/fixtures/chart-ex-packages.m
 import { frozenOverflowXlsxBytes } from '../../../../tests/fixtures/frozen-overflow-xlsx.mjs';
 // @ts-ignore - shared plain-JS test fixture builder.
 import { symbolFontXlsxBytes } from '../../../../tests/fixtures/symbol-font-xlsx.mjs';
+// @ts-ignore - shared plain-JS test fixture builder.
+import { numberSeparatorsXlsxBytes, shortDateXlsxBytes } from '../../../../tests/fixtures/number-separators-xlsx.mjs';
 
 // Worker mode must produce (near-)identical pixels to main mode: same
 // renderer, same per-sheet parse, same fonts, different thread. The only
@@ -259,4 +261,63 @@ test('worker mode matches main mode › symbol-font cells, runs and text box', a
   expect(worker.height).toBe(main.height);
   const diff = pixelmatch(main.data, worker.data, undefined, main.width, main.height, { threshold: 0.1 });
   expect((diff / (main.width * main.height)) * 100).toBeLessThanOrEqual(0.1);
+});
+
+// Number separators follow the main thread's host locale in both realms
+// (#2346, core `adoptHostLocale`). Browser locale emulation does not reach a
+// dedicated worker, so without the adopted locale the worker would paint the
+// machine's separators while main mode paints fr-FR ones.
+for (const [title, fixtureBytes] of [
+  ['comma-decimal number separators', numberSeparatorsXlsxBytes],
+  ['built-in short date (format 14)', shortDateXlsxBytes],
+] as const) test(`worker mode matches main mode › ${title}`, async ({ browser }) => {
+  const frames = async (locale: string): Promise<{ main: PNG; worker: PNG }> => {
+    const context = await browser.newContext({ locale });
+    try {
+      const page = await context.newPage();
+      await page.route('**/generated/number-separators.xlsx', (route) => route.fulfill({
+        status: 200, contentType: 'application/octet-stream', body: Buffer.from(fixtureBytes()),
+      }));
+      await page.goto('/tests/visual/worker-fixture.html?xlsx=generated/number-separators&sheet=0');
+      await page.waitForFunction(
+        () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+        { timeout: 60_000 },
+      );
+      const status = await page.evaluate(() => document.body.dataset.status);
+      if (status === 'error') {
+        throw new Error(await page.evaluate(() => document.body.dataset.errorMessage ?? ''));
+      }
+      const [mainUrl, workerUrl] = await page.evaluate(() => [
+        (document.getElementById('main-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+        (document.getElementById('worker-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+      ]);
+      return {
+        main: PNG.sync.read(Buffer.from(mainUrl.split(',')[1], 'base64')),
+        worker: PNG.sync.read(Buffer.from(workerUrl.split(',')[1], 'base64')),
+      };
+    } finally {
+      await context.close();
+    }
+  };
+  const diffPct = (a: PNG, b: PNG): number =>
+    (pixelmatch(a.data, b.data, undefined, a.width, a.height, { threshold: 0.1 }) / (a.width * a.height)) * 100;
+  const fr = await frames('fr-FR');
+  const en = await frames('en-US');
+  expect(fr.worker.width).toBe(fr.main.width);
+  expect(fr.worker.height).toBe(fr.main.height);
+  expect(diffPct(fr.main, fr.worker)).toBeLessThanOrEqual(0.1);
+  // The worker frame is closer to the main frame of the same locale than to
+  // the other locale's: a worker that kept its own navigator locale paints
+  // identical frames for both pages (diff 0), and a single cell's difference
+  // can sit under the tolerance above.
+  expect(diffPct(fr.main, fr.worker)).toBeLessThan(diffPct(fr.worker, en.worker));
+  // The fr-FR frame really paints other separators than the en-US one.
+  expect(fr.main.width).toBe(en.main.width);
+  expect(diffPct(fr.main, en.main)).toBeGreaterThan(0);
+  // The worker adopts the main thread's locale from the parse request: its
+  // own navigator stays en-US under the page's locale emulation, so a worker
+  // that dropped the request's hostLocale would paint the same frame for
+  // both pages. The fr-FR worker frame must differ from the en-US one.
+  expect(fr.worker.width).toBe(en.worker.width);
+  expect(diffPct(fr.worker, en.worker)).toBeGreaterThan(0);
 });

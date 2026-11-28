@@ -7,7 +7,7 @@ import { legendEntryGlobalIndex, legendEntryRanges } from '../legend-entry-plan.
 import { authoredLineCount, authoredTextLines, fillAuthoredText, measureAuthoredTextWidth } from '../chart-text-lines.js';
 import { axisLineWidthPx } from '../axis-style.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { wrapMeasuredText } from './axis.js';
 import { buildLegendEntries, drawLegendSwatch } from './legend.js';
 import { dashPatternForPreset } from './geometry.js';
@@ -146,11 +146,12 @@ export function measureChartDataTable(
   const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
   const categoryBuiltinId = chart.series
     .find(series => series.catFormatBuiltinId != null)?.catFormatBuiltinId;
+  const categoriesNumeric = chartCategoriesNumeric(chart);
   const headerLines = chartCategories(chart).map(category => {
     const numeric = category.trim() === '' ? Number.NaN : Number(category);
     const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors);
+      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, categoriesNumeric);
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

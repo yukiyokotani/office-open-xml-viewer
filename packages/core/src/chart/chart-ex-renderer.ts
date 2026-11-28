@@ -594,9 +594,10 @@ function renderWaterfallChart(
         ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
         if (valGridline.dash.length > 0) ctx.setLineDash(previousDash);
       }
-      // Locale-independent §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`),
-      // matching the other renderers — `toLocaleString()` grouped by the
-      // viewer's OS locale, so the same chart read differently across machines.
+      // §18.8.30 formatting (honoring `<c:valAx><c:numFmt>`), matching the
+      // other renderers: the code's `.`/`,` paint the host decimal and group
+      // separators (number-symbols.ts), not `toLocaleString()`'s whole
+      // locale-specific number shape.
       if (valueTickLabelsVisible) {
         fillAuthoredText(
           ctx,

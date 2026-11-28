@@ -27,7 +27,7 @@ import { dataLabelIsDeleted } from './data-label-style.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 import { pptxPresetDashArray } from '../draw/dash.js';
 import { finiteDataExtent, planNumericValueAxis, type NumericValueAxisPlan } from './axis-scale.js';
-import { formatCategoryLabel, formatChartValWithCode } from './chart-number-format.js';
+import { formatCategoryLabel, formatChartValWithCode, localizedCategoryText } from './chart-number-format.js';
 import {
   axisTitleFontPx,
   axisTitleMargin,
@@ -1457,6 +1457,25 @@ function paintThreeDMarker(
   if (resolvedLinePaint) ctx.stroke();
 }
 
+/** A 3-D point label's category: the series' own entry, else the chart's,
+ * else the generated index, with the provenance of the list that supplied it. */
+function threeDPointCategory(chart: ChartModel, series: ChartSeries, index: number): string {
+  const own = series.categories?.[index];
+  if (own != null) return localizedCategoryText(own, series.categoriesNumeric);
+  const shared = chart.categories[index];
+  return shared != null ? localizedCategoryText(shared, chart.categoriesNumeric) : `${index + 1}`;
+}
+
+/** The category list a 3-D pie legend paints (the first series' own
+ * non-empty list, else the chart's), with the provenance of that list. */
+function threeDPieLegendCategories(chart: ChartModel): readonly string[] {
+  const first = chart.series[0];
+  const own = first?.categories?.length ? first.categories : null;
+  const list = own ?? chart.categories;
+  const numeric = own ? first?.categoriesNumeric : chart.categoriesNumeric;
+  return numeric === true ? list.map(label => localizedCategoryText(label, true)) : list;
+}
+
 function drawThreeDDataLabel(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -1499,8 +1518,7 @@ function drawThreeDDataLabel(
     showSeries,
     showValue: showVal,
     showPercent,
-    category: series.categories?.[categoryIndex]
-      ?? chart.categories[categoryIndex] ?? `${categoryIndex + 1}`,
+    category: threeDPointCategory(chart, series, categoryIndex),
     seriesName: series.name || `Series ${seriesIndex + 1}`,
     sourceValue: value,
     valueDivisor: valueDisplayUnits?.divisor,
@@ -1682,7 +1700,7 @@ function titleAndPlot(
   const legendOverrides = threeDLegendOverrideMap(chart);
   ctx.save();
   const rawLegendLabels = chart.chartType === 'pie'
-    ? (chart.series[0]?.categories?.length ? chart.series[0].categories : chart.categories)
+    ? threeDPieLegendCategories(chart)
     : chart.series.map((series, index) => series.name || `Series ${index + 1}`);
   const legendLabels = rawLegendLabels.flatMap((label, index) =>
     legendOverrides.get(index)?.deleted === true ? [] : [{ label, index }]
@@ -2311,7 +2329,7 @@ function simpleLegend(
     chart.series[0]?.dataPointOverrides?.map(override => [override.idx, override]) ?? [],
   );
   const rawEntries = categoryDriven
-    ? (chart.series[0]?.categories?.length ? chart.series[0].categories : chart.categories)
+    ? threeDPieLegendCategories(chart)
       .map((label, index) => {
         const authored = chart.series[0]?.dataPointColors?.[index];
         return {
@@ -3310,8 +3328,11 @@ function renderCartesian(
   if (!projection) return true;
   projection = fitChartThreeDProjectionToWallThickness(projection, chart.threeD, plot);
   const percent = chart.chartType.endsWith('Pct');
-  const categories = chart.series.find(series => (series.categories?.length ?? 0) > 0)?.categories
-    ?? chart.categories;
+  const categorySeries = chart.series.find(series => (series.categories?.length ?? 0) > 0);
+  const categories = categorySeries?.categories ?? chart.categories;
+  const categoriesNumeric = categorySeries
+    ? categorySeries.categoriesNumeric
+    : chart.categoriesNumeric;
   const categoryCount = Math.max(1, categories.length, ...chart.series.map(series => series.values.length));
   const percentScales = percent
     ? planThreeDPercentCategoryScales(chart, categoryCount)
@@ -4491,6 +4512,7 @@ function renderCartesian(
         chart.catAxisFormatCode,
         chart.date1904,
         chart.catAxisFormatDivisors,
+        categoriesNumeric,
       )
     );
     let rotation = authoredCategoryRotation(chart);
@@ -4845,8 +4867,7 @@ function renderPie(
         showSeries: labelOverride?.showSerName ?? defaults?.showSerName ?? false,
         showValue: labelOverride?.showVal ?? defaults?.showVal ?? chart.showDataLabels,
         showPercent: labelOverride?.showPercent ?? defaults?.showPercent ?? false,
-        category: series.categories?.[slice.index]
-          ?? chart.categories[slice.index] ?? `${slice.index + 1}`,
+        category: threeDPointCategory(chart, series, slice.index),
         seriesName: series.name || 'Series 1',
         sourceValue: slice.value,
         percentRatio: slice.percentValue,
@@ -4930,10 +4951,14 @@ function renderPie(
     if (authored === '00000000') return '00000000';
     return scaleHexColor(authored ? `#${authored}` : colorFor(index), 0.80).replace(/^#/, '');
   });
+  const categoriesNumeric = series.categories?.length
+    ? series.categoriesNumeric
+    : chart.categoriesNumeric;
   simpleLegend(ctx, {
     ...chart,
     categories,
-    series: [{ ...series, categories, dataPointColors: legendPointColors }],
+    categoriesNumeric,
+    series: [{ ...series, categories, categoriesNumeric, dataPointColors: legendPointColors }],
   }, legend, ptToPx, true, legendMeasure, shapeRotationDeg);
   return true;
 }

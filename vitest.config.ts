@@ -9,5 +9,6 @@ export default defineConfig({
   test: {
     include: ['packages/**/src/**/*.test.ts', 'site/src/**/*.test.ts', 'tests/asset-sidecar-build.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/tests/visual/**'],
+    setupFiles: ['tests/vitest-locale-setup.ts'],
   },
 });

@@ -4,6 +4,7 @@
 
 import { excelSerialToUtcDate, isExcelDisplayDateSerial } from './excel-date';
 import { hasOwnKey } from './internal/own-key';
+import { hostNumberSymbols } from './number-symbols';
 
 /** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
 const NAMED_COLORS: Record<string, string> = {
@@ -458,7 +459,10 @@ export function formatExcelDateTime(serial: number, section: string, date1904 = 
         const fraction = kind === 's' ? /^\.(0{1,3})(?!0)/.exec(section.slice(i)) : null;
         if (fraction) {
           const digits = fraction[1].length;
-          result += '.' + String(Math.floor((absMs % 1000) / 10 ** (3 - digits))).padStart(digits, '0');
+          // [MS-OI29500] §2.1.712(b): the fractional-seconds marker is the
+          // international decimal separator, the same host symbol as numbers.
+          result += hostNumberSymbols().decimal
+            + String(Math.floor((absMs % 1000) / 10 ** (3 - digits))).padStart(digits, '0');
           i += fraction[0].length;
         }
         prevWasHour = kind === 'h';
@@ -546,7 +550,8 @@ export function formatExcelDateTime(serial: number, section: string, date1904 = 
       if (fraction) {
         const digits = fraction[1].length;
         const milliseconds = elapsedSection ? absMs % 1000 : date.getUTCMilliseconds();
-        result += '.' + String(Math.floor(milliseconds / 10 ** (3 - digits))).padStart(digits, '0');
+        result += hostNumberSymbols().decimal
+          + String(Math.floor(milliseconds / 10 ** (3 - digits))).padStart(digits, '0');
         i += fraction[0].length;
       }
       prevWasHour = false;

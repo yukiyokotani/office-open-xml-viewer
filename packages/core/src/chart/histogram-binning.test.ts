@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_HISTOGRAM_BINS,
   MAX_HISTOGRAM_INPUT_POINTS,
@@ -216,6 +216,21 @@ describe('ChartEx histogram automatic width (measured Office rule)', () => {
     ]);
     expect(plan(v, { binSize: 20, intervalClosed: 'l' }).categories).toEqual([
       '[-12, 8)', '[8, 28]',
+    ]);
+  });
+});
+
+describe('ChartEx histogram General edge labels under a comma-decimal host locale', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('paints the decimal comma and keeps ", " between edges (Excel fr-FR control)', () => {
+    vi.stubGlobal('navigator', { language: 'fr-FR', languages: ['fr-FR'] });
+    const data = [0.1, 0.35, 0.6, 0.85, 1.1, 1.35, 1.6, 1.85, 2.1, 2.35];
+    const result = planHistogramBins(data, { binSize: 0.5, intervalClosed: 'r' });
+    expect(result.kind === 'bins' ? result.categories : []).toEqual([
+      '[0,1, 0,6]', '(0,6, 1,1]', '(1,1, 1,6]', '(1,6, 2,1]', '(2,1, 2,6]',
     ]);
   });
 });

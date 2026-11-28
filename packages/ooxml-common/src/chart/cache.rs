@@ -2303,6 +2303,63 @@ pub(super) fn collect_string_source(
     reference_formula(container).and_then(|formula| references.resolve_strings(&formula))
 }
 
+/// [`collect_string_source`] with the provenance of the labels it returns
+/// (`ChartModel::categories_numeric`). The labels are exactly
+/// `collect_string_source`'s; the flag describes the branch that supplied
+/// them: an authored snapshot is numeric when its source element is
+/// `numRef` / `numLit` (ECMA-376 §21.2.2.24 CT_AxDataSource), live worksheet
+/// labels when every non-empty one is a numeric cell.
+pub(super) fn collect_string_source_with_provenance(
+    ser_node: Node<'_, '_>,
+    child_tag: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<(Vec<String>, bool)> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    let labels = collect_string_source(ser_node, child_tag, references)?;
+    if !labels_carry_decimal_point(&labels) {
+        return Some((labels, false));
+    }
+    let authored = has_authored_reference_data(container)
+        && !collect_str_cache_positional(ser_node, child_tag).is_empty();
+    let numeric = if authored {
+        container
+            .children()
+            .find(|node| node.is_element())
+            .is_some_and(|source| matches!(source.tag_name().name(), "numRef" | "numLit"))
+    } else {
+        reference_formula(container)
+            .is_some_and(|formula| resolved_labels_are_numbers(&labels, &formula, references))
+    };
+    Some((labels, numeric))
+}
+
+/// Provenance changes paint only where a label has a `.` to repaint, so it is
+/// not worked out (no second worksheet resolution) for any other list.
+pub(super) fn labels_carry_decimal_point(labels: &[String]) -> bool {
+    labels.iter().any(|label| label.contains('.'))
+}
+
+/// Whether `labels`, resolved from the worksheet range `formula`, are all
+/// numeric cells (blank cells aside). The string resolver projects text and
+/// number cells alike; the typed resolver over the same range tells them
+/// apart. A text cell reading "1.2" keeps the list textual.
+pub(super) fn resolved_labels_are_numbers(
+    labels: &[String],
+    formula: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> bool {
+    let Some(numbers) = references.resolve_numbers(formula) else {
+        return false;
+    };
+    labels.len() == numbers.len()
+        && labels
+            .iter()
+            .zip(&numbers)
+            .all(|(label, number)| number.is_some() || label.is_empty())
+}
+
 pub(super) fn collect_number_source(
     ser_node: Node<'_, '_>,
     child_tag: &str,

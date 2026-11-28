@@ -39,6 +39,7 @@ import { chartDataPointStyleRole, chartSeriesSourceIndex } from '../effective-st
 import { chartStyleLineDecision } from '../style-paint.js';
 
 import { paintPlotAreaFrame } from '../plot-area-frame.js';
+import { localizedCategoryText } from '../chart-number-format.js';
 
 import { resolveDataLabelPlacement, type DataLabelRect } from '../data-label-layout.js';
 
@@ -74,6 +75,14 @@ import { paintClassicDataPointPath, paintClassicDataPointRect } from '../shared/
  * These are intentional fidelity limits, not Office guarantees. No label-frame
  * padding, arbitrary backgrounds or automatic collision equivalence is claimed. */
 const LEGACY_PIE_INSIDE_END_RADIUS_FRAC = 0.88;
+
+/** Provenance of the category list a pie paints: the series' own non-empty
+ * list, else the chart's, as `renderPieChart` chooses it. */
+function pieCategoriesNumeric(chart: ChartModel, series: ChartSeries): boolean | undefined {
+  return series.categories && series.categories.length > 0
+    ? series.categoriesNumeric
+    : chart.categoriesNumeric;
+}
 
 function pieInsideLabelRadius(position: string, innerR: number, outerR: number): number {
   if (position === 'ctr' || innerR > 0.01) return (innerR + outerR) / 2;
@@ -297,6 +306,7 @@ export function renderPieChart(
   const { x, y, w, h } = r;
   const s = chart.series[0]; if (!s) return;
   const cats = (s.categories && s.categories.length > 0) ? s.categories : chart.categories;
+  const catsNumeric = pieCategoriesNumeric(chart, s);
   const vals = s.values.map(v => Math.abs(v ?? 0));
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
@@ -305,7 +315,7 @@ export function renderPieChart(
     && chart.series.length > 1;
   const legendChart: ChartModel = seriesLegend
     ? chart
-    : { ...chart, series: [{ ...s, categories: cats }] };
+    : { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: catsNumeric }] };
 
   // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
   // labels categories (one row per slice) so it reserves a wider 0.28 side band
@@ -528,7 +538,7 @@ function drawPieRichLabels(
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(
-    { ...chart, series: [{ ...s, categories: cats }] },
+    { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: pieCategoriesNumeric(chart, s) }] },
     ptToPx,
   );
   const calloutIndices = new Set<number>();
@@ -595,7 +605,7 @@ function drawPieRichLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: (cats[i] ?? '').toString(),
+      category: localizedCategoryText((cats[i] ?? '').toString(), pieCategoriesNumeric(chart, s)),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
@@ -1069,7 +1079,7 @@ function drawPieCalloutLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: (cats[i] ?? '').toString(),
+      category: localizedCategoryText((cats[i] ?? '').toString(), pieCategoriesNumeric(chart, s)),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,

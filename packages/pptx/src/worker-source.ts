@@ -1,5 +1,5 @@
 import { importFontDemandCollector } from './font-demand-collector.js';
-import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
+import { adoptMessageHostLocale, decodeDataUrl, hostLocale, WasmParserHost } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
   resourcePolicyForWasm,
@@ -64,6 +64,7 @@ self.onmessage = async (
   event: MessageEvent<PptxWorkerRequest | PullSessionCommand<number>>,
 ) => {
   const request = event.data;
+  adoptMessageHostLocale(request);
 
   if (isSlidePullCommand(request)) {
     await slidePull.dispatchSafely(request, post);
@@ -116,7 +117,7 @@ self.onmessage = async (
         // Fetch the optional collector chunk while the source opens, off the
         // critical path (observed so an open failure leaves no rejection).
         const collectorLoad = typeof request.collectFontDemand === 'string' && !request.progressiveLayout
-          ? importFontDemandCollector(request.collectFontDemand) : undefined;
+          ? importFontDemandCollector(request.collectFontDemand, hostLocale()) : undefined;
         void collectorLoad?.catch(() => undefined);
         let bootstrap: PresentationBootstrap;
         if (request.source) {

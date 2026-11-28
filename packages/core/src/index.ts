@@ -257,6 +257,8 @@ export {
 export { createSymbolFaceOracleCache, type SymbolFaceOracleCache } from './fonts/symbol-face-cache';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';
 export { formatLocalizedExcelShortDate, localizedExcelShortDateTexts } from './chart/chart-number-format';
+export { hostNumberSymbols, hostLocale, adoptHostLocale, adoptMessageHostLocale, groupDigits, numberSymbolTexts, INVARIANT_NUMBER_SYMBOLS } from './number-symbols';
+export type { NumberSymbols } from './number-symbols';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export {
   buildCustomPath,

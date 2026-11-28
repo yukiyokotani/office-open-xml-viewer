@@ -30,6 +30,11 @@ describe('chart paint texts for font demand', () => {
     // Elision measures lone-surrogate prefixes as U+FFFD.
     expect(all.has(0xfffd)).toBe(true);
   });
+  it('adds the host locale number separators that value labels paint (#2346)', () => {
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    const texts = chartPaintTexts({ chartType: 'bar', series: [{ name: 's', values: [1.5] }] }) as string[];
+    expect(texts.join('')).toContain('\u202f');
+  });
   it('adds the formatter name tables for every date section, as the formatter detects it', () => {
     const texts = (code: string) => chartPaintTexts({ chartType: 'line', valAxisFormatCode: code, series: [] }) as string[];
     for (const code of ['General', '0.00E+00', '#,##0;[Red]-#,##0', '"Items" 0', '0%', '\\d 0']) {

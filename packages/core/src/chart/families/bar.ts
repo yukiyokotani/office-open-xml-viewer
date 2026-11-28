@@ -37,7 +37,7 @@ import {
 } from '../layout.js';
 import { planNumericValueAxis, finiteDataExtent } from '../axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from '../axis-style.js';
-import { formatCategoryLabel } from '../chart-number-format.js';
+import { formatCategoryLabel, localizedCategoryText } from '../chart-number-format.js';
 import { authoredExtraLinesHeight, authoredTextLines, axisLabelLineHeightPx, fillAuthoredText, fillAuthoredTextDownward, measureAuthoredTextWidth } from '../chart-text-lines.js';
 import {
   categoryLabelAnchorFraction,
@@ -85,7 +85,7 @@ import { drawSeriesTrendlines, trendlineLegendSeries } from '../shared/trendline
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, drawSecondaryCategoryAxis, secondaryCategoryLabelExtraH, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, customRichDataLabelOptions, drawBoundedDataLabelText } from '../shared/data-labels.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { drawLineGroupDecorations, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { scatterXValue } from '../shared/scatter-geometry.js';
@@ -195,8 +195,20 @@ export function renderBarChart(
   const secondaryCategories = secondaryBarSeries[0]?.categories?.length
     ? secondaryBarSeries[0].categories
     : chart.categories;
+  const secondaryCategoriesNumeric = secondaryBarSeries[0]?.categories?.length
+    ? secondaryBarSeries[0].categoriesNumeric
+    : chart.categoriesNumeric;
 
   const cats = chartCategories(chart);
+  const catsNumeric = chartCategoriesNumeric(chart);
+  // A point label's category: the series' own entry, else the chart's, with
+  // the provenance of whichever list supplied it.
+  const pointCategoryText = (series: ChartSeries, index: number): string => {
+    const own = series.categories?.[index];
+    return own != null
+      ? localizedCategoryText(own, series.categoriesNumeric)
+      : localizedCategoryText(cats[index] ?? '', catsNumeric);
+  };
   const n = cats.length;
   if (n === 0) return;
   const barGroups = new Map<string, ChartSeries[]>();
@@ -423,7 +435,7 @@ export function renderBarChart(
   const secondaryCatLabelBandH = secondaryCat && !secondaryCat.hidden
     && secondaryCat.tickLabelPos !== 'none'
     ? secondaryCatFontPx
-      + secondaryCategoryLabelExtraH(secondaryCategories, secondaryCat, chart, secondaryCatFontPx)
+      + secondaryCategoryLabelExtraH(secondaryCategories, secondaryCat, chart, secondaryCatFontPx, secondaryCategoriesNumeric)
       + categoryLabelOffsetPx(
         categoryTickLabelGapPx(secondaryCatFontPx),
         secondaryCat.labelOffsetPercent,
@@ -465,7 +477,7 @@ export function renderBarChart(
     for (const category of cats) {
       horizontalCategoryLabelBandW = Math.max(
         horizontalCategoryLabelBandW,
-        measureAuthoredTextWidth(ctx, formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors)),
+        measureAuthoredTextWidth(ctx, formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric)),
       );
     }
     ctx.restore();
@@ -992,6 +1004,7 @@ export function renderBarChart(
         chart.catAxisFormatCode,
         chart.date1904,
         chart.catAxisFormatDivisors,
+        catsNumeric,
       );
       wrappedColumnCategories.push(wrapMeasuredText(
         ctx,
@@ -1004,7 +1017,7 @@ export function renderBarChart(
     const maxLines = Math.max(1, ...wrappedColumnCategories.map(lines => lines.length));
     if (maxLines > 1) innerCategoryExtraH = (maxLines - 1) * (wrapFontPx + 2);
     innerAuthoredExtraH = authoredExtraLinesHeight(
-      cats.map(category => formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors)),
+      cats.map(category => formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric)),
       axisLabelLineHeightPx(wrapFontPx),
     );
   } else if (!tableOwnsCategoryLabels && !isH && !chart.catAxisHidden && catLabelsVisible(chart)) {
@@ -1017,7 +1030,7 @@ export function renderBarChart(
       ? dateAxisPlan.majorTicks.map(tick =>
         formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
       : cats.map(category =>
-        formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
+        formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric));
     innerCategoryExtraH = authoredExtraLinesHeight(
       labels,
       axisLabelLineHeightPx(labelFontPx),
@@ -1714,7 +1727,7 @@ export function renderBarChart(
         }
         const seriesLabels = s.seriesDataLabels;
         const label = resolveChartExLabel(
-          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
+          chart, s, ci, pointCategoryText(s, ci), raw,
           {
             visible: chart.showDataLabels,
             showVal: chart.showDataLabels && !isPercentGroup,
@@ -1817,7 +1830,7 @@ export function renderBarChart(
         }
         const seriesLabels = s.seriesDataLabels;
         const label = resolveChartExLabel(
-          chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
+          chart, s, ci, pointCategoryText(s, ci), raw,
           {
             visible: chart.showDataLabels,
             showVal: chart.showDataLabels && !isPercentGroup,
@@ -2044,7 +2057,7 @@ export function renderBarChart(
       : cats.map((category, categoryIndex) => ({
         // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
         // (e.g. dateAx serials → real dates). No-op for string categories.
-        raw: formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+        raw: formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, catsNumeric),
         fraction: null,
         categoryIndex,
       }));
@@ -2469,6 +2482,7 @@ export function renderBarChart(
   if (secondaryCat && !isH) {
     drawSecondaryCategoryAxis(
       ctx, chart, secondaryCat, secondaryCategories, r, px0, py0, pw, ptToPx,
+      secondaryCategoriesNumeric,
     );
   }
 

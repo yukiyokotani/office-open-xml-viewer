@@ -3,7 +3,7 @@ import { measureServedFaceLines, prepareServedFaceLines } from './served-face-li
 import { documentRoutedFontFamilies } from './layout/production-services.js';
 import { recordResourceDiagnostics, resourceDiagnosticsOf } from './resource-diagnostics.js';
 import type { DocxDiagnostic } from './types.js';
-import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
+import { hostLocale, resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
@@ -1168,7 +1168,7 @@ export class DocxDocument {
       (id) => {
         this._parseRequestId = id;
         return this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(fonts ? { fonts } : {}), allowFootnoteContinuation: this._allowFootnoteContinuation, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(fonts ? { fonts } : {}), allowFootnoteContinuation: this._allowFootnoteContinuation, cjkFallback: this._cjkFallback, hostLocale: hostLocale(), defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest);
       },
       [buffer],
@@ -1509,6 +1509,7 @@ export class DocxDocument {
           ...(fonts ? { fonts } : {}),
           allowFootnoteContinuation: this._allowFootnoteContinuation,
           cjkFallback: this._cjkFallback,
+          hostLocale: hostLocale(),
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
           renderers,

@@ -15,6 +15,7 @@ import {
   textSectionIndex,
 } from '../excel-number-format';
 import { roundDecimalHalfUp } from '../text/round-decimal';
+import { groupDigits, hostLocale, hostNumberSymbols } from '../number-symbols';
 
 const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
 
@@ -23,7 +24,7 @@ const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
 export function formatLocalizedExcelShortDate(
   serial: number,
   date1904 = false,
-  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
+  locale = hostLocale(),
 ): string {
   if (!isExcelDisplayDateSerial(serial, date1904)) return '#';
   const cacheKey = locale ?? '';
@@ -50,7 +51,7 @@ export function formatLocalizedExcelShortDate(
  * scalar demand must be `'all'`.
  */
 export function localizedExcelShortDateTexts(
-  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
+  locale = hostLocale(),
 ): { readonly texts: readonly string[]; readonly complete: boolean } {
   const formatter = new Intl.DateTimeFormat(locale, {
     year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC',
@@ -92,12 +93,15 @@ export function localizedExcelShortDateTexts(
 export function formatChartVal(v: number): string {
   // Matches Excel's default `<c:valAx><c:numFmt formatCode="General">` which
   // shows raw numbers — no "k"/"M" abbreviation.
-  if (Number.isInteger(v)) return String(v);
+  // A large integer's String() is exponential (1.25e+21) and carries a
+  // decimal point in its mantissa, which is localized like any other.
+  if (Number.isInteger(v)) return String(v).replace('.', hostNumberSymbols().decimal);
   // Cap at 6 decimals and trim trailing zeros (0.50 → "0.5"). Round half-UP on
   // the decimal value like Excel (matters only at a `.xxxxxx5` boundary; equal
   // to `toFixed(6)` otherwise), so this path never disagrees with the explicit
-  // number-format sections below.
-  return roundDecimalHalfUp(v, 6).replace(/\.?0+$/, '');
+  // number-format sections below. The decimal point is the host locale's,
+  // as for worksheet cells (number-symbols.ts).
+  return roundDecimalHalfUp(v, 6).replace(/\.?0+$/, '').replace('.', hostNumberSymbols().decimal);
 }
 
 /**
@@ -161,6 +165,27 @@ export function formatChartValWithCode(
 }
 
 /**
+ * A raw category string as painted where no number format applies to it.
+ *
+ * Scope of #2346 for chart category text: separators only. Which text a site
+ * paints, and whether a format code applies to it, is unchanged; a site that
+ * paints a raw category string passes the provenance of the very list it took
+ * that string from (`categoriesNumeric` of the chart or of the series), and
+ * the one difference is that the invariant text of a number (`"1.2"`) paints
+ * its `.` as the host locale's decimal separator. Raw number text carries no
+ * group separator. Text categories, unknown provenance (hand-built models,
+ * ChartEx, multi-level categories) and every en-US label are returned as is.
+ * A label formatted through a code needs none of this: the formatter paints
+ * the host separators itself.
+ */
+export function localizedCategoryText(raw: string, numeric: boolean | null | undefined): string {
+  if (numeric !== true) return raw;
+  const { decimal } = hostNumberSymbols();
+  if (decimal === '.' || !raw.includes('.') || !Number.isFinite(Number(raw))) return raw;
+  return raw.replace('.', decimal);
+}
+
+/**
  * Format a category-axis tick label. Categories arrive as the raw cached
  * strings the workbook stored (`<c:cat><c:strCache>` text, or the numeric
  * text of a `<c:numCache>` on a date/number axis). ECMA-376 §21.2.2.71
@@ -179,8 +204,11 @@ export function formatCategoryLabel(
   date1904 = false,
   /** Section divisors of `code` ({@link formatChartValWithCode}). */
   divisors?: readonly number[] | null,
+  /** Provenance of `raw` (`categoriesNumeric` of the list it came from),
+   *  used only where no code applies ({@link localizedCategoryText}). */
+  numeric?: boolean | null,
 ): string {
-  if (!code) return raw;
+  if (!code) return localizedCategoryText(raw, numeric);
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text
   // explicitly; keep genuine string categories (e.g. "Q1", "North") verbatim.
@@ -300,7 +328,7 @@ function applyChartNumberSection(abs: number, section: string): string {
     const [digits, power] = value === 0 ? ['0', '0'] : value.toExponential().split('e');
     let exp = Math.floor(Number(power) / places) * places;
     let mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
-    if (Number(mantissa.replace(/,/g, '')) >= 10 ** places) {
+    if (mantissaValue(mantissa) >= 10 ** places) {
       exp += places;
       mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
     }
@@ -407,7 +435,16 @@ function formatNumericPattern(value: number, pattern: string): string {
   const rounded = roundDecimalHalfUp(value, fracDigits);
   const [ints, fracs = ''] = rounded.split('.');
   const paddedInts = ints.padStart(minIntDigits, '0');
-  const withSeparators = thousands ? paddedInts.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : paddedInts;
+  // `,` and `.` in the code stand for the host locale's group and decimal
+  // separators (ECMA-376 §18.8.30; number-symbols.ts), as for worksheet cells.
+  const symbols = hostNumberSymbols();
+  const withSeparators = thousands ? groupDigits(paddedInts, symbols.group) : paddedInts;
   if (fracDigits === 0) return withSeparators;
-  return `${withSeparators}.${fracs.padEnd(fracDigits, '0')}`;
+  return `${withSeparators}${symbols.decimal}${fracs.padEnd(fracDigits, '0')}`;
+}
+
+/** The value of a mantissa {@link formatNumericPattern} painted. */
+function mantissaValue(text: string): number {
+  const symbols = hostNumberSymbols();
+  return Number(text.split(symbols.group).join('').replace(symbols.decimal, '.'));
 }

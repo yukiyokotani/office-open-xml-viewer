@@ -74,6 +74,8 @@ export type ScatterSeriesLayer = {
   seriesIndex: number;
   fallbackColor: string;
   cats: string[];
+  /** Provenance of `cats` (`categoriesNumeric` of that list). */
+  catsNumeric: boolean | undefined;
   pointOverrides: Map<number, NonNullable<ChartSeries['dataPointOverrides']>[number]>;
 };
 
@@ -88,6 +90,7 @@ export function makeScatterSeriesLayer(
     seriesIndex: index,
     fallbackColor: chartColor(index, series),
     cats: series.categories ?? chart.categories,
+    catsNumeric: series.categories != null ? series.categoriesNumeric : chart.categoriesNumeric,
     pointOverrides: new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point])),
   };
 }
@@ -315,7 +318,7 @@ export function drawScatterSeriesLayer(
     }
   }
 
-  for (const { series: s, seriesIndex, cats, pointOverrides } of layers) {
+  for (const { series: s, seriesIndex, cats, catsNumeric, pointOverrides } of layers) {
     const markerGapAt = (pointIndex: number): number => {
       if (hideMarkersByStyle) return 0;
       const seriesMarkerVisible = s.showMarker !== false && s.markerSymbol !== 'none';
@@ -355,6 +358,7 @@ export function drawScatterSeriesLayer(
       value => dataLabelWithinAxisMaximum(chart, value, valueAxisMaximum),
       shapeRotationDeg,
       markerGapAt,
+      catsNumeric,
     );
   }
 

@@ -1,5 +1,6 @@
 import type { ChartexHistogramBinning } from '../types/chart';
 import { formatChartValWithCode } from './chart-number-format.js';
+import { hostNumberSymbols } from '../number-symbols.js';
 
 /** Matches the shared parser's maximum retained ChartEx cache width. */
 export const MAX_HISTOGRAM_INPUT_POINTS = 1_048_576;
@@ -55,7 +56,11 @@ function makeBoundaryLabel(
     const v = value === 0 ? 0 : value;
     // General: shortest round-trip decimal. Otherwise the value dimension's
     // authored number format, as PowerPoint applies it to bin edges.
-    return general ? String(v) : formatChartValWithCode(v, formatCode, date1904);
+    // The decimal point is the host locale's (number-symbols.ts); the edge
+    // separator stays ", ". Excel for Windows under fr-FR draws General
+    // edges with bin width 0.5 as `[0,1, 0,6]`, `(0,6, 1,1]` (synthetic
+    // control, 2026-11-28).
+    return general ? String(v).replace('.', hostNumberSymbols().decimal) : formatChartValWithCode(v, formatCode, date1904);
   };
 }
 

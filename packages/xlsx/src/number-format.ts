@@ -3,6 +3,9 @@ import {
   formatExcelDateTime,
   generalSectionAffixes,
   formatLocalizedExcelShortDate,
+  groupDigits,
+  hostNumberSymbols,
+  numberSymbolTexts,
   localizedExcelShortDateTexts,
   isDateFormatSection,
   isExcelDisplayDateSerial,
@@ -404,7 +407,9 @@ export function formatGeneralNumber(num: number, fits?: (text: string) => boolea
     const body = generalForBudget(value, budget);
     if (body === null || body === previous) continue;
     previous = body;
-    const text = sign + body;
+    // General paints the host locale's decimal separator, as a code's `.`
+    // does; the exponent mark stays `E`.
+    const text = sign + body.replace('.', hostNumberSymbols().decimal);
     if (!fits || fits(text)) return text;
   }
   return null;
@@ -502,7 +507,8 @@ function applyFormat(
   // sign-section semantics match exactly.
   const builtinNumeric = BUILTIN_NUMERIC_FMT[numFmtId];
   if (builtinNumeric) return applyFormatCode(num, builtinNumeric);
-  if (numFmtId === 49) return { text: String(num) };
+  // `@` shows the stored number as text, with the host decimal separator.
+  if (numFmtId === 49) return { text: String(num).replace('.', hostNumberSymbols().decimal) };
   // 0 (General) and every unknown id.
   return { text: formatGeneralText(num), general: true };
 }
@@ -534,6 +540,8 @@ export interface NumberFormatPaintTexts {
  * - the formatter's own name tables for a date / time section (month and
  *   weekday names, AM/PM, Japanese weekdays and eras:
  *   `excelDateTimeSectionNameTexts`);
+ * - the host locale's decimal and group separators, which `.` and `,` of a
+ *   code and the General format paint (`numberSymbolTexts`);
  * - for built-in 14 without a code, the host locale's numeric short date
  *   (`localizedExcelShortDateTexts`): its complete output set for a
  *   Gregorian, ASCII-digit locale; otherwise a sample over the date range,
@@ -556,7 +564,8 @@ export function numberFormatPaintTexts(styles: Pick<Styles, 'numFmts' | 'cellXfs
   const codeTexts = (code: string): readonly string[] => {
     let texts = ofCode.get(code);
     if (!texts) {
-      const list = [code];
+      // `.` and `,` in the code paint the host locale's separators.
+      const list = [code, ...numberSymbolTexts()];
       for (const section of splitFormatSections(code)) {
         if (isDateFormatSection(section)) list.push(...excelDateTimeSectionNameTexts(section));
       }
@@ -575,7 +584,8 @@ export function numberFormatPaintTexts(styles: Pick<Styles, 'numFmts' | 'cellXfs
         texts = shortDate.texts;
       } else {
         const code = BUILTIN_DATE_FMT[id] ?? BUILTIN_NUMERIC_FMT[id];
-        texts = code ? codeTexts(code) : Object.freeze([]);
+        // General (and an unknown id) paints the decimal separator too.
+        texts = code ? codeTexts(code) : Object.freeze([...numberSymbolTexts()]);
       }
       ofBuiltin.set(id, texts);
     }
@@ -785,9 +795,10 @@ function lexSection(body: string): LexedSection {
 
 // ── Numeric rendering primitives ────────────────────────────────────────────
 
-/** Group an integer digit string in threes with commas (thousands separator). */
+/** Group an integer digit string in threes with the host locale's group
+ * separator: `,` in a code stands for it (§18.8.30; core number-symbols). */
 function groupThousands(intDigits: string): string {
-  return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return groupDigits(intDigits, hostNumberSymbols().group);
 }
 
 /**
@@ -1019,7 +1030,8 @@ function assembleFixed(lex: LexedSection, intText: string, fracText: string, exp
     if (p.kind === 'lit') out += p.text;
     else if (p.kind === 'intph') out += intAssign.get(idx) ?? '';
     else if (p.kind === 'fracph') out += fracAssign.get(idx) ?? '';
-    else if (p.kind === 'dot') out += showDot ? '.' : '';
+    // `.` in a code stands for the host locale's decimal separator (§18.8.30).
+    else if (p.kind === 'dot') out += showDot ? hostNumberSymbols().decimal : '';
     else if (p.kind === 'percent') out += '%';
     else if (p.kind === 'exp') out += expText;
   }

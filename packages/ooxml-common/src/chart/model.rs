@@ -461,6 +461,16 @@ pub struct ChartModel {
     pub category_source_hidden: Option<Vec<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_levels: Option<Vec<Vec<String>>>,
+    /// Provenance of `categories`, which projects numbers and text alike
+    /// into strings: `Some(true)` when every non-empty label is the
+    /// invariant text of a number (a `<c:numCache>` / `<c:numLit>` point, or
+    /// a numeric worksheet cell of a live reference) and at least one carries
+    /// a decimal point. Its only use is painting that `.` as the host
+    /// locale's decimal separator where the label is drawn without a number
+    /// format; it selects neither text nor format. Absent: text, a mixed
+    /// range, multi-level categories, or nothing to repaint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories_numeric: Option<bool>,
     pub series: Vec<ChartSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_groups: Option<Vec<ChartPlotGroup>>,
@@ -1676,6 +1686,10 @@ pub struct ChartSeries {
     pub use_secondary_axis: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<String>>,
+    /// Provenance of this series' own `categories`, as
+    /// `ChartModel::categories_numeric` is for the shared list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories_numeric: Option<bool>,
     /// Bubble-only source provenance. A string-backed `<c:xVal>` has distinct
     /// Office legend semantics from a numeric X source.
     #[serde(default, skip_serializing_if = "Option::is_none")]

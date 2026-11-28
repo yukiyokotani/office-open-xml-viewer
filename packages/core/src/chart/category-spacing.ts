@@ -146,3 +146,11 @@ export function chartCategories(chart: ChartModel): string[] {
   for (const s of chart.series) if (s.values.length > n) n = s.values.length;
   return n > 0 ? Array.from({ length: n }, (_, i) => String(i + 1)) : [];
 }
+
+/** Provenance of the list {@link chartCategories} returns (the
+ * `categoriesNumeric` of that same list), for `localizedCategoryText`. */
+export function chartCategoriesNumeric(chart: ChartModel): boolean | undefined {
+  if (chart.categories.length > 0) return chart.categoriesNumeric;
+  const first = chart.series[0];
+  return first?.categories && first.categories.length > 0 ? first.categoriesNumeric : undefined;
+}

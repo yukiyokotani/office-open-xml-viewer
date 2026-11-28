@@ -7,7 +7,7 @@ import type { RichDataLabelOptions } from '../rich-data-label.js';
 import { anchoredDataLabelPoint, dataLabelCanvasTextAlign, dataLabelInsets, dataLabelIsDeleted, effectiveDataLabelTextStyle, fitStyledDataLabelLines, rotatedDataLabelSize, transformDataLabelText } from '../data-label-style.js';
 import type { DataLabelTextStyle } from '../data-label-style.js';
 import { effectiveDataLabelText } from '../data-label-content.js';
-import { formatCategoryLabel, formatChartValWithCode } from '../chart-number-format.js';
+import { formatCategoryLabel, formatChartValWithCode, localizedCategoryText } from '../chart-number-format.js';
 import { chartTextFontSizePx } from '../layout.js';
 import { mergeChartLabelBoxes, paintChartLabelBox } from '../label-box.js';
 import { chartImageFillPaintWorkUpperBound } from '../image-fill.js';
@@ -69,6 +69,8 @@ export function drawSeriesDataLabels(
   isValueVisible?: (value: number) => boolean,
   shapeRotationDeg = 0,
   markerGapAt?: (pointIndex: number) => number,
+  /** Provenance of `cats` (`categoriesNumeric` of that list). */
+  catsNumeric?: boolean,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -101,6 +103,8 @@ export function drawSeriesDataLabels(
           (cats[i] ?? String(xv)).toString(),
           s.catFormatCodes?.[i] ?? s.catFormatCode ?? null,
           date1904,
+          null,
+          cats[i] != null ? catsNumeric : undefined,
         )
         : formatChartValWithCode(
           xv, s.catFormatCodes?.[i] ?? s.catFormatCode ?? null, date1904,
@@ -577,6 +581,8 @@ export function drawCategoryDataLabels(
   legendKeyAt?: (pointIndex: number) => DataLabelLegendKey | undefined,
   isValueVisible?: (value: number) => boolean,
   shapeRotationDeg = 0,
+  /** Provenance of `cats` (`categoriesNumeric` of that list). */
+  catsNumeric?: boolean,
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -604,7 +610,7 @@ export function drawCategoryDataLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: cats[ci] ?? '',
+      category: localizedCategoryText(cats[ci] ?? '', catsNumeric),
       seriesName: s.name,
       sourceValue,
       valueDivisor: displayUnitDivisor(valueDisplayUnits),
