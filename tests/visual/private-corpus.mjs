@@ -511,6 +511,9 @@ function removeStaleDocuments(tree, files, directory, generated) {
     if (error.code === 'ENOENT') return;
     throw error;
   }
+  // Validate the whole cleanup set first, so a foreign entry in any stale
+  // document stops the run before the first removal.
+  const removals = [];
   for (const entry of entries) {
     const path = join(tree, entry.name);
     if (entry.isSymbolicLink()) {
@@ -518,12 +521,14 @@ function removeStaleDocuments(tree, files, directory, generated) {
     }
     if (!entry.isDirectory() || listed.has(entry.name)) continue;
     const stale = readdirSync(path, { withFileTypes: true }).filter((file) => generated.test(file.name));
-    // Only regular files are the harness's; anything else under such a name
-    // stops the run before the first removal.
+    // Only regular files are the harness's.
     const foreign = stale.find((file) => !file.isFile());
     if (foreign) {
       throw new Error(`refusing to remove a self-VRT output that is not a regular file: ${join(path, foreign.name)}`);
     }
+    removals.push({ path, stale });
+  }
+  for (const { path, stale } of removals) {
     for (const file of stale) unlinkSync(join(path, file.name));
     try {
       rmdirSync(path);

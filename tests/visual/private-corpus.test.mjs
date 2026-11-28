@@ -846,7 +846,9 @@ test('documents the corpus no longer lists keep no generated file after a snapsh
     assert.deepEqual(readdirSync(join(screenshots, 'gone')), ['manifest.json']);
     assert.deepEqual(readdirSync(join(screenshots, 'kept')).sort(), ['manifest.json', 'notes.txt']);
     // A generated name that is not a regular file is not the harness's to
-    // remove: the run fails and the stale document keeps every entry.
+    // remove: the run fails before any removal, so this stale document and
+    // another one listed before it keep every entry.
+    leftover(baselineDemo, 'a-early');
     leftover(baselineDemo, 'gone');
     try {
       execFileSync('mkfifo', [join(baselineDemo, 'gone/slide-2.png')]);
@@ -855,6 +857,7 @@ test('documents the corpus no longer lists keep no generated file after a snapsh
     }
     await assert.rejects(snapshot(fixture.base, fixture.revision), /not a regular file: .*gone\/slide-2\.png/);
     assert.deepEqual(readdirSync(join(baselineDemo, 'gone')).sort(), ['manifest.json', 'slide-1.png', 'slide-2.png']);
+    assert.deepEqual(readdirSync(join(baselineDemo, 'a-early')).sort(), ['manifest.json', 'slide-1.png']);
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }
