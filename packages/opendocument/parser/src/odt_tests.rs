@@ -355,6 +355,96 @@ fn a_mixed_class_ruby_base_takes_a_language_its_classes_share() {
 }
 
 #[test]
+fn a_mixed_class_ruby_base_compares_tags_case_insensitively() {
+    // BCP 47 tags are case-insensitive (RFC 5646 §2.1.1): `sl-rozaj` and
+    // `SL-ROZAJ` name one language, which the base keeps (first spelling).
+    let automatic = r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="sl-rozaj" style:rfc-language-tag-asian="SL-ROZAJ"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p><text:span text:style-name=\"T\"><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<(String, Option<String>, bool)> = text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.lang_script_class.clone(),
+                run.ruby.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [("a\u{5B57}".to_string(), Some("sl-rozaj".to_string()), true)]
+    );
+}
+
+#[test]
+fn custom_note_labels_take_the_language_of_their_own_text() {
+    // Serbian Latin for the Latin class, Japanese for the Asian class, in
+    // the body span and in the note paragraphs alike.
+    let properties = r#"<style:text-properties fo:language="sr" fo:script="Latn" fo:country="RS" style:language-asian="ja" style:country-asian="JP"/>"#;
+    let automatic = format!(
+        r#"<style:style style:name="T" style:family="text">{properties}</style:style><style:style style:name="P" style:family="paragraph">{properties}</style:style>"#
+    );
+    let note = |label: &str| {
+        format!("<text:note text:note-class=\"footnote\"><text:note-citation text:label=\"{label}\">{label}</text:note-citation><text:note-body><text:p text:style-name=\"P\">n</text:p></text:note-body></text:note>")
+    };
+    let body = format!(
+        "<text:p><text:span text:style-name=\"T\">\u{5B57}{}{}</text:span></text:p>",
+        note("\u{0434}"),
+        note("\u{6CE8}")
+    );
+    let document = read_fixture(Fixture {
+        automatic: &automatic,
+        body: &body,
+        ..Fixture::default()
+    });
+    let labelled = |runs: Vec<&TextRun>| -> Vec<(String, Option<String>)> {
+        runs.iter()
+            .filter(|run| run.note_ref.is_none() && !run.text.is_empty())
+            .map(|run| (run.text.clone(), run.lang_script_class.clone()))
+            .collect()
+    };
+    assert_eq!(
+        labelled(text_runs(paragraphs(&document.body)[0])),
+        [
+            ("\u{5B57}".to_string(), Some("ja-JP".to_string())),
+            // A Cyrillic label after U+5B57 is Latin-class text.
+            ("\u{0434}".to_string(), Some("sr-Latn-RS".to_string())),
+            ("\u{6CE8}".to_string(), Some("ja-JP".to_string())),
+        ]
+    );
+    // The note story's copy of each label: an Asian label is Asian-class
+    // text there too, whatever the Latin-class base properties.
+    let story =
+        |index: usize| labelled(text_runs(paragraphs(&document.footnotes[index].content)[0]));
+    assert_eq!(
+        story(0),
+        [
+            ("\u{0434}".to_string(), Some("sr-Latn-RS".to_string())),
+            ("n".to_string(), Some("sr-Latn-RS".to_string())),
+        ]
+    );
+    assert_eq!(
+        story(1),
+        [
+            ("\u{6CE8}".to_string(), Some("ja-JP".to_string())),
+            ("n".to_string(), Some("sr-Latn-RS".to_string())),
+        ]
+    );
+    // The label keeps its run's font and size (only its language follows).
+    let body_runs = text_runs(paragraphs(&document.body)[0]);
+    let cyrillic = body_runs.iter().find(|run| run.text == "\u{0434}").unwrap();
+    let han = body_runs.iter().find(|run| run.text == "\u{5B57}").unwrap();
+    assert_eq!(
+        (&cyrillic.font_family, cyrillic.font_size),
+        (&han.font_family, han.font_size)
+    );
+}
+
+#[test]
 fn class_language_tags_carry_script_and_rfc_language_tags() {
     let automatic = r#"<style:style style:name="S" style:family="text"><style:text-properties fo:language="sr" fo:script="latn" fo:country="rs" style:language-asian="zh" style:script-asian="Hant" style:country-asian="TW"/></style:style><style:style style:name="F" style:family="text"><style:text-properties fo:language="sl" fo:country="SI" style:rfc-language-tag="sl-rozaj"/></style:style><style:style style:name="N" style:family="text" style:parent-style-name="R"><style:text-properties fo:language="de" fo:country="DE"/></style:style>"#;
     // R is a common style: N, an automatic style, inherits from it.

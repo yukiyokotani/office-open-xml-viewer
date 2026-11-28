@@ -904,9 +904,22 @@ impl<'a> Reader<'a> {
                 link: None,
             });
         }
-        let base = self
-            .run_properties(&contexts, (contexts.len() - 1) as u32, ScriptClass::Latin)?
-            .text_run();
+        let context = (contexts.len() - 1) as u32;
+        let properties = self.run_properties(&contexts, context, ScriptClass::Latin)?;
+        // A custom label is classified on its own text (it starts the note,
+        // so its weak characters are Latin), keeping the base properties'
+        // font and geometry: only its class language follows its text.
+        let label_language = match label {
+            Some(label) => self.own_text_language(
+                &contexts,
+                context,
+                label,
+                ScriptClass::Latin,
+                &mut HashMap::new(),
+            )?,
+            None => None,
+        };
+        let base = properties.text_run();
         // The mark run, and the custom label run when there is one, each own
         // a copy of the base properties.
         let mut runs = Vec::new();
@@ -921,6 +934,10 @@ impl<'a> Reader<'a> {
         if let Some(label) = label {
             let mut custom = base;
             custom.text = label.to_string();
+            if let Some(tag) = label_language {
+                custom.lang_script_class = properties
+                    .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
+            }
             runs.push(DocRun::Text(Box::new(custom)));
         }
         Ok(runs)
@@ -935,6 +952,66 @@ impl<'a> Reader<'a> {
     ) -> Result<Option<String>, String> {
         let cascade = Cascade::build(self.search_order(contexts, context)?, TEXT)?;
         Ok(class_language_tag(&cascade, class, self.fonts).map(|tag| tag.to_string()))
+    }
+
+    /// The class language of an item's own visible text (a ruby base, a
+    /// custom note label) where it is not that of `position`, the class of
+    /// the character before it, whose language `properties` carry: `None`
+    /// where the text's class is `position`'s, else the tag (empty: none).
+    /// §20.358 classes characters, and an item's visible text is its own:
+    /// its language is that of the class of the text it shows. (Its other
+    /// properties stay those of its position.)
+    ///
+    /// Text of several classes is one run (a ruby base carries one
+    /// annotation, ODF 1.3 Part 3 §6.4 text:ruby; a label is one citation).
+    /// Where every class it holds names the same language, that is its
+    /// language; BCP 47 tags are compared case-insensitively (RFC 5646
+    /// §2.1.1), the first spelling kept. Classes naming different languages
+    /// (or one naming none) leave it no one language. Bounded policy:
+    /// per-range languages inside one such run are not represented.
+    fn own_text_language(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+        text: &str,
+        position: ScriptClass,
+        languages: &mut HashMap<(u32, ScriptClass), Option<String>>,
+    ) -> Result<Option<String>, String> {
+        let classes: Vec<ScriptClass> = match text_class(text, position) {
+            Some(class) if class == position => return Ok(None),
+            Some(class) => vec![class],
+            None => {
+                let mut classes: Vec<ScriptClass> = Vec::new();
+                for class in text.chars().filter_map(table_22) {
+                    if !classes.contains(&class) {
+                        classes.push(class);
+                    }
+                }
+                classes
+            }
+        };
+        let mut shared: Option<Option<String>> = None;
+        for class in classes {
+            let key = (context, class);
+            if let std::collections::hash_map::Entry::Vacant(entry) = languages.entry(key) {
+                entry.insert(self.class_language(contexts, context, class)?);
+            }
+            let language = &languages[&key];
+            match &shared {
+                None => shared = Some(language.clone()),
+                Some(first) => {
+                    let same = match (first, language) {
+                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !same {
+                        return Ok(Some(String::new()));
+                    }
+                }
+            }
+        }
+        Ok(Some(shared.flatten().unwrap_or_default()))
     }
 
     pub(super) fn run_properties(
@@ -1030,70 +1107,46 @@ impl<'a> Reader<'a> {
                     // is its own: the language is that of the class of the
                     // text the item shows, not of the character before it.
                     // (Its other properties stay those of its position.)
-                    let own_class = match &inline.items[item as usize] {
+                    let language = match &inline.items[item as usize] {
                         // A page number or count is set in ASCII digits or
                         // letters (`page_number_format`): Latin in Table 22.
-                        Item::Field { .. } => Some(Some(ScriptClass::Latin)),
-                        Item::Ruby { base, .. } => Some(text_class(base, previous_class)),
-                        Item::Run(_) | Item::NoteReference { .. } => None,
-                    };
-                    // The classes a base of several classes holds (Table 22
-                    // classes of its classified characters).
-                    let mixed_classes = match (&own_class, &inline.items[item as usize]) {
-                        (Some(None), Item::Ruby { base, .. }) => {
-                            let mut classes: Vec<ScriptClass> = Vec::new();
-                            for class in base.chars().filter_map(table_22) {
-                                if !classes.contains(&class) {
-                                    classes.push(class);
-                                }
-                            }
-                            classes
-                        }
-                        _ => Vec::new(),
-                    };
-                    let language = match own_class {
-                        None => None,
-                        Some(Some(class)) if class == previous_class => None,
-                        Some(Some(class)) => {
-                            let key = (context, class);
-                            if let std::collections::hash_map::Entry::Vacant(entry) =
-                                languages.entry(key)
-                            {
-                                entry.insert(self.class_language(contexts, context, class)?);
-                            }
-                            Some(languages[&key].clone().unwrap_or_default())
-                        }
-                        // A ruby base of several classes is one run with one
-                        // annotation (ODF 1.3 Part 3 §6.4 text:ruby). Where
-                        // every class it holds names the same language, that
-                        // is the base's language; classes naming different
-                        // languages (or one naming none) leave it no one
-                        // language. Bounded policy: per-range languages
-                        // inside one ruby base are not represented, since a
-                        // ruby base is shaped as one run.
-                        Some(None) => {
-                            let mut shared: Option<Option<String>> = None;
-                            let mut agree = true;
-                            for &class in &mixed_classes {
-                                let key = (context, class);
+                        Item::Field { .. } => {
+                            if previous_class == ScriptClass::Latin {
+                                None
+                            } else {
+                                let key = (context, ScriptClass::Latin);
                                 if let std::collections::hash_map::Entry::Vacant(entry) =
                                     languages.entry(key)
                                 {
-                                    entry.insert(self.class_language(contexts, context, class)?);
+                                    entry.insert(self.class_language(
+                                        contexts,
+                                        context,
+                                        ScriptClass::Latin,
+                                    )?);
                                 }
-                                let language = &languages[&key];
-                                match &shared {
-                                    None => shared = Some(language.clone()),
-                                    Some(first) if first == language => {}
-                                    Some(_) => agree = false,
-                                }
+                                Some(languages[&key].clone().unwrap_or_default())
                             }
-                            Some(if agree {
-                                shared.flatten().unwrap_or_default()
-                            } else {
-                                String::new()
-                            })
                         }
+                        Item::Ruby { base, .. } => self.own_text_language(
+                            contexts,
+                            context,
+                            base,
+                            previous_class,
+                            &mut languages,
+                        )?,
+                        // A custom citation shows its label (§19.762
+                        // text:label), classified in the citation's own
+                        // style context.
+                        Item::NoteReference {
+                            label: Some(label), ..
+                        } => self.own_text_language(
+                            contexts,
+                            context,
+                            label,
+                            previous_class,
+                            &mut languages,
+                        )?,
+                        Item::Run(_) | Item::NoteReference { .. } => None,
                     };
                     let properties = &cache[&key];
                     let run = self.item_run(
@@ -1202,7 +1255,8 @@ impl<'a> Reader<'a> {
         item: &mut Item,
         properties: &RunProperties,
         // The class language of the item's own text where it differs from
-        // `properties`' (empty: none), for a field or ruby base.
+        // `properties`' (empty: none), for a field, ruby base or custom
+        // note label (`own_text_language`).
         language: Option<String>,
         contexts: &[TextContext<'a>],
         context: u32,
@@ -1281,6 +1335,10 @@ impl<'a> Reader<'a> {
                 if label.is_some() {
                     let mut custom = properties.text_run();
                     custom.text = label.clone().unwrap_or_default();
+                    if let Some(tag) = language {
+                        custom.lang_script_class = properties
+                            .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
+                    }
                     run.text = String::new();
                     vec![DocRun::Text(Box::new(run)), DocRun::Text(Box::new(custom))]
                 } else {
