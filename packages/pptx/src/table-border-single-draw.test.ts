@@ -498,48 +498,55 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(memo.layouts.size).toBe(0);
   });
 
-  it('bounds the layouts a table retains by their payload', () => {
-    // Retention counts what a layout holds (lines, segments, metric marks
-    // and characters), not its lines: one unwrapped line of 2000
-    // alternately coloured runs (2000 segments, 70000 characters) exceeds
-    // the bound on its own and is never retained.
-    const runs = (n: number, text: string) => Array.from({ length: n }, (_, i) => ({
-      type: 'text', text, fontSize: 10, fontFamily: 'Arial', color: i % 2 ? 'FF0000' : '0000FF',
-    }));
-    const body = (n: number, text: string, wrap: string) => ({
+  it('bounds the layouts a table retains by their payload, font strings included', () => {
+    // Retention charges what a layout holds: lines, segments, metric marks,
+    // the characters of their text, and each distinct CSS font string once
+    // (interned, shared by every retained segment using it).
+    const glyph = (text: string, fontFamily: string) => ({
       verticalAnchor: 't',
       paragraphs: [{
         alignment: 'l', marL: 0, marR: 0, indent: 0,
         spaceBefore: null, spaceAfter: null, spaceLine: null,
-        runs: runs(n, text), bullet: { type: 'none' }, eaLnBrk: true,
+        runs: [{ type: 'text', text, fontSize: 10, fontFamily }],
+        bullet: { type: 'none' }, eaLnBrk: true,
       }],
       defaultFontSize: null, defaultBold: null, defaultItalic: null,
       lIns: 0, rIns: 0, tIns: 0, bIns: 0,
-      wrap, vert: 'horz', autoFit: 'none',
+      wrap: 'square', vert: 'horz', autoFit: 'none',
     } as unknown as TextBody);
-    const wide = tableOf([[cell({ textBody: body(2000, 'abcdefghijklmnopqrstuvwxyz012345678', 'none') })]], [COL]);
-    const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
-    let peak = 0;
-    const one = makeRecordingCtx(() => { peak = Math.max(peak, memo.layouts.size); });
-    renderTableWithLayoutMemo(memo, one.ctx, wide, SCALE, undefined);
-    expect(one.texts.length).toBe(2000);
-    expect(peak).toBe(0);
-
-    // 20 x 20 cells of 30 ten-character runs, one run a line, about 360
-    // units a cell: the first cells are retained up to the bound, the rest
-    // are laid out again and paint the same text.
-    const rows = Array.from({ length: 20 }, () =>
-      Array.from({ length: 20 }, () => cell({ textBody: body(30, 'abcdefghij', 'square') })));
-    const t = tableOf(rows, Array(20).fill(COL));
-    let peakPayload = 0;
-    const many = makeRecordingCtx(() => { peakPayload = Math.max(peakPayload, memo.payload); });
-    renderTableWithLayoutMemo(memo, many.ctx, t, SCALE, undefined);
-    expect(peakPayload).toBeGreaterThan(40_000);
-    expect(peakPayload).toBeLessThanOrEqual(65_536);
-    expect(memo.payload).toBe(0);
-    const reference = makeRecordingCtx();
-    renderTable(reference.ctx, t, SCALE);
-    expect(many.texts).toEqual(reference.texts);
+    const peakOf = (t: TableElement) => {
+      const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
+      let held = 0;
+      let payload = 0;
+      const recording = makeRecordingCtx(() => {
+        held = Math.max(held, memo.layouts.size);
+        payload = Math.max(payload, memo.payload);
+      });
+      renderTableWithLayoutMemo(memo, recording.ctx, t, SCALE, undefined);
+      expect(memo.payload).toBe(0);
+      return { held, payload, texts: recording.texts };
+    };
+    // Admission: one glyph under a 70,000-character family name exceeds the
+    // bound alone and is not retained; under a short name it is.
+    const long = 'F'.repeat(70_000);
+    expect(peakOf(tableOf([[cell({ textBody: glyph('x', long) })]], [COL])).held).toBe(0);
+    expect(peakOf(tableOf([[cell({ textBody: glyph('x', 'Arial') })]], [COL])).held).toBe(1);
+    // Aggregate: four one-glyph rows under distinct 20,000-character names,
+    // a little over 20,000 units each. Recording stops at three, below the
+    // bound, and every row still paints its glyph on its own 12pt line (20pt
+    // rows, baseline 0.8 x 12pt).
+    const rows = ['a', 'b', 'c', 'd'].map((text) =>
+      [cell({ textBody: glyph(text, `${text}${'G'.repeat(20_000)}`) })]);
+    const { held, payload, texts } = peakOf(tableOf(rows, [COL]));
+    expect(held).toBe(3);
+    expect(payload).toBeGreaterThan(60_000);
+    expect(payload).toBeLessThanOrEqual(65_536);
+    expect(texts.map(({ text, y }) => [text, Math.round(y * 10) / 10]))
+      .toEqual([['a', 9.6], ['b', 29.6], ['c', 49.6], ['d', 69.6]]);
+    // One shared name is charged once: all four rows are retained.
+    const shared = 'H'.repeat(20_000);
+    const sharedRows = ['a', 'b', 'c', 'd'].map((text) => [cell({ textBody: glyph(text, shared) })]);
+    expect(peakOf(tableOf(sharedRows, [COL])).held).toBe(4);
   });
 
   it('lets no other text body see the measured layouts of a table cell', () => {
@@ -811,12 +818,13 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(strokes, 40)).toHaveLength(0);
   });
 
-  it('leaves merges the earlier rule skips out of the merge groups', () => {
+  it('leaves merges that add no height out of the merge groups', () => {
     // An eight-line merge over rows 1-3 beside a five-line merge over rows
     // 1-2 resolve by end row: 24/96/72/24 (edges 24/120/192/216). A rotated
-    // merge over rows 3-4 without frame slack is skipped by the earlier
-    // rule, so it must not join them into a reading-order group
-    // (24/96/144/24, edges 24/120/264/288).
+    // merge over rows 3-4 adds nothing, so it must not join them into a
+    // reading-order group (24/96/144/24, edges 24/120/264/288): without
+    // frame slack the earlier rule skips it; with slack (100pt frame) it is
+    // measured by its 40pt box width, which the two 24pt rows already hold.
     const body = (n: number): TextBody => ({
       verticalAnchor: 't',
       paragraphs: [{
@@ -835,14 +843,16 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     const eight = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
     const five = [cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
     const rotated = [cell(), cell(), cell({ textBody: { ...body(1), vert: 'vert' } as TextBody, rowSpan: 2 }), cell({ vMerge: true })];
-    const t = tableOf([0, 1, 2, 3].map((r) => [eight[r], five[r], rotated[r], cell({ borderB: ln() })]),
-      [COL, COL, COL, COL]);
-    for (const row of t.rows) row.height = 24 * EMU;
-    t.height = 96 * EMU;
-    const edges = render(t)
-      .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
-      .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
-    expect(edges).toEqual([24, 120, 192, 216]);
+    for (const [frame, rotatedWidth] of [[96, 60], [100, 40]]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => [eight[r], five[r], rotated[r], cell({ borderB: ln() })]),
+        [COL, COL, rotatedWidth * EMU, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = frame * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120 + rotatedWidth)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, `frame ${frame}`).toEqual([24, 120, 192, 216]);
+    }
   });
 
   it('orders a large connected merge group without overflowing the stack', () => {

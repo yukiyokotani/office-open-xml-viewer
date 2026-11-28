@@ -13,7 +13,7 @@ import {
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
-import { selectModelSource, beginModelSourceLoad, effectiveModelSources, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
+import { selectNamedModelSource, beginModelSourceLoad, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
 import { optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import type { PptxFontDemandFacts } from '../font-requests.js';
 import { PptxPresentation, type LoadOptions } from '../presentation.js';
@@ -80,12 +80,13 @@ export async function loadPptxModelSource(
     }
     // Selection happens once: an unclaimed input continues on the OOXML path
     // with every source option cleared, so it is never offered again.
-    const selected = selectModelSource(effectiveModelSources(opts.legacyPpt, opts.odp), 'pptx', new Uint8Array(buffer));
-    if (!selected) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined, odp: undefined });
-    const load = beginModelSourceLoad(selected, 'pptx');
-    // The ODP sizing policy follows the source the application selected, so
-    // a provider whose tables omit `odfRowHeights` still gets it.
-    const odfTables = selected === opts.odp;
+    const choice = selectNamedModelSource([opts.legacyPpt, opts.odp], 'pptx', new Uint8Array(buffer));
+    if (!choice) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined, odp: undefined });
+    const load = beginModelSourceLoad(choice.source, 'pptx');
+    // The ODP sizing policy follows the option that claimed the input (slot
+    // 1, `odp`), so a provider whose tables omit `odfRowHeights` still gets
+    // it; a provider filling both options is selected as `legacyPpt`.
+    const odfTables = choice.slot === 1;
     try {
       metrics.setSourceBytes(buffer.byteLength);
       metrics.checkpoint('container ready');

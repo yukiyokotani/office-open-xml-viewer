@@ -7782,8 +7782,9 @@ function isHorizontalCellVert(vert: unknown): boolean {
  *   stacked, warped, multi-column, ODF) store nothing, so trial layouts (a
  *   shrink search at many scales) are never kept.
  * - Retention is bounded by payload, not by line count: recording stops
- *   once TABLE_LAYOUT_RETAINED_PAYLOAD units (segments, metric marks and
- *   text characters, layoutPayload) are held, and a painted cell drops its
+ *   once TABLE_LAYOUT_RETAINED_PAYLOAD units (segments, metric marks, the
+ *   characters of their text, layoutPayload, and each distinct CSS font
+ *   string once, interned in `fonts`) are held, and a painted cell drops its
  *   paragraphs. A large table reuses the layouts of its first cells and lays
  *   the rest out again, as it would without the memo: past the bound it
  *   costs a measure and a paint per cell. Matching paint-only cost there
@@ -7796,8 +7797,13 @@ function isHorizontalCellVert(vert: unknown): boolean {
  */
 export interface TableLayoutMemo {
   layouts: Map<Paragraph, Map<string, readonly LayoutLine[]>>;
-  /** Payload currently held in `layouts` (layoutPayload units). */
+  /** Payload currently held: layoutPayload of every retained layout plus
+   * the length of every string in `fonts`. */
   payload: number;
+  /** The CSS font strings of retained segments and marks, each held once and
+   * shared (interned) by every retained segment that uses it, with the
+   * number of retained segments and marks using it. */
+  fonts?: Map<string, { font: string; refs: number }>;
 }
 
 /** A cell's view of the memo: `record` is true for row sizing of a cell
@@ -7812,15 +7818,24 @@ interface TableLayoutAccess {
  * layouts are computed again and paint is unchanged. */
 const TABLE_LAYOUT_RETAINED_PAYLOAD = 65_536;
 
-/** What a layout retains: one unit per line, segment and metric mark, and
- * one per text character. */
+/** What a layout retains apart from its font strings: one unit per line,
+ * segment and metric mark, and one per text character. */
 function layoutPayload(lines: readonly LayoutLine[]): number {
   let payload = 0;
   for (const line of lines) {
-    payload += 1 + line.segments.length + (line.metricMarks?.length ?? 0);
-    for (const seg of line.segments) payload += seg.text.length;
+    payload += 1;
+    for (const seg of line.segments) payload += 1 + seg.text.length;
+    for (const mark of line.metricMarks ?? []) payload += 1 + mark.text.length;
   }
   return payload;
+}
+
+/** Every segment and metric mark of a layout. */
+function* layoutPieces(lines: readonly LayoutLine[]): Generator<LayoutSegment> {
+  for (const line of lines) {
+    yield* line.segments;
+    if (line.metricMarks) yield* line.metricMarks;
+  }
 }
 
 function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
@@ -7848,8 +7863,25 @@ function tableParagraphLayout(
   if (cached) return cached as LayoutLine[];
   const lines = layoutParagraph(ctx, para, ...rest);
   if (!record) return lines;
-  const payload = layoutPayload(lines);
+  // A CSS font string carries the authored family names, so it is not
+  // bounded by the text: each distinct one is charged once, when the memo
+  // first holds it, and shared by the segments that use it.
+  const fonts = memo.fonts ??= new Map();
+  let payload = layoutPayload(lines);
+  const added = new Set<string>();
+  for (const piece of layoutPieces(lines)) {
+    if (!fonts.has(piece.font) && !added.has(piece.font)) {
+      added.add(piece.font);
+      payload += piece.font.length;
+    }
+  }
   if (memo.payload + payload > TABLE_LAYOUT_RETAINED_PAYLOAD) return lines;
+  for (const piece of layoutPieces(lines)) {
+    let entry = fonts.get(piece.font);
+    if (!entry) fonts.set(piece.font, entry = { font: piece.font, refs: 0 });
+    entry.refs++;
+    piece.font = entry.font;
+  }
   let byKey = memo.layouts.get(para);
   if (!byKey) memo.layouts.set(para, byKey = new Map());
   byKey.set(key, freezeLayout(lines));
@@ -7861,7 +7893,16 @@ function dropTableLayouts(memo: TableLayoutMemo, paragraphs: readonly Paragraph[
   for (const para of paragraphs) {
     const byKey = memo.layouts.get(para);
     if (!byKey) continue;
-    for (const lines of byKey.values()) memo.payload -= layoutPayload(lines);
+    for (const lines of byKey.values()) {
+      memo.payload -= layoutPayload(lines);
+      for (const piece of layoutPieces(lines)) {
+        const entry = memo.fonts?.get(piece.font);
+        if (entry && --entry.refs === 0) {
+          memo.fonts!.delete(piece.font);
+          memo.payload -= piece.font.length;
+        }
+      }
+    }
     memo.layouts.delete(para);
   }
 }
@@ -7873,7 +7914,8 @@ interface TableMerge {
   /** Last row it spans. */
   last: number;
   earlierRule: boolean;
-  hasAutoHeightRow: boolean;
+  /** Measured content height (px). */
+  needed: number;
 }
 
 /**
@@ -8080,19 +8122,25 @@ export function renderTableWithLayoutMemo(
       // frame slack. A merge it skips changes no row, so it is left out
       // before grouping and cannot link other merges into one group.
       if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
-      spanCells.push({ ri, ci, last, earlierRule, hasAutoHeightRow });
+      // The measured height does not depend on the row heights, so it is
+      // taken once, here. A merge whose content already fits the rows after
+      // the first pass never adds height (rows only grow), so it is left out
+      // too, under either rule.
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const needed = (renderTextBody(
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
+        sizingTextColor(cell, earlierRule), 0, false, false,
+        '#000000', slideNumber, rc, undefined, true, undefined, false,
+        !earlierRule || hasAutoHeightRow, sizingLayouts(earlierRule),
+      ) as number) || 0;
+      let firstPass = 0;
+      for (let r = ri; r <= last; r++) firstPass += rowHeights[r];
+      if (needed <= firstPass) continue;
+      spanCells.push({ ri, ci, last, earlierRule, needed });
     }
   }
-  for (const { ri, ci, last, earlierRule, hasAutoHeightRow } of orderTableMerges(spanCells)) {
+  for (const { ri, ci, last, earlierRule, needed } of orderTableMerges(spanCells)) {
     const cell = el.rows[ri].cells[ci];
-    const textBody = cell.textBody!;
-    const cellW = spannedWidth(ci, cell.gridSpan || 1);
-    const needed = (renderTextBody(
-      ctx, tableTextBody(textBody), 0, 0, cellW, 0, scale,
-      sizingTextColor(cell, earlierRule), 0, false, false,
-      '#000000', slideNumber, rc, undefined, true, undefined, false,
-      !earlierRule || hasAutoHeightRow, sizingLayouts(earlierRule),
-    ) as number) || 0;
     let have = 0;
     for (let r = ri; r <= last; r++) have += rowHeights[r];
     if (needed <= have) continue;

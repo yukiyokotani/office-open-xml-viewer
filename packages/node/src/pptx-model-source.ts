@@ -9,6 +9,9 @@ import { PptxPresentationSessionImpl, type OpenPptxPresentationOptions } from '.
 export type PptxModelSourceAcquisition = ReturnType<typeof acquirePptxSessionFromArchive> & {
   /** True when the built-in parser opened the input (the source declined it). */
   readonly parsedTextChain: boolean;
+  /** True when the `odp` option claimed the input (its slot, not the
+   * provider's identity: one provider may fill both options). */
+  readonly odfTables: boolean;
 };
 
 export async function openPptxSource(
@@ -34,6 +37,7 @@ export async function openPptxSource(
     // A model source's slides have no proven parsed colour chain; input the
     // source declined went through the built-in parser and keeps it.
     acquired.parsedTextChain,
+    acquired.odfTables,
   );
 }
 
@@ -52,7 +56,7 @@ export async function acquirePptxInput(
     buffer, 'pptx', { ...options, sources: [options.legacyPpt, options.odp] }, validatePptxModelSourceArchive,
   );
   if (input.kind === 'ooxml') {
-    return { ...await acquirePptxNodeSession(input.bytes, wasmModule(), options), parsedTextChain: true };
+    return { ...await acquirePptxNodeSession(input.bytes, wasmModule(), options), parsedTextChain: true, odfTables: false };
   }
   try {
     validatePptxModelSourceViewDefaults(input.opened.viewDefaults);
@@ -67,5 +71,7 @@ export async function acquirePptxInput(
       closeArchive: input.opened.close,
     }, options),
     parsedTextChain: false,
+    // Slot 1 of [legacyPpt, odp].
+    odfTables: input.slot === 1,
   };
 }
