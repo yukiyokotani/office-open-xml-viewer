@@ -183,7 +183,17 @@ export function formatCategoryLabel(
   date1904 = false,
   /** Section divisors of `code` ({@link formatChartValWithCode}). */
   divisors?: readonly number[] | null,
+  /** Whether the category came from a numeric source (`c:numRef` /
+   *  `c:numLit`, model `categoriesNumeric`). `false`: text, shown verbatim
+   *  whatever the axis code. `true`: a number, shown through the code, or as
+   *  General (host decimal separator) when there is none. Absent: formatted
+   *  by the code when the text parses as a number. */
+  numeric?: boolean | null,
 ): string {
+  if (numeric === false) return raw;
+  if (!code && numeric === true) {
+    return raw.trim() !== '' && Number.isFinite(Number(raw)) ? raw.replace('.', hostNumberSymbols().decimal) : raw;
+  }
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text

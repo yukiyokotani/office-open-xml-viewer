@@ -565,6 +565,7 @@ impl_retained_struct!(ChartModel {
     categories,
     category_source_hidden,
     category_levels,
+    categories_numeric,
     series,
     plot_groups,
     show_data_labels,

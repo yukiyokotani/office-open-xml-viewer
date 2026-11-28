@@ -264,3 +264,35 @@ describe('chart labels paint the host locale separators (#2346)', () => {
     }
   });
 });
+
+describe('category labels keep number-vs-text provenance (#2346)', () => {
+  const labels = (locale: string) => {
+    vi.stubGlobal('navigator', { language: locale });
+    try {
+      return {
+        // numRef/numLit category 1.2: General localizes, an explicit code applies.
+        numericGeneral: formatCategoryLabel('1.2', null, false, null, true),
+        numericCode: formatCategoryLabel('1.2', '0.00', false, null, true),
+        // strRef/strLit category "1.2" is text: never reformatted, even under an axis code.
+        textGeneral: formatCategoryLabel('1.2', null, false, null, false),
+        textCode: formatCategoryLabel('1.2', '0.0', false, null, false),
+        // Unknown provenance keeps the earlier behaviour.
+        unknownCode: formatCategoryLabel('1.2', '0.0'),
+      };
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it('localizes numeric categories and leaves text categories verbatim under fr-FR', () => {
+    expect(labels('fr-FR')).toEqual({
+      numericGeneral: '1,2', numericCode: '1,20', textGeneral: '1.2', textCode: '1.2', unknownCode: '1,2',
+    });
+  });
+
+  it('keeps en-US output unchanged', () => {
+    expect(labels('en-US')).toEqual({
+      numericGeneral: '1.2', numericCode: '1.20', textGeneral: '1.2', textCode: '1.2', unknownCode: '1.2',
+    });
+  });
+});

@@ -73,6 +73,7 @@ mod tests {
             categories: vec!["A".to_string(), "B".to_string()],
             category_source_hidden: None,
             category_levels: None,
+            categories_numeric: None,
             series: vec![ChartSeries {
                 name: "S1".to_string(),
                 chartex_format_idx: None,

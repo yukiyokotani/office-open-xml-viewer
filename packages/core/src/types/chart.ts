@@ -852,6 +852,14 @@ export interface ChartModel {
    * of its category span.
    */
   categoryLevels?: string[][] | null;
+  /**
+   * Whether the shared category source is numeric (`c:numRef` / `c:numLit`)
+   * rather than text (`c:strRef` / `c:strLit` / `c:multiLvlStrRef`).
+   * `categories` holds either as strings; a numeric category follows the axis
+   * number format (General included, with the host decimal separator) and a
+   * text category is never reformatted. Absent: unknown, legacy handling.
+   */
+  categoriesNumeric?: boolean | null;
   series: ChartSeries[];
   /** Ordered classic chart groups. Absent keeps legacy public models on the
    * existing single-family compatibility path. */

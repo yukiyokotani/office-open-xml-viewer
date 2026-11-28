@@ -306,4 +306,10 @@ test('worker mode matches main mode › comma-decimal number separators', async 
   // The fr-FR frame really paints other separators than the en-US one.
   expect(fr.main.width).toBe(en.main.width);
   expect(diffPct(fr.main, en.main)).toBeGreaterThan(0);
+  // The worker adopts the main thread's locale from the parse request: its
+  // own navigator stays en-US under the page's locale emulation, so a worker
+  // that dropped the request's hostLocale would paint the same frame for
+  // both pages. The fr-FR worker frame must differ from the en-US one.
+  expect(fr.worker.width).toBe(en.worker.width);
+  expect(diffPct(fr.worker, en.worker)).toBeGreaterThan(0);
 });

@@ -459,7 +459,7 @@ export function renderLineChart(
     ? dateAxisPlan.majorTicks.map(tick =>
       formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelInterval) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
+      formatCategoryLabel((cats[index * categoryLabelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them, as the column
   // family does for its wrapped labels. An authored inner rectangle already
@@ -869,7 +869,7 @@ export function renderLineChart(
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric),
           x: toX(ci),
           categoryIndex: ci,
         };

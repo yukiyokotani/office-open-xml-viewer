@@ -150,7 +150,7 @@ export function measureChartDataTable(
     const numeric = category.trim() === '' ? Number.NaN : Number(category);
     const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors);
+      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, chart.categoriesNumeric);
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

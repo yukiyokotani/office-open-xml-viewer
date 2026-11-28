@@ -1395,6 +1395,8 @@ pub(super) fn parse_classic_impl(
         })
         .unwrap_or_default();
     let category_levels = resolved_category_levels.filter(|levels| levels.len() > 1);
+    let categories_numeric =
+        first_series.and_then(|series| category_source_is_numeric(series, category_tag));
     let category_source_hidden =
         first_series.and_then(|series| collect_source_hidden(series, category_tag, references));
 
@@ -3165,6 +3167,7 @@ pub(super) fn parse_classic_impl(
         categories,
         category_source_hidden,
         category_levels,
+        categories_numeric,
         series,
         plot_groups: Some(plot_groups),
         vary_colors,

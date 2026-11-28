@@ -462,7 +462,7 @@ export function renderAreaChart(
     ? dateAxisPlan.majorTicks.map(tick =>
       formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelSkip) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
+      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them (an authored inner
   // rectangle already leaves its own label band). Exactly 0 without breaks.
@@ -1007,7 +1007,7 @@ export function renderAreaChart(
       : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
         const ci = index * authoredSkip;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric),
           x: toX(ci),
           categoryIndex: ci,
         };

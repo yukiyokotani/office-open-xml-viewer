@@ -461,6 +461,14 @@ pub struct ChartModel {
     pub category_source_hidden: Option<Vec<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_levels: Option<Vec<Vec<String>>>,
+    /// Whether the shared category source is numeric (`<c:numRef>` /
+    /// `<c:numLit>`, true) or text (`<c:strRef>` / `<c:strLit>` /
+    /// `<c:multiLvlStrRef>`, false). `categories` projects both into strings;
+    /// this keeps which a label was, so a numeric category follows the axis
+    /// number format (General included, with the host's decimal separator)
+    /// and a text category is never reformatted. Absent: no category source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories_numeric: Option<bool>,
     pub series: Vec<ChartSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_groups: Option<Vec<ChartPlotGroup>>,

@@ -4491,6 +4491,7 @@ function renderCartesian(
         chart.catAxisFormatCode,
         chart.date1904,
         chart.catAxisFormatDivisors,
+        chart.categoriesNumeric,
       )
     );
     let rotation = authoredCategoryRotation(chart);

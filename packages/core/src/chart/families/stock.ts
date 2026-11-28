@@ -290,7 +290,7 @@ export function renderStockChart(
       ? dateAxisPlan.majorTicks.map(tick =>
         formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) =>
-        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
+        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric));
     const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
       chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
     const categoryLabelExtraH = authoredExtraLinesHeight(
@@ -731,7 +731,7 @@ export function renderStockChart(
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric),
           x: toX(ci),
           categoryIndex: ci,
         };

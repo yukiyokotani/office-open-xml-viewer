@@ -421,7 +421,7 @@ export function drawSecondaryCategoryAxis(
       ctx.textAlign = anchor.textAlign;
       fillAuthoredText(
         ctx,
-        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors),
+        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, chart.categoriesNumeric),
         px0 + anchor.fraction * pw,
         py0 - labelGap,
         axisLabelLineHeightPx(fontPx),
@@ -483,7 +483,7 @@ export function secondaryCategoryLabelExtraH(
   const labelSkip = Math.max(1, Math.floor(axis.tickLabelSkip ?? 1));
   const labels: string[] = [];
   for (let index = 0; index < categories.length; index += labelSkip) {
-    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors));
+    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors, chart.categoriesNumeric));
   }
   return authoredExtraLinesHeight(labels, axisLabelLineHeightPx(fontPx));
 }

@@ -605,6 +605,47 @@ mod tests {
     }
 
     #[test]
+    fn category_source_kind_survives_the_string_projection() {
+        let parse = |cat: &str| {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+                  <c:ser><c:idx val="0"/><c:order val="0"/>
+                    <c:cat>{cat}</c:cat>
+                    <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                  </c:ser>
+                </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+            );
+            let doc = root_of(&xml);
+            parse_chart_part(
+                doc.root_element(),
+                &ChartParseContext {
+                    color_resolver: Some(&FixtureResolver),
+                    ..Default::default()
+                },
+            )
+            .expect("bar chart parses")
+        };
+        let numeric = parse(
+            r#"<c:numRef><c:f>S!A1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:numCache></c:numRef>"#,
+        );
+        assert_eq!(numeric.categories, vec!["1.2"]);
+        assert_eq!(numeric.categories_numeric, Some(true));
+        let literal = parse(
+            r#"<c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:numLit>"#,
+        );
+        assert_eq!(literal.categories_numeric, Some(true));
+        let text = parse(
+            r#"<c:strRef><c:f>S!A1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:strCache></c:strRef>"#,
+        );
+        assert_eq!(text.categories, vec!["1.2"]);
+        assert_eq!(text.categories_numeric, Some(false));
+        let string_literal = parse(
+            r#"<c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:strLit>"#,
+        );
+        assert_eq!(string_literal.categories_numeric, Some(false));
+    }
+
+    #[test]
     fn plot_visible_only_preserves_source_masks_and_precedes_statistical_error_bars() {
         let xml = format!(
             r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:lineChart>

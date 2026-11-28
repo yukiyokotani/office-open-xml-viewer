@@ -33,7 +33,9 @@ import type { Paragraph, Slide, SlideElement } from './types';
  *   load-time text, unless of an unknown type (core `paintsTextFreeImage`); a
  *   metafile's text records demand their own scalars when it plays (core
  *   `bindMetafileFontDemand`);
- * - charts: every scalar their labels can contain (core `chartPaintTexts`);
+ * - charts: every scalar their labels can contain (core `chartPaintTexts`),
+ *   under `locale`, the host locale the main thread painted with (the sidecar
+ *   has its own number-symbols state);
  * - equations: a converted one paints a raster; a failed one its MCE preview,
  *   its stored fallback text or the unavailable placeholder, and the MCE
  *   fallback elements are collected as elements.
@@ -44,6 +46,7 @@ export function collectSlideFontDemand(
   slide: Slide,
   committed: ReadonlySet<number>,
   byteAllowance: number,
+  locale?: string,
 ): FontPreloadDemand {
   const scalars = new FontDemandScalarCollector({ budget: byteAllowance, committed });
   // The family the renderer paints a slot with (renderer normalizeFontFamily,
@@ -152,7 +155,7 @@ export function collectSlideFontDemand(
       case 'picture':
       case 'media': return true;
       case 'chart': {
-        const texts = chartPaintTexts(el.chart);
+        const texts = chartPaintTexts(el.chart, locale);
         return texts !== 'all' && texts.every(addPlain);
       }
       default: return false;

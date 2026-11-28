@@ -2269,6 +2269,24 @@ pub(super) fn has_authored_reference_data(container: Node<'_, '_>) -> bool {
     })
 }
 
+/// Whether a series' category/X source holds numbers (`numRef` / `numLit`,
+/// `Some(true)`) or text (`strRef` / `strLit` / `multiLvlStrRef`,
+/// `Some(false)`). The label strings are projected from either; this is the
+/// only record of which it was (ECMA-376 §21.2.2.24 CT_AxDataSource).
+pub(super) fn category_source_is_numeric(ser_node: Node<'_, '_>, child_tag: &str) -> Option<bool> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    container
+        .children()
+        .filter(|node| node.is_element())
+        .find_map(|node| match node.tag_name().name() {
+            "numRef" | "numLit" => Some(true),
+            "strRef" | "strLit" | "multiLvlStrRef" => Some(false),
+            _ => None,
+        })
+}
+
 pub(super) fn reference_formula(container: Node<'_, '_>) -> Option<String> {
     container
         .descendants()

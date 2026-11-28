@@ -1,5 +1,5 @@
 import { localizedExcelShortDateTexts } from '../chart/chart-number-format.js';
-import { numberSymbolTexts } from '../number-symbols.js';
+import { hostLocale, hostNumberSymbols, numberSymbolTexts } from '../number-symbols.js';
 import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections } from '../excel-number-format.js';
 
 /**
@@ -28,13 +28,18 @@ import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections
  * - the painter's own literals ({@link CHART_SYNTHESIZED_TEXT}): elision,
  *   histogram bin bounds and trendline equations.
  *
+ * `locale` is the host locale the labels paint with; a caller in another
+ * module realm than the painter (the PPTX font-demand sidecar has its own
+ * copy of number-symbols state) passes it explicitly instead of relying on
+ * the adopted worker locale.
+ *
  * `'all'` (every subset) when that set is not provable: a region map (its
  * labels come from bundled geodata names), an image fill of unknown type, or
  * a non-Gregorian / native-digit locale short date. A metafile fill's text
  * records are demanded when it plays ({@link paintsTextFreeImage}). Strings are collected by the caller's scalar collector,
  * which applies its own scalar rules (PUA, unknown scalars, closures).
  */
-export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
+export function chartPaintTexts(chart: unknown, locale?: string): readonly string[] | 'all' {
   const texts: string[] = [CHART_SYNTHESIZED_TEXT];
   let localizedShortDate = false;
   const pending: unknown[] = [chart];
@@ -72,9 +77,9 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
   }
   // Value labels and number-format codes paint the host locale's decimal
   // and group separators (number-symbols.ts).
-  texts.push(...numberSymbolTexts());
+  texts.push(...numberSymbolTexts(hostNumberSymbols(locale ?? hostLocale())));
   if (localizedShortDate) {
-    const shortDate = localizedExcelShortDateTexts();
+    const shortDate = locale === undefined ? localizedExcelShortDateTexts() : localizedExcelShortDateTexts(locale);
     if (!shortDate.complete) return 'all';
     texts.push(...shortDate.texts);
   }
