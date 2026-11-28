@@ -79,7 +79,7 @@ export function chartPaintTexts(chart: unknown, locale?: string): readonly strin
   // and group separators (number-symbols.ts).
   texts.push(...numberSymbolTexts(hostNumberSymbols(locale ?? hostLocale())));
   if (localizedShortDate) {
-    const shortDate = locale === undefined ? localizedExcelShortDateTexts() : localizedExcelShortDateTexts(locale);
+    const shortDate = localizedExcelShortDateTexts(locale);
     if (!shortDate.complete) return 'all';
     texts.push(...shortDate.texts);
   }

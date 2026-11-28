@@ -8,7 +8,7 @@ import { frozenOverflowXlsxBytes } from '../../../../tests/fixtures/frozen-overf
 // @ts-ignore - shared plain-JS test fixture builder.
 import { symbolFontXlsxBytes } from '../../../../tests/fixtures/symbol-font-xlsx.mjs';
 // @ts-ignore - shared plain-JS test fixture builder.
-import { numberSeparatorsXlsxBytes } from '../../../../tests/fixtures/number-separators-xlsx.mjs';
+import { numberSeparatorsXlsxBytes, shortDateXlsxBytes } from '../../../../tests/fixtures/number-separators-xlsx.mjs';
 
 // Worker mode must produce (near-)identical pixels to main mode: same
 // renderer, same per-sheet parse, same fonts, different thread. The only
@@ -267,13 +267,16 @@ test('worker mode matches main mode › symbol-font cells, runs and text box', a
 // (#2346, core `adoptHostLocale`). Browser locale emulation does not reach a
 // dedicated worker, so without the adopted locale the worker would paint the
 // machine's separators while main mode paints fr-FR ones.
-test('worker mode matches main mode › comma-decimal number separators', async ({ browser }) => {
+for (const [title, fixtureBytes] of [
+  ['comma-decimal number separators', numberSeparatorsXlsxBytes],
+  ['built-in short date (format 14)', shortDateXlsxBytes],
+] as const) test(`worker mode matches main mode › ${title}`, async ({ browser }) => {
   const frames = async (locale: string): Promise<{ main: PNG; worker: PNG }> => {
     const context = await browser.newContext({ locale });
     try {
       const page = await context.newPage();
       await page.route('**/generated/number-separators.xlsx', (route) => route.fulfill({
-        status: 200, contentType: 'application/octet-stream', body: Buffer.from(numberSeparatorsXlsxBytes()),
+        status: 200, contentType: 'application/octet-stream', body: Buffer.from(fixtureBytes()),
       }));
       await page.goto('/tests/visual/worker-fixture.html?xlsx=generated/number-separators&sheet=0');
       await page.waitForFunction(
@@ -303,6 +306,11 @@ test('worker mode matches main mode › comma-decimal number separators', async 
   expect(fr.worker.width).toBe(fr.main.width);
   expect(fr.worker.height).toBe(fr.main.height);
   expect(diffPct(fr.main, fr.worker)).toBeLessThanOrEqual(0.1);
+  // The worker frame is closer to the main frame of the same locale than to
+  // the other locale's: a worker that kept its own navigator locale paints
+  // identical frames for both pages (diff 0), and a single cell's difference
+  // can sit under the tolerance above.
+  expect(diffPct(fr.main, fr.worker)).toBeLessThan(diffPct(fr.worker, en.worker));
   // The fr-FR frame really paints other separators than the en-US one.
   expect(fr.main.width).toBe(en.main.width);
   expect(diffPct(fr.main, en.main)).toBeGreaterThan(0);

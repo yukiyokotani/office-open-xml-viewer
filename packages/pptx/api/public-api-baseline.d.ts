@@ -882,6 +882,7 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
+    categoriesNumeric?: boolean | null;
     bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;

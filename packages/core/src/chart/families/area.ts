@@ -57,7 +57,7 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawCategoryDataLabels } from '../shared/data-labels.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
@@ -460,9 +460,9 @@ export function renderAreaChart(
   // ticks formatted by the axis numFmt).
   const categoryLabelTexts = (): string[] => dateAxisPlan
     ? dateAxisPlan.majorTicks.map(tick =>
-      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
+      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true))
     : Array.from({ length: Math.ceil(n / categoryLabelSkip) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric));
+      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them (an authored inner
   // rectangle already leaves its own label band). Exactly 0 without breaks.
@@ -791,6 +791,7 @@ export function renderAreaChart(
           isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
         ),
         shapeRotationDeg,
+        chartCategoriesNumeric(chart),
       );
     }
   }
@@ -880,6 +881,7 @@ export function renderAreaChart(
         isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
       ),
       shapeRotationDeg,
+      chartCategoriesNumeric(chart),
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
@@ -1000,14 +1002,14 @@ export function renderAreaChart(
     const authoredSkip = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const labelEntries = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
         const ci = index * authoredSkip;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)),
           x: toX(ci),
           categoryIndex: ci,
         };

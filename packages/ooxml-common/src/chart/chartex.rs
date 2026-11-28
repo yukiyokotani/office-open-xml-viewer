@@ -1689,6 +1689,7 @@ fn parse_chartex_impl(
         explosion: None,
         data_label_colors,
         categories: None,
+        categories_numeric: None,
         bubble_x_source_is_string: None,
         bubble_sizes: None,
         bubble_3d_group_default: None,

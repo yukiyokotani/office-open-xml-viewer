@@ -16,7 +16,7 @@ import {
 } from '../layout.js';
 import { automaticSurfaceMajorUnit, MAX_AXIS_TICKS } from '../axis-scale.js';
 import { axisLineWidthPx, resolveGridline, isCrossBetween } from '../axis-style.js';
-import { formatChartVal, formatChartValWithCode } from '../chart-number-format.js';
+import { categoryCaption, formatChartVal, formatChartValWithCode } from '../chart-number-format.js';
 
 import {
   categoryMinorGridlineFractions,
@@ -60,7 +60,7 @@ import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
 import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
 import { strokeAxisSegment, axisTickLengthPx, valMinorGridStroke, catMinorGridStroke, catGridlineFractions, valAxisReversed, catAxisReversed, drawValMajorGridlines, planValueAxis, axisLabelPx } from '../shared/axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { MAX_CANVAS_MARKER_GRADIENT_STOPS, MAX_CANVAS_MARKER_PAINT_COMPONENTS } from '../shared/paint-limits.js';
 import { axisLabelLineHeightPx, fillAuthoredText } from '../chart-text-lines.js';
 
@@ -1394,7 +1394,7 @@ export function renderSurfaceChart(
     ctx.textAlign = anchor.textAlign;
     fillAuthoredText(
       ctx,
-      categories[column] ?? '',
+      categoryCaption(categories[column] ?? '', chartCategoriesNumeric(chart)),
       point.x,
       point.y + categoryLabelOffsetPx(8, chart.catAxisLabelOffsetPercent),
       axisLabelLineHeightPx(catFontPx),

@@ -1564,6 +1564,9 @@ pub(super) fn parse_classic_impl(
                     }
                 }
             };
+            let series_categories_numeric = series_categories
+                .as_ref()
+                .and_then(|_| category_source_is_numeric(*ser, own_category_tag));
             let bubble_x_source_is_string = bubble_group
                 .and_then(|_| child(*ser, "xVal"))
                 .and_then(|source| {
@@ -2098,6 +2101,7 @@ pub(super) fn parse_classic_impl(
                 // path that currently consumes this separate color array.
                 data_label_colors: None,
                 categories: series_categories,
+                categories_numeric: series_categories_numeric,
                 bubble_x_source_is_string,
                 bubble_sizes,
                 bubble_3d_group_default,

@@ -646,6 +646,39 @@ mod tests {
     }
 
     #[test]
+    fn series_own_categories_carry_their_own_source_kind() {
+        let parse = |first: &str, second: &str| {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+                  <c:ser><c:idx val="0"/><c:order val="0"/><c:cat>{first}</c:cat>
+                    <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+                  <c:ser><c:idx val="1"/><c:order val="1"/><c:cat>{second}</c:cat>
+                    <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+                </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+            );
+            let doc = root_of(&xml);
+            parse_chart_part(
+                doc.root_element(),
+                &ChartParseContext {
+                    color_resolver: Some(&FixtureResolver),
+                    ..Default::default()
+                },
+            )
+            .expect("bar chart parses")
+        };
+        let text = r#"<c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:strLit>"#;
+        let number = r#"<c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1.2</c:v></c:pt></c:numLit>"#;
+        let text_then_number = parse(text, number);
+        assert_eq!(text_then_number.categories_numeric, Some(false));
+        assert_eq!(text_then_number.series[0].categories_numeric, None);
+        assert_eq!(text_then_number.series[1].categories, Some(vec!["1.2".to_string()]));
+        assert_eq!(text_then_number.series[1].categories_numeric, Some(true));
+        let number_then_text = parse(number, text);
+        assert_eq!(number_then_text.categories_numeric, Some(true));
+        assert_eq!(number_then_text.series[1].categories_numeric, Some(false));
+    }
+
+    #[test]
     fn plot_visible_only_preserves_source_masks_and_precedes_statistical_error_bars() {
         let xml = format!(
             r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:lineChart>

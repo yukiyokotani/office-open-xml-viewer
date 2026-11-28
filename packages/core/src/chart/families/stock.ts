@@ -43,7 +43,7 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawSeriesDataLabels } from '../shared/data-labels.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleBarPaint, drawDropLineEnvelopes, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { drawUpDownBars } from '../shared/line-decorations.js';
 import { drawChartMarker } from '../shared/markers.js';
@@ -288,9 +288,9 @@ export function renderStockChart(
     const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const labels = dateAxisPlan && dateAxisPlan.majorTicks.length > 0
       ? dateAxisPlan.majorTicks.map(tick =>
-        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
+        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) =>
-        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric));
+        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)));
     const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
       chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
     const categoryLabelExtraH = authoredExtraLinesHeight(
@@ -703,6 +703,8 @@ export function renderStockChart(
         chart, value, isSecondarySeries(stockSeries) ? secScale?.max ?? plan.max : plan.max,
       ),
       shapeRotationDeg,
+      undefined,
+      chartCategoriesNumeric(chart),
     );
   }
 
@@ -724,14 +726,14 @@ export function renderStockChart(
     const rotRad = catLabelRotationRad(chart);
     const labelEntries = dateAxisPlan && dateAxisPlan.majorTicks.length > 0
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chart.categoriesNumeric),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)),
           x: toX(ci),
           categoryIndex: ci,
         };

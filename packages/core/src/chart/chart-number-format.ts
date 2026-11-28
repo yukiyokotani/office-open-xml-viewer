@@ -15,7 +15,7 @@ import {
   textSectionIndex,
 } from '../excel-number-format';
 import { roundDecimalHalfUp } from '../text/round-decimal';
-import { groupDigits, hostNumberSymbols } from '../number-symbols';
+import { groupDigits, hostLocale, hostNumberSymbols } from '../number-symbols';
 
 const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
 
@@ -24,7 +24,7 @@ const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
 export function formatLocalizedExcelShortDate(
   serial: number,
   date1904 = false,
-  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
+  locale = hostLocale(),
 ): string {
   if (!isExcelDisplayDateSerial(serial, date1904)) return '#';
   const cacheKey = locale ?? '';
@@ -51,7 +51,7 @@ export function formatLocalizedExcelShortDate(
  * scalar demand must be `'all'`.
  */
 export function localizedExcelShortDateTexts(
-  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
+  locale = hostLocale(),
 ): { readonly texts: readonly string[]; readonly complete: boolean } {
   const formatter = new Intl.DateTimeFormat(locale, {
     year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC',
@@ -164,6 +164,16 @@ export function formatChartValWithCode(
   return (needsLeadingMinus ? '-' : '') + applyChartNumberSection(Math.abs(v), section);
 }
 
+/** A category's text where no axis code applies (data-label category names,
+ * legend entries, generated ticks): a number from a numeric source
+ * (`c:numRef` / `c:numLit`) paints as General, with the host decimal
+ * separator; any other category is shown verbatim. */
+export function categoryCaption(raw: string, numeric: boolean | null | undefined): string {
+  return numeric === true && raw.trim() !== '' && Number.isFinite(Number(raw))
+    ? raw.replace('.', hostNumberSymbols().decimal)
+    : raw;
+}
+
 /**
  * Format a category-axis tick label. Categories arrive as the raw cached
  * strings the workbook stored (`<c:cat><c:strCache>` text, or the numeric
@@ -191,9 +201,7 @@ export function formatCategoryLabel(
   numeric?: boolean | null,
 ): string {
   if (numeric === false) return raw;
-  if (!code && numeric === true) {
-    return raw.trim() !== '' && Number.isFinite(Number(raw)) ? raw.replace('.', hostNumberSymbols().decimal) : raw;
-  }
+  if (!code && numeric === true) return categoryCaption(raw, true);
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text

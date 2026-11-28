@@ -1684,6 +1684,10 @@ pub struct ChartSeries {
     pub use_secondary_axis: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<String>>,
+    /// Provenance of this series' own `categories` (see
+    /// `ChartModel::categories_numeric`); present only with them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories_numeric: Option<bool>,
     /// Bubble-only source provenance. A string-backed `<c:xVal>` has distinct
     /// Office legend semantics from a numeric X source.
     #[serde(default, skip_serializing_if = "Option::is_none")]

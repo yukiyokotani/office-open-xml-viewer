@@ -138,6 +138,9 @@ export interface ChartSeries {
    * `ChartModel.categories` as X.
    */
   categories?: string[] | null;
+  /** Provenance of this series' own `categories`: numeric source (`c:numRef` /
+   *  `c:numLit`) or text; see `ChartModel.categoriesNumeric`. */
+  categoriesNumeric?: boolean | null;
   /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
    * exposes such a lone bubble series as one legend entry per point while a
    * numeric X source keeps the ordinary one-entry-per-series legend. */

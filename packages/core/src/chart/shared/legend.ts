@@ -7,6 +7,7 @@ import { bubblePointIsThreeD, effectiveMarkerSymbol, markerFillColorFor, markerF
 import { chartStyleEffectOwner, paintChartStyleEffects } from '../style-effects.js';
 import { chartStyleDirectFillDecision, chartStyleDirectLineDecision, chartStyleFillDecision, chartStyleLineDecision } from '../style-paint.js';
 import { axisLineWidthPx } from '../axis-style.js';
+import { categoryCaption } from '../chart-number-format.js';
 import { resolveNativeFill as resolveFill } from '../../shape/paint.js';
 import { drawingmlLineDashArray } from '../../draw/dash.js';
 import { chartVariesColorsByPoint, legendEntryGlobalIndex, legendEntryRanges, legendIsCategoryDriven } from '../legend-entry-plan.js';
@@ -630,7 +631,7 @@ export function buildLegendEntries(
         ? pieSliceColor(i, first, pieVaryColors, 0)
         : legendEntryColor(chartType, series, i, varyByPoint, pieVaryColors);
       return {
-        label: (cats[i] ?? `Item ${i + 1}`).toString(),
+        label: cats[i] == null ? `Item ${i + 1}` : categoryCaption(cats[i].toString(), first?.categories ? first.categoriesNumeric : chart?.categoriesNumeric),
         color: resolvedFill?.fillType === 'solid'
           ? (resolvedFill.color.startsWith('#') ? resolvedFill.color : `#${resolvedFill.color}`)
           : legacyColor,

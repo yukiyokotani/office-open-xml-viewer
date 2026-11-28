@@ -1062,6 +1062,7 @@ impl_retained_struct!(ChartSeries {
     bar_group_overlap,
     use_secondary_axis,
     categories,
+    categories_numeric,
     bubble_x_source_is_string,
     show_marker,
     val_format_code,

@@ -108,6 +108,7 @@ mod tests {
                 bar_group_overlap: None,
                 use_secondary_axis: None,
                 categories: None,
+                categories_numeric: None,
                 bubble_x_source_is_string: None,
                 show_marker: None,
                 val_format_code: None,

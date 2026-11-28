@@ -7,7 +7,7 @@ import { legendEntryGlobalIndex, legendEntryRanges } from '../legend-entry-plan.
 import { authoredLineCount, authoredTextLines, fillAuthoredText, measureAuthoredTextWidth } from '../chart-text-lines.js';
 import { axisLineWidthPx } from '../axis-style.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
-import { chartCategories } from '../category-spacing.js';
+import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
 import { wrapMeasuredText } from './axis.js';
 import { buildLegendEntries, drawLegendSwatch } from './legend.js';
 import { dashPatternForPreset } from './geometry.js';
@@ -141,16 +141,20 @@ export function measureChartDataTable(
   const face = chartFontFamily(chart, table.fontFace, 'minor');
   ctx.save();
   ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
-  const seriesCategoryFormat = chart.series.find(series => series.catFormatCode)?.catFormatCode;
+  // The headers are `chartCategories(chart)`: the first series' categories.
+  // Their format, built-in id and numeric-vs-text provenance come from that
+  // series, not from whichever later series carries one.
+  const headerSeries = chart.series[0];
+  const headerNumeric = chartCategoriesNumeric(chart);
+  const seriesCategoryFormat = headerSeries?.catFormatCode;
   const categoryFormat = seriesCategoryFormat ?? chart.catAxisFormatCode;
   const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
-  const categoryBuiltinId = chart.series
-    .find(series => series.catFormatBuiltinId != null)?.catFormatBuiltinId;
+  const categoryBuiltinId = headerSeries?.catFormatBuiltinId;
   const headerLines = chartCategories(chart).map(category => {
     const numeric = category.trim() === '' ? Number.NaN : Number(category);
-    const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
+    const label = headerNumeric !== false && categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, chart.categoriesNumeric);
+      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, headerNumeric);
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

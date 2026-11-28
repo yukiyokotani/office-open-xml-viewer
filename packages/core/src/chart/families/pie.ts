@@ -34,6 +34,8 @@ import {
   type RichDataLabelBlock,
 } from '../rich-data-label.js';
 import { effectiveDataLabelText } from '../data-label-content.js';
+import { categoryCaption } from '../chart-number-format.js';
+import { seriesCategoriesNumeric } from '../category-spacing.js';
 
 import { chartDataPointStyleRole, chartSeriesSourceIndex } from '../effective-style.js';
 import { chartStyleLineDecision } from '../style-paint.js';
@@ -305,7 +307,7 @@ export function renderPieChart(
     && chart.series.length > 1;
   const legendChart: ChartModel = seriesLegend
     ? chart
-    : { ...chart, series: [{ ...s, categories: cats }] };
+    : { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: seriesCategoriesNumeric(chart, s) }] };
 
   // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
   // labels categories (one row per slice) so it reserves a wider 0.28 side band
@@ -528,7 +530,7 @@ function drawPieRichLabels(
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(
-    { ...chart, series: [{ ...s, categories: cats }] },
+    { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: seriesCategoriesNumeric(chart, s) }] },
     ptToPx,
   );
   const calloutIndices = new Set<number>();
@@ -595,7 +597,7 @@ function drawPieRichLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: (cats[i] ?? '').toString(),
+      category: categoryCaption((cats[i] ?? '').toString(), seriesCategoriesNumeric(chart, s)),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
@@ -1069,7 +1071,7 @@ function drawPieCalloutLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: (cats[i] ?? '').toString(),
+      category: categoryCaption((cats[i] ?? '').toString(), seriesCategoriesNumeric(chart, s)),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
