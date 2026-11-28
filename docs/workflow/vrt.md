@@ -56,11 +56,32 @@ revision. Snapshot mode rejects a dirty tracked checkout and writes a manifest
 binding the baseline to `VRT_BASELINE_REVISION`, the SHA-256 of each input and
 the exact page/sheet/slide set. The candidate run verifies that manifest and
 reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
-Use distinct ports so a candidate server can never satisfy the baseline run:
+Use distinct ports so a candidate server can never satisfy the baseline run.
+
+The default commands include the public specimen corpus, so the baseline
+worktree is made by one command that also writes into it the specimens the
+candidate adds or rewrites ([tests/visual/README.md](../../tests/visual/README.md),
+"Added or changed public specimens"). The manifests bind every input by
+SHA-256, so the comparison fails if a copy is missing or differs. Start in the
+root of the candidate worktree; the exported flags apply to the snapshot and
+to the comparison.
+
+The harness deletes nothing but earlier images of the document it is
+rendering. When an output tree (the baseline images in the baseline worktree,
+the screenshots in the candidate) still holds images of a document that is no
+longer in the corpus, the run fails and names the directories to delete.
 
 ```bash
-base=$(git rev-parse origin/main)   # the PR's base branch; origin/v0.x for a backport
-git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
+candidate=$PWD
+git fetch origin main
+base=$(git rev-parse origin/main)   # the base branch's current head (origin/v0.x for a backport), not a merge-base
+# A new detached worktree at $base with the added or rewritten specimens; the path must not exist.
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
+# Only if that command reports at least one copied specimen:
+export VRT_ALLOW_CORPUS_INPUT_CHANGES=1
+# Only when the harness at $base differs from the candidate's (Harness
+# bootstrap below), after copying the harness files into the baseline worktree:
+# export VRT_ALLOW_HARNESS_CHANGES=1
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm
 # The private corpus is git-ignored, so a new worktree has none: copy the same
@@ -68,7 +89,7 @@ pnpm install --frozen-lockfile && pnpm build:wasm
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:snapshot
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:private:snapshot
 
-cd <candidate-worktree>
+cd "$candidate"
 pnpm build:wasm
 VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt
 VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:private
@@ -87,9 +108,11 @@ names the root of a Git checkout whose HEAD is exactly `VRT_BASELINE_REVISION`
 and whose renderer is unmodified: no tracked change, and no untracked file
 outside dependencies and the private corpus. The checkout is re-verified
 before every item is read, so a baseline that changes mid-run fails. Snapshot
-manifests record the checkout's real path and each image's SHA-256; the
-comparison requires both to match, and rejects a symlink on the path of any
+manifests record the checkout's real path, each input's SHA-256 and each image's SHA-256; the
+comparison requires all three to match, and rejects a symlink on the path of any
 baseline file it opens, so copied, replaced or redirected images are never accepted. The
+fixtures receive every input from the harness itself, which serves only bytes
+that have the recorded SHA-256 ([`tests/visual/README.md`](../../tests/visual/README.md), "Threat model"). The
 harness runs Git with every `GIT_*` variable removed. A missing or mismatched
 baseline fails the run; it is not a successful regression check.
 
@@ -124,9 +147,15 @@ user decision covers is reported as unadjudicated, never as a pass.
 
 ## Harness bootstrap
 
-For the one-time bootstrap of a harness change against a baseline revision that
-predates it, copy only the allowlisted VRT harness files listed in
-`tests/visual/private-corpus.mjs` into the baseline worktree and set
+The baseline must be captured by the same harness that compares it. Its
+manifests record the SHA-256 of each input as the harness served it to the
+fixture; an older harness writes no such `input` record, and the comparison
+then fails with a message that names this step. So bootstrap whenever the
+baseline revision's harness differs from the candidate's, and in particular
+when its `tests/visual/private-corpus.mjs` has no `routeSelfVrtInput`.
+
+For the one-time bootstrap, copy only the allowlisted VRT harness files listed in
+`tests/visual/private-corpus.mjs` (with `tests/visual/checked-read.mjs`) into the baseline worktree and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run.
 Renderer and parser changes remain forbidden.
 

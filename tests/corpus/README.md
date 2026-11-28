@@ -126,13 +126,26 @@ exactly with a baseline captured from the previous renderer. It needs no
 private data, so anyone can run it:
 
 ```bash
-base=$(git merge-base HEAD origin/main)
-git worktree add --detach /tmp/ooxml-vrt-baseline "$base"            # previous renderer
+target=main    # the branch the PR targets; it must already have `pnpm vrt:corpus`
+git fetch origin "$target"
+base=$(git rev-parse "origin/$target")                               # the target's current head
+# The previous renderer: a new worktree at $base, with the specimens this branch
+# adds or rewrites so both renderers draw the same bytes. The path must not exist.
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
 (cd /tmp/ooxml-vrt-baseline && pnpm install --frozen-lockfile && pnpm build:wasm \
-  && VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
+  && VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
 pnpm build:wasm                                                      # changed renderer
-VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:corpus
+VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base \
+  VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:corpus
 ```
+
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` admits only the copied specimens
+(`tests/visual/README.md`, "Added or changed public specimens"; the same file's "Threat model" states what the bindings do and do not cover). The baseline
+must be captured by the same harness that compares it, so when the harness at `$base`
+differs from this one, bootstrap it first: copy
+`tests/visual/private-corpus.mjs`, `tests/visual/checked-read.mjs`,
+`tests/visual/corpus-features.mjs` and `packages/*/tests/visual/visual.spec.ts`
+into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
 
 The comparison reads the baseline images from the baseline worktree itself,
 which must be a clean checkout at that revision (see `AGENTS.md`, "Visual

@@ -27,10 +27,11 @@
 // under the gitignored `packages/<fmt>/public/private/` tree.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
+import { isCorpusInput, readRegularFile, writeRegularFile } from './checked-read.mjs';
 
 export const FAST_TIER_SCHEMA_VERSION = 1;
 /** Package-relative path of the selection manifest (gitignored location). */
@@ -677,7 +678,7 @@ export function loadFastTierSelection({
     + ' (or `pnpm vrt:private:fast:select`)';
   let text;
   try {
-    text = readFileSync(manifestPath, 'utf8');
+    text = readRegularFile(manifestPath).toString('utf8');
   } catch {
     throw new Error(`missing ${format} fast-tier selection manifest ${manifestPath}; ${regenerate}`);
   }
@@ -690,7 +691,7 @@ export function loadFastTierSelection({
   for (const name of files) {
     const entry = entries.get(name);
     if (!entry) { problems.push(`${name} is not in the manifest`); continue; }
-    const sha256 = createHash('sha256').update(readFileSync(join(directory, name))).digest('hex');
+    const sha256 = createHash('sha256').update(readRegularFile(join(directory, name))).digest('hex');
     if (entry.sha256 !== sha256) problems.push(`${name} changed since selection`);
   }
   for (const name of entries.keys()) {
@@ -708,7 +709,7 @@ export function loadFastTierSelection({
 /** Corpus files exactly as the private VRT specs enumerate them. */
 export function listCorpus(directory, format) {
   return readdirSync(directory)
-    .filter((file) => file.endsWith(`.${format}`) && !file.startsWith('~$'))
+    .filter((file) => isCorpusInput(file, format))
     .filter((file) => statSync(join(directory, file)).isFile())
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
@@ -729,10 +730,10 @@ function main(argv) {
   const started = performance.now();
   const corpus = listCorpus(directory, format).map((file) => ({
     name: `${format}/${file}`,
-    bytes: readFileSync(join(directory, file)),
+    bytes: readRegularFile(join(directory, file)),
   }));
   const manifest = buildFastTierManifest(format, corpus);
-  writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeRegularFile(out, `${JSON.stringify(manifest, null, 2)}\n`);
   const { summary } = manifest;
   console.log(
     `${format}: ${summary.unitsSelected}/${summary.unitsTotal} ${manifest.unitKind}s selected `
@@ -741,6 +742,16 @@ function main(argv) {
   );
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Canonical paths, so that the command also runs when invoked through a
+// symlink; a non-file argv[1] (stdin `-`, REPL) is simply not this script.
+function isEntryPoint() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv.slice(2));
 }

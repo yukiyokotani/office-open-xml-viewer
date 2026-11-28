@@ -6,8 +6,8 @@ import {
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
+  routeSelfVrtInput,
   selfVrtCorpusFiles,
-  selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 
@@ -228,7 +228,9 @@ function describeSelfRegression(
   { query = '&width=612' }: { query?: string } = {},
 ): void {
   test.describe(title, () => {
-    if (corpus !== 'private' && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and fails on leftover output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({ corpus, format: 'docx', files, snapshot: SNAPSHOT });
       });
@@ -238,9 +240,12 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.docx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'page' });
+        // The fixture is given a harness URL in place of the file name; the
+        // harness serves it the bytes its manifest records.
+        const input = await routeSelfVrtInput(page, { corpus, file });
         const openPage = async (pageIndex: number) => {
           await page.goto(
-            `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
+            `/tests/visual/fixture.html?file=${encodeURIComponent(input)}`
             + `&page=${pageIndex}${query}`,
           );
           await page.waitForFunction(
@@ -294,8 +299,9 @@ const DOCX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
   ? selfVrtCorpusFiles({ corpus: 'private', format: 'docx' })
   : [];
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({ corpus: 'private', format: 'docx', files: DOCX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && DOCX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('docx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', DOCX_DEMO_CORPUS);

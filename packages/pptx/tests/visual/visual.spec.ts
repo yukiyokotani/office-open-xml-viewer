@@ -6,8 +6,8 @@ import {
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
+  routeSelfVrtInput,
   selfVrtCorpusFiles,
-  selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 import { loadFastTierSelection, privateCorpusTier } from '../../../../tests/visual/corpus-features.mjs';
@@ -243,9 +243,18 @@ function describeSelfRegression(
   { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
 ): void {
   test.describe(title, () => {
-    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and fails on leftover output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
-        prepareSelfVrtCorpus({ corpus, format: 'pptx', files, snapshot: SNAPSHOT });
+        prepareSelfVrtCorpus({
+          corpus, format: 'pptx', files, snapshot: SNAPSHOT,
+          ...(selection ? {
+            selectionDigest: selection.digest,
+            // Files without a selected item are bound by the manifest but not rendered.
+            selectedFiles: files.filter((file) => (selection.files.get(file)?.units.length ?? 0) > 0),
+          } : {}),
+        });
       });
     }
     for (const file of files) {
@@ -256,9 +265,13 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.pptx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'slide' });
+        // The fixture is given a harness URL in place of the file name (it
+        // appends `.pptx` itself); the harness serves it the bytes its
+        // manifest records.
+        const input = (await routeSelfVrtInput(page, { corpus, file })).slice(0, -'.pptx'.length);
         const openSlide = async (slideIndex: number) => {
           await page.goto(
-            `/tests/visual/fixture.html?pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`
+            `/tests/visual/fixture.html?pptx=${encodeURIComponent(input)}`
             + `&slide=${slideIndex}${query}`,
           );
           await page.waitForFunction(
@@ -329,11 +342,9 @@ const PPTX_FAST_SELECTION: FastTierSelection | undefined =
     ? loadFastTierSelection({ format: 'pptx', files: PPTX_PRIVATE_CORPUS })
     : undefined;
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({
-    corpus: PPTX_PRIVATE_SELF_VRT, format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
-    selectionDigest: PPTX_FAST_SELECTION?.digest,
-  });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && PPTX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('pptx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', PPTX_DEMO_CORPUS);
@@ -356,8 +367,9 @@ test.describe('demo corpus scroll viewer self regression', () => {
       test.setTimeout(600_000);
       const stem = file.slice(0, -'.pptx'.length);
       if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'slide' });
+      const input = (await routeSelfVrtInput(page, { corpus, file })).slice(0, -'.pptx'.length);
       await page.goto(
-        `/tests/visual/fixture.html?viewer=scroll&pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`,
+        `/tests/visual/fixture.html?viewer=scroll&pptx=${encodeURIComponent(input)}`,
       );
       await page.waitForFunction(
         () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',

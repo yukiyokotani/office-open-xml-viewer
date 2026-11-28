@@ -4,6 +4,41 @@
 previous renderer, the baseline is bound to a checkout, and every difference
 must be adjudicated. This file holds the procedures that go with them.
 
+## Threat model
+
+The self-VRT bindings protect against stale or mismatched files and operator
+mistakes: the wrong checkout, a forgotten specimen copy, leftover images,
+gitignored files, symlinked generated directories, and non-regular files such
+as named pipes. They do not defend against a local process that deliberately
+replaces files while a run is in progress; concurrent races are out of scope.
+
+The comment at the top of `private-corpus.mjs` states what a passing
+comparison establishes. In short:
+
+- **Same input.** A fixture never loads a corpus input by file name. The specs
+  hand it a harness URL (`/__selfvrt/<corpus>/<index>.<ext>`), and the harness
+  answers that request itself: one checked read, required to have the SHA-256
+  in the corpus manifest, whose bytes are the ones sent. Each document's
+  manifest records that digest beside its image digests, and the comparison
+  requires it to equal the candidate's.
+- **Previous renderer.** Baseline images are read only from a Git checkout
+  root at `VRT_BASELINE_REVISION` that is not the candidate and differs from
+  the revision only by what the two `VRT_ALLOW_*` flags admit.
+- **Same images.** A baseline document holds exactly the items its manifest
+  lists, each with its recorded SHA-256, reached without a symlink.
+
+Inputs are bound by content, so it does not matter whether Git tracks, ignores
+or reports a file: a missing, renamed or different input changes the input
+list or a digest and fails the comparison.
+
+The harness writes manifests and images only below its own checkout and never
+through a symlink. It removes only earlier item images of the document it is
+rendering. Images of documents the run does not render (a removed or renamed
+input, a fast-tier input that no longer has a selected item) are not removed,
+and a symlinked entry in an output tree is not followed: a
+snapshot (baseline tree) or a comparison (candidate screenshots) that finds
+them fails and names the directories for the operator to delete.
+
 ## Harness bootstrap exceptions
 
 When a harness change is bootstrapped against an older baseline
@@ -13,7 +48,40 @@ two more things are allowed:
 - `pnpm-lock.yaml`, but only hunks that add or remove the fixtures'
   `@fontsource/*` packages. Any other hunk fails.
 - The inputs under `packages/<fmt>/public/corpus/`. Git ignores them before
-  the corpus is tracked, so the bootstrap may copy them in.
+  the corpus is tracked, so the bootstrap may copy them in. The manifests
+  bind them by SHA-256 like every other input.
+
+## Added or changed public specimens
+
+A specimen that the PR under test adds or rewrites has no image from the
+previous renderer. The baseline worktree therefore gets the candidate's
+specimen files, so both renderers draw identical bytes, and
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` is set for both the snapshot and the
+comparison run. One command makes that worktree:
+
+```bash
+node tests/visual/baseline-worktree.mjs /tmp/ooxml-vrt-baseline "$base"
+```
+
+The command (built-ins only, run from the root of the candidate checkout)
+runs `git worktree add --detach` for a path that must not exist yet, then
+writes into the new tree the tracked specimens that the candidate's working
+tree adds or modifies relative to `$base`. It overwrites nothing an operator
+made: it never writes into an existing directory. When the candidate deletes
+or renames a specimen it stops before creating the worktree, because the two
+sides would render different input sets, which the self-VRT cannot compare.
+
+The flag admits only a `.docx`/`.xlsx`/`.pptx` present directly in its own
+package's corpus folder. Any other file, a specimen deleted from the baseline
+and any renderer change still fail. The copies need no check of their own:
+the manifests bind every input by SHA-256 (threat model above), so a
+forgotten, renamed or stale copy fails the comparison. When the baseline
+revision's harness differs from this one (always when its `private-corpus.mjs`
+has no `routeSelfVrtInput`: it would write manifests without the `input`
+record), also copy `tests/visual/private-corpus.mjs`,
+`tests/visual/checked-read.mjs`, `tests/visual/corpus-features.mjs` and
+`packages/*/tests/visual/visual.spec.ts` and set
+`VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 
 ## Fast private tier (PPTX/XLSX)
 

@@ -6,8 +6,8 @@ import {
   captureOrCompareSelfVrtItem,
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
+  routeSelfVrtInput,
   selfVrtCorpusFiles,
-  selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 import { loadFastTierSelection, privateCorpusTier } from '../../../../tests/visual/corpus-features.mjs';
@@ -226,9 +226,18 @@ function describeSelfRegression(
   { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
 ): void {
   test.describe(title, () => {
-    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
+    // In a hook, not at collection: preparation writes the snapshot manifest
+    // and fails on leftover output, which `--list` must not do.
+    if (files.length > 0) {
       test.beforeAll(() => {
-        prepareSelfVrtCorpus({ corpus, format: 'xlsx', files, snapshot: SNAPSHOT });
+        prepareSelfVrtCorpus({
+          corpus, format: 'xlsx', files, snapshot: SNAPSHOT,
+          ...(selection ? {
+            selectionDigest: selection.digest,
+            // Files without a selected item are bound by the manifest but not rendered.
+            selectedFiles: files.filter((file) => (selection.files.get(file)?.units.length ?? 0) > 0),
+          } : {}),
+        });
       });
     }
     for (const file of files) {
@@ -239,9 +248,12 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.xlsx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'sheet' });
+        // The fixture is given a harness URL in place of the file name; the
+        // harness serves it the bytes its manifest records.
+        const input = await routeSelfVrtInput(page, { corpus, file });
         const openSheet = async (sheetIndex: number) => {
           await page.goto(
-            `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
+            `/tests/visual/fixture.html?file=${encodeURIComponent(input)}`
             + `&sheet=${sheetIndex}${query}`,
           );
           await page.waitForFunction(
@@ -314,11 +326,9 @@ const XLSX_FAST_SELECTION: FastTierSelection | undefined =
     ? loadFastTierSelection({ format: 'xlsx', files: XLSX_PRIVATE_CORPUS })
     : undefined;
 
-if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({
-    corpus: XLSX_PRIVATE_SELF_VRT, format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
-    selectionDigest: XLSX_FAST_SELECTION?.digest,
-  });
+// A suite without tests runs no hook, so the empty corpus is refused here.
+if (process.env.VRT_PRIVATE_CORPUS === '1' && XLSX_PRIVATE_CORPUS.length === 0) {
+  throw new Error('xlsx private corpus is empty; zero-test self-VRT is not coverage');
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', XLSX_DEMO_CORPUS);

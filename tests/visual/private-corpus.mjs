@@ -1,17 +1,61 @@
+// Self-VRT harness: exact-pixel comparison of a candidate renderer with the
+// images a previous renderer drew from the same inputs.
+//
+// What a passing comparison establishes for every page, sheet or slide:
+//
+// 1. Same input. A fixture never loads a corpus input by file name. The specs
+//    ask it for a harness URL (`/__selfvrt/<corpus>/<index>.<ext>`,
+//    routeSelfVrtInput), which no file name can collide with, and that request
+//    is answered by this module's loopback endpoint: it reads the file once
+//    with the checked reader, requires that read to have the SHA-256 the
+//    corpus manifest holds, and sends those bytes. The digest is written into
+//    the per-document manifest beside the image digests, and a document
+//    cannot be finished unless its input went through the endpoint. So a
+//    baseline image is compared only with a candidate image drawn from bytes
+//    of the same digest, whatever names or copies exist on either side.
+// 2. Previous renderer. The baseline images are read from the checkout named
+//    by VRT_BASELINE_CHECKOUT: a Git checkout root, distinct from the
+//    candidate, at VRT_BASELINE_REVISION, whose only differences from that
+//    revision are harness files (VRT_ALLOW_HARNESS_CHANGES=1) and public
+//    specimen inputs (VRT_ALLOW_CORPUS_INPUT_CHANGES=1). Manifests name the
+//    revision and the checkout that wrote them.
+// 3. Same images. A document's baseline directory holds exactly the items its
+//    manifest lists, each with the recorded SHA-256, reached without a
+//    symlink.
+//
+// Because (1) binds inputs by content, a specimen copied into the baseline
+// checkout needs no check of its own: a forgotten, renamed or stale copy
+// changes the input list or a digest and fails the manifest comparison,
+// whether or not Git reports the file.
+//
+// Operator mistakes this is meant to catch: the wrong or a modified checkout,
+// a forgotten, renamed or stale specimen copy, images left by an earlier run
+// or a removed document, symlinked output directories, and non-regular files
+// (every read and write goes through checked-read.mjs).
+//
+// What the harness changes on disk: it writes manifests and images below its
+// own checkout, and it removes only item images of the document it is
+// rendering (pages a previous run of that document left). Images of documents
+// this run does not render (a removed input, a fast-tier input without a
+// selected item) are reported, not removed, and so is a symlinked entry. Not covered: a local
+// process that replaces files while a run is in progress, and whatever the
+// renderer loads besides the input (dev server reuse, WASM provenance).
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
   realpathSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { createServer } from 'node:http';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { PNG } from 'pngjs';
+import {
+  assertWritableLeaf, isCorpusInput, isCorpusInputPath, readRegularFile, writeRegularFile,
+} from './checked-read.mjs';
 
 const SCHEMA_VERSION = 2;
 
@@ -41,6 +85,7 @@ const VRT_HARNESS_PATHS = new Set([
   'packages/pptx/vite.config.ts',
   'packages/pptx/tests/visual/visual.spec.ts',
   'tests/visual/private-corpus.mjs',
+  'tests/visual/checked-read.mjs',
   'tests/visual/corpus-features.mjs',
   // Only for the fixture font packages; see lockfileBootstrapDiffViolations.
   'pnpm-lock.yaml',
@@ -169,7 +214,14 @@ function assertRendererCheckout({ root, revision, label }) {
   if (head !== revision) {
     throw new Error(`${label} checkout mismatch: expected ${revision}, found ${head} at ${root}`);
   }
-  const changed = [...new Set([...tracked, ...untracked])];
+  // A public specimen the candidate adds or rewrites is copied into the
+  // baseline checkout so that the previous renderer draws it too. Its content
+  // is not checked here: the manifests bind every input by SHA-256. A deleted
+  // specimen, or one replaced by a symlink, is not admitted.
+  const specimenCopy = process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
+    ? (path) => isCorpusInputPath(path) && isPlainFile(root, path)
+    : () => false;
+  const changed = [...new Set([...tracked, ...untracked])].filter((path) => !specimenCopy(path));
   if (changed.length === 0) return;
   const harnessBootstrap = process.env.VRT_ALLOW_HARNESS_CHANGES === '1'
     && changed.every((path) => VRT_HARNESS_PATHS.has(path));
@@ -201,6 +253,23 @@ function assertRendererCheckout({ root, revision, label }) {
       );
     }
   }
+}
+
+/** True when `path` below `root` is a regular file and no component of it is
+ * a symlink. Only lstat is used, so nothing is followed or opened. */
+function isPlainFile(root, path) {
+  let current = root;
+  let stat;
+  for (const component of path.split('/')) {
+    current = join(current, component);
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink()) return false;
+  }
+  return stat.isFile();
 }
 
 function checkoutRoot(path) {
@@ -315,12 +384,12 @@ export function selfVrtCorpusFiles({ corpus, format }) {
   const { publicPrefix, directory: configured } = corpusConfig(corpus);
   const directory = configured ?? format;
   return readdirSync(`public/${publicPrefix}${directory}`)
-    .filter((file) => file.endsWith(`.${format}`) && !file.startsWith('~$'))
+    .filter((file) => isCorpusInput(file, format))
     .map((file) => `${directory}/${file}`)
     .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
 }
 
-/** URL path of a corpus input, relative to the package's public root. */
+/** Path of a corpus input below the package's `public/` directory. */
 export function selfVrtInputPath({ corpus, file }) {
   return `${corpusConfig(corpus).publicPrefix}${file}`;
 }
@@ -403,23 +472,197 @@ function isSymlink(path) {
   }
 }
 
+/** Fail when `path` leaves this checkout or any existing component of it,
+ * from the checkout root down to the leaf, is a symlink. Generated
+ * directories are sometimes linked to another worktree; nothing is written,
+ * listed for removal or removed through such a link. */
+function assertNoSymlinkBelowCheckout(path) {
+  const root = ownCheckout();
+  const offset = relative(root, resolve(realpathSync(process.cwd()), path));
+  if (offset.startsWith('..') || isAbsolute(offset)) {
+    throw new Error(`self-VRT output path is outside the checkout: ${path}`);
+  }
+  let current = root;
+  for (const component of offset.split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (isSymlink(current)) {
+      throw new Error(`refusing to use a symlinked self-VRT output path: ${current}`);
+    }
+  }
+}
+
+/** Fail unless the harness may write `path`: below this checkout, reached
+ * without a symlink, and absent or a regular file with no other hard link.
+ * Operations that remove files before they write call it first, so that a
+ * destination they cannot write stops them before anything is removed. */
+function assertOutputWritable(path) {
+  assertNoSymlinkBelowCheckout(path);
+  assertWritableLeaf(path);
+}
+
+/** The one way the harness writes a manifest or an image. */
+function writeOutput(path, data) {
+  assertOutputWritable(path);
+  mkdirSync(dirname(path), { recursive: true });
+  writeRegularFile(path, data);
+}
+
+/** Entries of `directory` whose names match `pattern`, all of them regular
+ * files: only those are the harness's to remove, so anything else under such
+ * a name fails before a caller removes the first one. */
+function generatedFiles(directory, pattern) {
+  const matching = readdirSync(directory, { withFileTypes: true }).filter((file) => pattern.test(file.name));
+  const foreign = matching.find((file) => !file.isFile());
+  if (foreign) {
+    throw new Error(
+      `refusing to remove a self-VRT output that is not a regular file: ${join(directory, foreign.name)}`,
+    );
+  }
+  return matching.map((file) => file.name);
+}
+
+const ITEM_IMAGE = /^(page|sheet|slide)-\d+\.png$/;
+
+/** Fail when `tree`, which holds one directory per document, has images of a
+ * document this run does not render (a removed or renamed input, a fast-tier
+ * input that no longer has a selected item, or another run's output). The harness deletes nothing it did not write for the
+ * document it is rendering, so the operator removes them. A listed document's
+ * directory is recognized by file identity, not by its spelling: on a
+ * case-insensitive file system `Deck.pptx` writes into an existing `deck/`. */
+function assertNoUnlistedDocuments(tree, files, directory) {
+  assertNoSymlinkBelowCheckout(tree);
+  const identity = (path) => {
+    try {
+      const { dev, ino } = lstatSync(path);
+      return `${dev}:${ino}`;
+    } catch {
+      return null;
+    }
+  };
+  const listed = new Set(files.map(
+    (file) => identity(join(tree, file.slice(directory.length + 1, file.lastIndexOf('.')))),
+  ));
+  let entries;
+  try {
+    entries = readdirSync(tree, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  // A symlink is never followed, so what it holds cannot be judged: any
+  // symlinked entry fails.
+  const linked = entries.find((entry) => entry.isSymbolicLink());
+  if (linked) {
+    throw new Error(`refusing to use a symlinked self-VRT output path: ${join(tree, linked.name)}`);
+  }
+  const unlisted = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(tree, entry.name))
+    .filter((path) => !listed.has(identity(path)) && readdirSync(path).some((file) => ITEM_IMAGE.test(file)));
+  if (unlisted.length > 0) {
+    throw new Error(
+      `self-VRT output holds images of documents this run does not render: ${unlisted.join(', ')}. `
+      + 'Delete these directories (or the whole output tree) and run again',
+    );
+  }
+}
+
 function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
-function corpusFiles(corpus, files) {
-  return files.map((name) => ({
-    name,
-    sha256: createHash('sha256')
-      .update(readFileSync(`public/${selfVrtInputPath({ corpus, file: name })}`))
-      .digest('hex'),
-  }));
+// Inputs of each prepared corpus, in manifest order. `sha256` is the digest
+// the corpus manifest holds; `url` is the only address a fixture is given.
+const preparedInputs = new Map();
+
+function corpusFiles(corpus, format, files) {
+  const inputs = files.map((name, index) => {
+    const path = resolve(`public/${selfVrtInputPath({ corpus, file: name })}`);
+    return {
+      name, path, sha256: sha256(readRegularFile(path)),
+      url: `/__selfvrt/${corpus}/${index}.${format}`, served: 0, failure: null,
+    };
+  });
+  preparedInputs.set(corpus, inputs);
+  return inputs.map(({ name, sha256: digest }) => ({ name, sha256: digest }));
+}
+
+function preparedInput(corpus, name) {
+  const input = preparedInputs.get(corpus)?.find((candidate) => candidate.name === name);
+  if (!input) throw new Error(`self-VRT input ${name} was not prepared for the ${corpus} corpus`);
+  return input;
+}
+
+// One loopback endpoint per process serves the prepared inputs. Each request
+// is one checked read: the bytes sent are the bytes whose digest was compared
+// with the manifest's, and a mismatch drops the connection, so the fixture
+// fails to load. A body goes out as it was read, without the base64 copy that
+// a Playwright `route.fulfill` body takes (which caps the input size).
+let inputEndpoint;
+
+function selfVrtInputEndpoint() {
+  inputEndpoint ??= new Promise((resolveOrigin, reject) => {
+    const server = createServer((request, response) => {
+      const input = [...preparedInputs.values()].flat().find((candidate) => candidate.url === request.url);
+      if (!input) {
+        response.writeHead(404, { connection: 'close' }).end();
+        return;
+      }
+      try {
+        const body = readRegularFile(input.path);
+        if (sha256(body) !== input.sha256) {
+          throw new Error(`self-VRT input ${input.path} changed after its manifest recorded it`);
+        }
+        input.served += 1;
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream', 'content-length': body.length, connection: 'close',
+        }).end(body);
+      } catch (error) {
+        input.failure = error;
+        response.destroy();
+      }
+    });
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolveOrigin(`http://127.0.0.1:${server.address().port}`));
+  });
+  return inputEndpoint;
+}
+
+/** Route the page's request for one prepared input to the harness endpoint and
+ * return the path to hand the fixture in place of a file name (root-relative,
+ * with the format's extension). Call it before the fixture is opened.
+ * @param {{ route(matcher: (url: URL) => boolean,
+ *   handler: (route: { continue(overrides: { url: string }): Promise<void> }) => unknown): Promise<unknown> }} page
+ *   a Playwright page
+ * @param {{ corpus: string, file: string }} input */
+export async function routeSelfVrtInput(page, { corpus, file }) {
+  const input = preparedInput(corpus, file);
+  input.served = 0;
+  input.failure = null;
+  const origin = await selfVrtInputEndpoint();
+  await page.route(
+    (url) => url.pathname === input.url,
+    (route) => route.continue({ url: `${origin}${input.url}` }),
+  );
+  return input.url.slice(1);
+}
+
+/** Name and digest of an input for its document manifest. Fails unless the
+ * endpoint served it since it was routed, and served only verified bytes. */
+function servedInput(corpus, name) {
+  const input = preparedInput(corpus, name);
+  if (input.failure) throw input.failure;
+  if (input.served === 0) {
+    throw new Error(`self-VRT input ${name} was not loaded through the harness endpoint (routeSelfVrtInput)`);
+  }
+  return { name, sha256: input.sha256 };
 }
 
 function readBaselineJson(location, path) {
   const verified = verifiedBaselinePath(location, path);
   if (!verified) throw new Error(`missing previous-renderer manifest: ${path}`);
-  return JSON.parse(readFileSync(verified, 'utf8'));
+  return JSON.parse(readRegularFile(verified).toString('utf8'));
 }
 
 function assertExactManifest(actual, expected, path) {
@@ -431,13 +674,22 @@ function assertExactManifest(actual, expected, path) {
   }
 }
 
-/** Fail closed on an empty/stale corpus and bind every baseline to an explicit
+/** Call from a suite hook (`beforeAll`), never while tests are being
+ * collected: it writes the snapshot manifest and fails on leftover output,
+ * which a list-only run must not do.
+ *
+ * Fail closed on an empty/stale corpus and bind every baseline to an explicit
  * merge-base revision. This prevents a candidate server or unrelated old
  * snapshot from silently becoming its own regression oracle. A subset corpus
  * (`private-fast`) is additionally bound to its selection manifest digest.
  * @param {{ corpus: string, format: string, files: string[], snapshot: boolean,
- *   selectionDigest?: string }} options */
-export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectionDigest }) {
+ *   selectionDigest?: string, selectedFiles?: string[] }} options
+ *   `selectedFiles` (subset corpus only): the files with at least one selected
+ *   item. Every file is bound by the manifest, but only these are rendered, so
+ *   only these may have images in the output tree. */
+export function prepareSelfVrtCorpus({
+  corpus, format, files, snapshot, selectionDigest, selectedFiles,
+}) {
   if (files.length === 0) {
     throw new Error(`${format} ${corpus} corpus is empty; zero-test self-VRT is not coverage`);
   }
@@ -447,6 +699,13 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
       ? `${corpus} self-VRT requires a selection digest`
       : `${corpus} self-VRT does not take a selection digest`);
   }
+  if (Boolean(selection) !== Boolean(selectedFiles)
+    || selectedFiles?.some((file) => !files.includes(file))) {
+    throw new Error(selection
+      ? `${corpus} self-VRT requires the corpus files that have selected items`
+      : `${corpus} self-VRT renders every file; it does not take selected files`);
+  }
+  const rendered = selectedFiles ?? files;
   const location = baselineLocation({ snapshot });
   const root = join(location.directory, corpusConfig(corpus).manifestDirectory);
   const path = join(root, 'manifest.json');
@@ -456,13 +715,16 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
     ...(selection ? { selectionDigest } : {}),
-    files: corpusFiles(corpus, files),
+    files: corpusFiles(corpus, format, files),
   };
+  const { outputPrefix, directory: configured } = corpusConfig(corpus);
+  const directory = configured ?? format;
   if (snapshot) {
-    mkdirSync(root, { recursive: true });
-    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    assertNoUnlistedDocuments(join(location.directory, `${outputPrefix}${directory}`), rendered, directory);
+    writeOutput(path, `${JSON.stringify(manifest, null, 2)}\n`);
   } else {
     assertExactManifest(readBaselineJson(location, path), manifest, path);
+    assertNoUnlistedDocuments(resolve(`tests/visual/screenshots/${outputPrefix}${directory}`), rendered, directory);
   }
 }
 
@@ -492,10 +754,7 @@ export function clearSelfVrtCandidateOutput({
     }
   }
   if (!existsSync(directory)) return;
-  const item = new RegExp(`^${itemKind}-\\d+\\.png$`);
-  for (const file of readdirSync(directory)) {
-    if (item.test(file)) unlinkSync(`${directory}/${file}`);
-  }
+  for (const file of generatedFiles(directory, itemPattern(itemKind))) unlinkSync(join(directory, file));
 }
 
 function itemPattern(itemKind) {
@@ -544,27 +803,40 @@ export function verifySelfVrtItemManifest({
     format,
     baselineRevision: baselineRevision(snapshot),
     checkout: location.checkout,
+    input: servedInput(corpus, `${stem}.${format}`),
     itemKind,
     itemCount,
   };
   if (snapshot) {
-    // A previous snapshot in this checkout may have rendered more items.
-    for (const stale of sortedItems(readdirSync(directory), itemKind)) {
-      if (!names.includes(stale)) unlinkSync(join(directory, stale));
-    }
-    const present = sortedItems(readdirSync(directory), itemKind);
-    if (JSON.stringify(present) !== JSON.stringify(names)) {
+    // Everything is checked before the first removal: the manifest
+    // destination, the type of every item image, and that this run captured
+    // every expected item.
+    assertOutputWritable(path);
+    const present = sortedItems(generatedFiles(directory, itemPattern(itemKind)), itemKind);
+    const missing = names.filter((name) => !present.includes(name));
+    if (missing.length > 0) {
       throw new Error(
         `snapshot item set mismatch at ${directory}\n`
         + `expected ${JSON.stringify(names)}\nreceived ${JSON.stringify(present)}`,
       );
     }
-    const items = names.map((name) => ({ name, sha256: sha256(readFileSync(join(directory, name))) }));
-    writeFileSync(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
+    // A previous snapshot in this checkout may have rendered more items.
+    for (const stale of present) {
+      if (!names.includes(stale)) unlinkSync(join(directory, stale));
+    }
+    const items = names.map((name) => ({ name, sha256: sha256(readRegularFile(join(directory, name))) }));
+    writeOutput(path, `${JSON.stringify({ ...header, items }, null, 2)}\n`);
     return;
   }
   const recorded = readBaselineJson(location, path);
   const { items: recordedItems, ...recordedHeader } = recorded;
+  if (recordedHeader.input === undefined) {
+    throw new Error(
+      `${path} has no "input" record: the baseline was captured by a harness without input binding. `
+      + 'Bootstrap the baseline worktree with this harness (docs/workflow/vrt.md, "Harness bootstrap"), '
+      + 'set VRT_ALLOW_HARNESS_CHANGES=1 for both runs and capture the snapshot again',
+    );
+  }
   assertExactManifest(recordedHeader, header, path);
   if (!Array.isArray(recordedItems)
     || JSON.stringify(recordedItems.map((item) => item?.name)) !== JSON.stringify(names)) {
@@ -583,7 +855,7 @@ export function verifySelfVrtItemManifest({
   }
   for (const { name, sha256: expected } of recordedItems) {
     const verified = verifiedBaselinePath(location, join(directory, name));
-    if (!verified || sha256(readFileSync(verified)) !== expected) {
+    if (!verified || sha256(readRegularFile(verified)) !== expected) {
       throw new Error(`previous-renderer image changed since its snapshot: ${join(directory, name)}`);
     }
   }
@@ -604,8 +876,7 @@ export function captureOrCompareSelfVrtItem({
   const key = `${itemKind}-${itemIndex + 1}.png`;
   const { outputPrefix } = corpusConfig(corpus);
   const outputDirectory = `tests/visual/${snapshot ? 'baseline' : 'screenshots'}/${outputPrefix}${stem}`;
-  mkdirSync(outputDirectory, { recursive: true });
-  writeFileSync(`${outputDirectory}/${key}`, actual);
+  writeOutput(`${outputDirectory}/${key}`, actual);
   if (snapshot) return null;
   const location = baselineLocation();
   const directory = join(location.directory, `${outputPrefix}${stem}`);
@@ -617,7 +888,7 @@ export function captureOrCompareSelfVrtItem({
   const baselinePath = join(directory, key);
   const verified = verifiedBaselinePath(location, baselinePath);
   if (!verified || !expected) return `missing previous-renderer baseline: ${baselinePath}`;
-  const baseline = readFileSync(verified);
+  const baseline = readRegularFile(verified);
   if (sha256(baseline) !== expected) {
     throw new Error(`previous-renderer image changed since its snapshot: ${baselinePath}`);
   }
