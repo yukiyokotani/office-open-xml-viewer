@@ -77,8 +77,7 @@ import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
-import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
-import { documentCarriesRunLanguage } from './run-language-capability.js';
+import { documentRenderCapabilities } from './vertical-render-capability.js';
 import {
   renderWorkerLayoutMeta,
   projectRenderWorkerLayoutMeta,
@@ -346,6 +345,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         throw new Error('render-worker parse was superseded');
       }
+      // One model walk yields both capability facts; the layout source
+      // adapter below reuses them rather than walking the model again. A
+      // realm without sentinels falls back whatever the model says, so it
+      // walks nothing, as before languages.
+      const capabilities = nativeSentinels ? documentRenderCapabilities(pulledModels.document) : undefined;
       // A document naming a run language (run-language-capability.ts) is
       // laid out here only where this realm judges its languages as the main
       // realm would. The measuring context and oracle made here are the ones
@@ -356,7 +360,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // main realm may apply tags this one would withhold.
       // Untagged documents keep the admission they had before languages.
       let languageMeasuring: { context: OffscreenCanvasRenderingContext2D; oracle: NamedFamilyOracle } | undefined;
-      if (nativeSentinels && documentCarriesRunLanguage(pulledModels.document)) {
+      if (nativeSentinels && capabilities?.carriesRunLanguage) {
         const context = typeof OffscreenCanvas !== 'undefined'
           ? new OffscreenCanvas(1, 1).getContext('2d') : null;
         const oracle = context ? createNamedFamilyOracle(context) : undefined;
@@ -367,7 +371,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           languageMeasuring = { context, oracle };
         }
       }
-      if (!nativeSentinels || documentRequiresDomVerticalGlyphLayout(pulledModels.document)) {
+      if (!nativeSentinels || !capabilities || capabilities.requiresDomVerticalGlyphLayout) {
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         // The normalized public model deliberately omits parser-only sidecars
         // such as unavailable-drawing geometry. Stream the untouched parser
@@ -402,6 +406,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         adapted = layoutSourceModelAdapterFromOwnedModel(
           pulledModels.document,
           pulledModels.ownedLayoutDocument,
+          capabilities,
         );
         nativeRouteRequests = nativeRouteLineRequests(adapted.source, adapted.document, {
           fontSubstitutes: declaredFontSubstitutions(fontSources), cjkFallback: req.cjkFallback,

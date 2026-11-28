@@ -29,6 +29,16 @@ const workerMocks = vi.hoisted(() => ({
   paginate: vi.fn(async () => undefined),
   verticalFallback: vi.fn(() => false),
   carriesLanguage: vi.fn(() => false),
+  // One model walk: both facts come from the same call.
+  capabilities: vi.fn((): { requiresDomVerticalGlyphLayout: boolean; carriesRunLanguage: boolean } => ({
+    requiresDomVerticalGlyphLayout: workerMocks.verticalFallback(),
+    carriesRunLanguage: workerMocks.carriesLanguage(),
+  })),
+  adaptedCapabilities: [] as unknown[],
+  adapt: <F extends (...args: never[]) => unknown>(original: F) => ((...args: Parameters<F>) => {
+    workerMocks.adaptedCapabilities.push(args[2]);
+    return original(...args);
+  }) as F,
   oracleAvailable: vi.fn(() => true),
   createServices: vi.fn((..._args: unknown[]) => ({})),
 }));
@@ -43,7 +53,6 @@ vi.mock('@silurus/ooxml-core', async importOriginal => ({
     draws: () => false,
   }),
 }));
-vi.mock('./run-language-capability.js', () => ({ documentCarriesRunLanguage: workerMocks.carriesLanguage }));
 vi.mock('@silurus/ooxml-core/internal/model-source', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core/internal/model-source')>(),
   openModelSourceModule: (...args: unknown[]) => workerMocks.opens.at(-1)!(...args),
@@ -60,8 +69,12 @@ vi.mock('./embedded-fonts.js', () => ({
 }));
 vi.mock('./renderer.js', () => ({ prepareMathRuns: vi.fn(), renderLayoutSourceToCanvas: vi.fn() }));
 vi.mock('./vertical-render-capability.js', () => ({
-  documentRequiresDomVerticalGlyphLayout: workerMocks.verticalFallback,
+  documentRenderCapabilities: workerMocks.capabilities,
 }));
+vi.mock('./layout-source-model-adapter.js', async importOriginal => {
+  const original = await importOriginal<typeof import('./layout-source-model-adapter.js')>();
+  return { ...original, layoutSourceModelAdapterFromOwnedModel: workerMocks.adapt(original.layoutSourceModelAdapterFromOwnedModel) };
+});
 vi.mock('./layout-runtime.js', () => ({
   createLayoutServices: (...args: unknown[]) => workerMocks.createServices(...args), nativeRouteLineRequests: () => [],
 }));
@@ -115,6 +128,8 @@ beforeEach(() => {
   workerMocks.verticalFallback.mockReturnValue(false);
   workerMocks.carriesLanguage.mockReset();
   workerMocks.carriesLanguage.mockReturnValue(false);
+  workerMocks.capabilities.mockClear();
+  workerMocks.adaptedCapabilities.length = 0;
   workerMocks.oracleAvailable.mockReset();
   workerMocks.oracleAvailable.mockReturnValue(true);
   workerMocks.createServices.mockClear();
@@ -229,6 +244,13 @@ describe('DOCX render worker with a model source', () => {
       workerMocks.opens.push(async () => modelSource({}).opened);
       await dispatch({ data: parseRequest(30) } as MessageEvent);
       expect(posted(posts, published, 30)).toHaveLength(1);
+      // One model walk serves admission and the layout source adapter.
+      expect(workerMocks.capabilities).toHaveBeenCalledTimes(1);
+      if (published === 'parsedMeta') {
+        expect(workerMocks.adaptedCapabilities).toEqual([
+          { requiresDomVerticalGlyphLayout: false, carriesRunLanguage: tagged },
+        ]);
+      }
       // A tagged document laid out here uses the admission's context and
       // oracle in its text service (one capability, one fingerprint).
       if (tagged && published === 'parsedMeta') {

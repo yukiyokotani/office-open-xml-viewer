@@ -58,7 +58,7 @@ vi.mock('./document-pull-client.js', async (load) => ({
 }));
 vi.mock('./vertical-render-capability.js', async (load) => ({
   ...await load<typeof import('./vertical-render-capability.js')>(),
-  documentRequiresDomVerticalGlyphLayout: () => false,
+  documentRenderCapabilities: () => ({ requiresDomVerticalGlyphLayout: false, carriesRunLanguage: false }),
 }));
 vi.mock('./layout-source-model-adapter.js', () => ({
   layoutSourceModelAdapterFromOwnedModel: () => ({
