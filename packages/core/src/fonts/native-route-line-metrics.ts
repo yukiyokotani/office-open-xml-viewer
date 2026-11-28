@@ -335,8 +335,9 @@ function geometry(context: CanvasFontBoxProbeContext, text: string): readonly nu
 }
 
 function probeContext(probe: OwnershipProbe, index: number): CanvasFontBoxProbeContext | null {
-  if (probe.contexts[index] === undefined) probe.contexts[index] = probe.create();
-  return probe.contexts[index] ?? null;
+  // A failed creation (no Canvas backend yet) is not cached: the next probe
+  // retries it, as a surface that appears later is then usable.
+  return probe.contexts[index] ??= probe.create();
 }
 
 /** Measure `cluster` under both shorthands. `slot` 0 is the route pair and
