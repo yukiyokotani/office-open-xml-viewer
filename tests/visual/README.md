@@ -15,16 +15,27 @@ two more things are allowed:
 - The inputs under `packages/<fmt>/public/corpus/`. Git ignores them before
   the corpus is tracked, so the bootstrap may copy them in.
 
-## New public specimens
+## Added or changed public specimens
 
-A specimen added in the PR under test does not exist at the baseline
-revision, so the previous renderer has no image of it. With
-`VRT_ALLOW_NEW_CORPUS_INPUTS=1` for both the snapshot and the comparison run,
-the new `packages/<fmt>/public/corpus/*.{docx,xlsx,pptx}` files may be copied
-into the baseline worktree as untracked files. Nothing else is excused: a
-change to a tracked input, any other file in the corpus folders, and any
-renderer change still fail, and the manifest's SHA-256 binding rejects a
-copied input that differs from the candidate's.
+A specimen that the PR under test adds or rewrites has no image from the
+previous renderer. Copy the candidate's specimen files into the baseline
+worktree, so both renderers draw identical bytes, and set
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both the snapshot and the comparison
+run:
+
+```bash
+git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.docx' \
+  'packages/*/public/corpus/*.xlsx' 'packages/*/public/corpus/*.pptx' \
+  | while read -r f; do cp "$f" "/tmp/ooxml-vrt-baseline/$f"; done
+```
+
+Only a `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
+qualifies. It must be a regular file reached without a symlink, and during the
+comparison each copy must still equal the candidate's file; the manifest's
+SHA-256 binding checks the inputs as well. Any other file, a deleted input and
+any renderer change still fail. When the baseline revision predates this
+allowance, also copy `tests/visual/private-corpus.mjs` and set
+`VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 
 ## Fast private tier (PPTX/XLSX)
 

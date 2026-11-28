@@ -8,6 +8,13 @@ import { esc } from '../lib/xml.mjs';
 // has the same 24 pt minimum and the frame extent equals their sum, as
 // generators that write a:tr@h without laying out the text do; the extent is
 // not where the grown table ends.
+//
+// Known viewer discrepancy (#2345): both Office PDFs show rows of 24, 96, 72
+// and 24 pt (the Wrap row's height depends on the font). The renderer on the
+// branch this specimen was added to grows a positive row only when the frame
+// extent exceeds the row sum, so for this input it keeps every row at 24 pt
+// and the text overflows the rules. Its self-VRT image records that output,
+// not Office's; the #2345 fix changes it.
 const RULE = 12700; // 1 pt
 const HAIRLINE = 6350; // 0.5 pt
 const ROW_H = 2 * PPTX.LINE; // 24 pt

@@ -239,46 +239,62 @@ test('a baseline checkout must be a clean Git checkout at the baseline revision'
   }
 });
 
-test('a new public corpus input may be copied into the baseline checkout only when allowed', () => {
+test('candidate corpus inputs may be copied into the baseline checkout only when allowed', () => {
   const { root, first } = baselineRepository();
+  const candidate = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-candidate-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'ooxml-vrt-outside-'));
+  const rel = 'packages/xlsx/public/corpus';
+  const place = (dir, name, bytes) => {
+    mkdirSync(join(dir, rel), { recursive: true });
+    writeFileSync(join(dir, rel, name), bytes);
+  };
+  const verify = (revision = first) => verifyBaselineCheckout({ checkout: root, revision, candidate });
   try {
-    const corpus = join(root, 'packages/xlsx/public/corpus');
-    mkdirSync(corpus, { recursive: true });
-    writeFileSync(join(corpus, 'xlsx-999-new.xlsx'), 'specimen');
-    withEnv({ VRT_ALLOW_NEW_CORPUS_INPUTS: undefined, VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
-      assert.throws(
-        () => verifyBaselineCheckout({ checkout: root, revision: first }),
-        /clean renderer checkout; changed paths at .*: packages\/xlsx\/public\/corpus\/xlsx-999-new\.xlsx/,
-      );
+    // The baseline revision already tracks one specimen.
+    place(root, 'xlsx-001-old.xlsx', 'v1');
+    git(root, 'add', '-f', `${rel}/xlsx-001-old.xlsx`);
+    git(root, 'commit', '-q', '-m', 'track specimen');
+    const tracked = git(root, 'rev-parse', 'HEAD');
+    // The candidate rewrites it and adds another; both are copied over.
+    place(candidate, 'xlsx-001-old.xlsx', 'v2');
+    place(candidate, 'xlsx-999-new.xlsx', 'new');
+    place(root, 'xlsx-001-old.xlsx', 'v2');
+    place(root, 'xlsx-999-new.xlsx', 'new');
+    withEnv({ VRT_ALLOW_CORPUS_INPUT_CHANGES: undefined, VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
+      assert.throws(() => verify(tracked), /clean renderer checkout; changed paths at .*xlsx-001-old\.xlsx/);
     });
-    withEnv({ VRT_ALLOW_NEW_CORPUS_INPUTS: '1', VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
-      verifyBaselineCheckout({ checkout: root, revision: first });
-      // The allowance covers only specimen files directly in a corpus folder.
-      writeFileSync(join(corpus, 'patch.js'), 'export {};\n');
-      assert.throws(
-        () => verifyBaselineCheckout({ checkout: root, revision: first }),
-        /changed paths at .*: packages\/xlsx\/public\/corpus\/patch\.js/,
-      );
-      rmSync(join(corpus, 'patch.js'));
+    withEnv({ VRT_ALLOW_CORPUS_INPUT_CHANGES: '1', VRT_ALLOW_HARNESS_CHANGES: undefined }, () => {
+      verify(tracked);
+      // A copy that differs from the candidate's file is rejected, also after the snapshot.
+      place(root, 'xlsx-999-new.xlsx', 'changed');
+      assert.throws(() => verify(tracked), /corpus input .*xlsx-999-new\.xlsx differs from the candidate/);
+      place(root, 'xlsx-999-new.xlsx', 'new');
+      // So is a symlink, even to identical bytes.
+      writeFileSync(join(outside, 'x.xlsx'), 'new');
+      rmSync(join(root, rel, 'xlsx-999-new.xlsx'));
+      symlinkSync(join(outside, 'x.xlsx'), join(root, rel, 'xlsx-999-new.xlsx'));
+      assert.throws(() => verify(tracked), /must be a regular file without symlinks/);
+      rmSync(join(root, rel, 'xlsx-999-new.xlsx'));
+      place(root, 'xlsx-999-new.xlsx', 'new');
+      // A deleted tracked input is not a candidate copy.
+      rmSync(join(root, rel, 'xlsx-001-old.xlsx'));
+      assert.throws(() => verify(tracked), /corpus input .*xlsx-001-old\.xlsx is missing/);
+      place(root, 'xlsx-001-old.xlsx', 'v2');
+      // Only a specimen of the folder's own format qualifies.
+      writeFileSync(join(root, rel, 'patch.js'), 'export {};\n');
+      writeFileSync(join(root, rel, 'other.docx'), 'x');
+      assert.throws(() => verify(tracked), /changed paths at .*: .*other\.docx/);
+      rmSync(join(root, rel, 'patch.js'));
+      rmSync(join(root, rel, 'other.docx'));
+      verify(tracked);
       // It never excuses a renderer change.
       writeFileSync(join(root, 'renderer.js'), 'export const version = 3;\n');
-      assert.throws(
-        () => verifyBaselineCheckout({ checkout: root, revision: first }),
-        /changed paths at .*: renderer\.js/,
-      );
-      git(root, 'checkout', '-q', '--', 'renderer.js');
-      // Nor a change to an input the baseline revision already tracks.
-      git(root, 'add', '-f', 'packages/xlsx/public/corpus/xlsx-999-new.xlsx');
-      git(root, 'commit', '-q', '-m', 'track specimen');
-      const tracked = git(root, 'rev-parse', 'HEAD');
-      writeFileSync(join(corpus, 'xlsx-999-new.xlsx'), 'edited');
-      assert.throws(
-        () => verifyBaselineCheckout({ checkout: root, revision: tracked }),
-        /changed paths at .*: packages\/xlsx\/public\/corpus\/xlsx-999-new\.xlsx/,
-      );
+      assert.throws(() => verify(tracked), /changed paths at .*: renderer\.js/);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(candidate, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

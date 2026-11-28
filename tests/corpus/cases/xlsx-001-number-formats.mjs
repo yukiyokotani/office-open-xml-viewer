@@ -5,13 +5,14 @@ const { MARGIN_COL, MODULE, FIRST_ROW } = XLSX;
 
 // ECMA-376 §18.8.30 defines `.` and `,` in a format code as the decimal point
 // and thousands separator tokens; [MS-OI29500] §2.1.712 states the grammar for
-// en-US and has Office adjust it for international settings. The viewer paints
-// those tokens, and General, with the host locale's separators (#2346), so
-// under the en-US VRT host this sheet pins the en-US output. The General,
-// grouped-decimal and quoted-dot rows are the cases that a comma-decimal host
-// tells apart: the dot inside " l." is literal text and stays a dot. The
-// comma-decimal output of those rows is checked by the de-DE unit test in
-// packages/xlsx/src/number-format.test.ts.
+// en-US and has Office adjust it for international settings. The expected
+// behavior, tracked by #2346, is that the viewer paints those tokens, and
+// General, with the host locale's separators. This sheet is en-US coverage
+// only: the VRT host is en-US, where the separators are the invariant ones
+// whether or not the viewer localizes. The General, grouped-decimal and
+// quoted-dot rows are the cases that a comma-decimal host tells apart (the
+// dot inside " l." is literal text and stays a dot); a check under such a
+// host belongs with the #2346 fix, not with this specimen.
 // [quantity, value, number format: built-in id, format code, or null for General]
 const ROWS = [
   ['Inches per metre', 39.37007874, null],

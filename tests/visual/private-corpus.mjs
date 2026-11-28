@@ -159,25 +159,52 @@ function checkoutState(root) {
   };
 }
 
+// A public specimen that the PR under test adds or rewrites has no image from
+// the previous renderer. With VRT_ALLOW_CORPUS_INPUT_CHANGES=1 the
+// candidate's specimen files may be copied into the baseline checkout (added
+// or replacing a tracked one), so both renderers draw identical bytes. Only a
+// `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
+// qualifies; it must be a regular file reached without a symlink, and when the
+// baseline is read from another checkout each copy must still equal the
+// candidate's file at that moment. The snapshot manifest binds the inputs by
+// SHA-256 as well.
+const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/[^/]+\.\1$/;
+
+function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
+  for (const path of paths) {
+    const file = join(root, path);
+    let stat;
+    try {
+      stat = lstatSync(file);
+    } catch {
+      throw new Error(`${label} corpus input ${path} is missing at ${root}`);
+    }
+    if (!stat.isFile() || realpathSync(file) !== file) {
+      throw new Error(`${label} corpus input ${path} must be a regular file without symlinks at ${root}`);
+    }
+    if (candidate === root) continue;
+    const own = join(candidate, path);
+    if (!existsSync(own) || sha256(readFileSync(own)) !== sha256(readFileSync(file))) {
+      throw new Error(`${label} corpus input ${path} differs from the candidate's ${own}`);
+    }
+  }
+}
+
 /** Fail unless `root` is a checkout at exactly `revision` whose renderer is
  * unmodified: no tracked change and no untracked file outside dependencies and
  * the local private corpus. With VRT_ALLOW_HARNESS_CHANGES=1, only the
  * allowlisted VRT harness files may differ (the one-time bootstrap), and a Vite
  * config only by test-renderer alias lines. */
-function assertRendererCheckout({ root, revision, label }) {
+function assertRendererCheckout({ root, revision, label, candidate = root }) {
   const { head, tracked, untracked } = checkoutState(root);
   if (head !== revision) {
     throw new Error(`${label} checkout mismatch: expected ${revision}, found ${head} at ${root}`);
   }
-  // A new public specimen does not exist at the baseline revision. With
-  // VRT_ALLOW_NEW_CORPUS_INPUTS=1 its input may be copied into the baseline
-  // checkout as an untracked file, so the previous renderer draws it; a
-  // tracked input still may not change. The corpus manifest binds every
-  // input by SHA-256, so the candidate run accepts the baseline only when the
-  // copied file is byte-identical to its own.
-  const newCorpusInput = (path) => process.env.VRT_ALLOW_NEW_CORPUS_INPUTS === '1'
-    && /^packages\/(docx|xlsx|pptx)\/public\/corpus\/[^/]+\.(docx|xlsx|pptx)$/.test(path);
-  const changed = [...new Set([...tracked, ...untracked.filter((path) => !newCorpusInput(path))])];
+  const corpusInputs = process.env.VRT_ALLOW_CORPUS_INPUT_CHANGES === '1'
+    ? [...new Set([...tracked, ...untracked])].filter((path) => CORPUS_INPUT_PATH.test(path))
+    : [];
+  assertCandidateCorpusInputs({ root, candidate, paths: corpusInputs, label });
+  const changed = [...new Set([...tracked, ...untracked])].filter((path) => !corpusInputs.includes(path));
   if (changed.length === 0) return;
   const harnessBootstrap = process.env.VRT_ALLOW_HARNESS_CHANGES === '1'
     && changed.every((path) => VRT_HARNESS_PATHS.has(path));
@@ -219,7 +246,7 @@ function checkoutRoot(path) {
  * `revision` with an unmodified renderer, so its images were produced by that
  * revision's renderer and not copied into an arbitrary directory. Returns the
  * checkout's real path. */
-export function verifyBaselineCheckout({ checkout, revision }) {
+export function verifyBaselineCheckout({ checkout, revision, candidate = ownCheckout() }) {
   if (!/^[0-9a-f]{40}$/.test(revision)) {
     throw new Error(`baseline revision must be a full commit SHA, got ${revision}`);
   }
@@ -239,7 +266,7 @@ export function verifyBaselineCheckout({ checkout, revision }) {
       `VRT_BASELINE_CHECKOUT must be the root of a Git checkout: ${directory} is inside ${root}`,
     );
   }
-  assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline' });
+  assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline', candidate });
   return real;
 }
 
