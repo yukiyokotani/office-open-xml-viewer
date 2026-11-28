@@ -126,18 +126,25 @@ exactly with a baseline captured from the previous renderer. It needs no
 private data, so anyone can run it:
 
 ```bash
-base=$(git merge-base HEAD origin/main)
+target=main    # the branch the PR targets; it must already have `pnpm vrt:corpus`
+base=$(git merge-base HEAD "origin/$target")
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"            # previous renderer
+# Specimens this branch adds or rewrites, so both renderers draw the same bytes.
+git diff --name-only --diff-filter=AM "$base" -- 'packages/*/public/corpus/*.docx' \
+  'packages/*/public/corpus/*.xlsx' 'packages/*/public/corpus/*.pptx' \
+  | while read -r f; do cp "$f" "/tmp/ooxml-vrt-baseline/$f"; done
 (cd /tmp/ooxml-vrt-baseline && pnpm install --frozen-lockfile && pnpm build:wasm \
-  && VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
+  && VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:corpus:snapshot)
 pnpm build:wasm                                                      # changed renderer
-VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:corpus
+VRT_ALLOW_CORPUS_INPUT_CHANGES=1 VRT_BASELINE_REVISION=$base \
+  VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:corpus
 ```
 
-When the branch adds or rewrites specimens, copy those input files into the
-baseline worktree before the snapshot and set
-`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` for both runs (`tests/visual/README.md`,
-"Added or changed public specimens").
+`VRT_ALLOW_CORPUS_INPUT_CHANGES=1` admits only the copied specimens
+(`tests/visual/README.md`, "Added or changed public specimens"). When `$base`
+predates that allowance, bootstrap the harness first: copy
+`tests/visual/private-corpus.mjs` and `packages/*/tests/visual/visual.spec.ts`
+into the baseline worktree and add `VRT_ALLOW_HARNESS_CHANGES=1` to both runs.
 
 The comparison reads the baseline images from the baseline worktree itself,
 which must be a clean checkout at that revision (see `AGENTS.md`, "Visual

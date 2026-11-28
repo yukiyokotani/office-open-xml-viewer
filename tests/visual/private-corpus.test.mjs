@@ -24,6 +24,7 @@ import {
   lockfileBootstrapDiffViolations,
   pngPixelsEqual,
   selfVrtBaselineRoot,
+  selfVrtInputBody,
   selfVrtInputPath,
   verifyBaselineCheckout,
   verifySelfVrtItemManifest,
@@ -387,6 +388,28 @@ function compare({ candidate, base, revision }, value = 7) {
     return difference;
   });
 }
+
+test('the renderer is served only the input bytes its manifest records', () => {
+  const fixture = selfVrtFixture();
+  try {
+    inPackage(fixture.base, { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision }, () => {
+      assert.throws(() => selfVrtInputBody({ corpus: 'demo', file: 'demo/unprepared.pptx' }), /was not prepared/);
+      prepareSelfVrtCorpus({ ...DEMO, files: ['demo/deck.pptx'], snapshot: true });
+      assert.equal(selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }).toString(), 'deck');
+      // A specimen replaced during capture is refused, so its image cannot be
+      // recorded for the input the manifest names.
+      writeFileSync('public/demo/deck.pptx', 'other');
+      assert.throws(
+        () => selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }),
+        /changed after its manifest recorded it/,
+      );
+      writeFileSync('public/demo/deck.pptx', 'deck');
+      assert.equal(selfVrtInputBody({ corpus: 'demo', file: 'demo/deck.pptx' }).toString(), 'deck');
+    });
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
 
 test('a verified baseline checkout detects a changed slide and accepts an unchanged one', () => {
   const fixture = selfVrtFixture();

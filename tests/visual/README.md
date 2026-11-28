@@ -33,9 +33,12 @@ Only a `.docx`/`.xlsx`/`.pptx` directly in its own package's corpus folder
 qualifies. It must be a regular file reached without a symlink, and during the
 comparison each copy must still equal the candidate's file; the manifest's
 SHA-256 binding checks the inputs as well. Any other file, a deleted input and
-any renderer change still fail. When the baseline revision predates this
-allowance, also copy `tests/visual/private-corpus.mjs` and set
-`VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
+any renderer change still fail. The specs serve the fixture the input bytes
+the corpus manifest recorded (`selfVrtInputBody`), so a specimen replaced
+during capture fails instead of lending its image to another input. When the
+baseline revision predates this allowance, also copy
+`tests/visual/private-corpus.mjs` and `packages/*/tests/visual/visual.spec.ts`
+and set `VRT_ALLOW_HARNESS_CHANGES=1` for both runs (harness bootstrap above).
 
 ## Fast private tier (PPTX/XLSX)
 

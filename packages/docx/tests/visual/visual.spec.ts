@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
@@ -7,6 +7,7 @@ import {
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
   selfVrtCorpusFiles,
+  selfVrtInputBody,
   selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
@@ -218,6 +219,16 @@ test.describe('docx visual fidelity', () => {
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
 type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 
+// Serve the renderer the exact bytes whose SHA-256 the corpus manifest records
+// (selfVrtInputBody), not whatever the dev server finds on disk later.
+async function serveSelfVrtInput(page: Page, corpus: SelfVrtCorpus, file: string): Promise<void> {
+  const inputPath = `/${selfVrtInputPath({ corpus, file })}`;
+  await page.route(
+    (url) => decodeURIComponent(url.pathname) === inputPath,
+    (route) => route.fulfill({ status: 200, body: selfVrtInputBody({ corpus, file }) }),
+  );
+}
+
 // `query` holds the fixture parameters after the page index: the demo and
 // private corpora render at 612 px; the public specimens are A4 (595 pt) and
 // load their Roboto / Noto Sans JP faces offline (?fonts=corpus).
@@ -238,6 +249,7 @@ function describeSelfRegression(
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.docx'.length);
         if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'page' });
+        await serveSelfVrtInput(page, corpus, file);
         const openPage = async (pageIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`

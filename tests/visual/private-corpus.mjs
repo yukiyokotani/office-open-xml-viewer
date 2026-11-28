@@ -5,6 +5,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -170,6 +171,22 @@ function checkoutState(root) {
 // SHA-256 as well.
 const CORPUS_INPUT_PATH = /^packages\/(docx|xlsx|pptx)\/public\/corpus\/[^/]+\.\1$/;
 
+// The baseline is re-verified before every item it reads. A copy is hashed
+// again only when its identity, size or modification time changed, so the
+// check costs a stat per input and item rather than a read of every copied
+// specimen.
+const copyDigests = new Map();
+
+function copyDigest(path) {
+  const { dev, ino, size, mtimeMs, ctimeMs } = statSync(path);
+  const key = `${dev}:${ino}:${size}:${mtimeMs}:${ctimeMs}`;
+  const cached = copyDigests.get(path);
+  if (cached?.key === key) return cached.digest;
+  const digest = sha256(readFileSync(path));
+  copyDigests.set(path, { key, digest });
+  return digest;
+}
+
 function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
   for (const path of paths) {
     const file = join(root, path);
@@ -184,7 +201,7 @@ function assertCandidateCorpusInputs({ root, candidate, paths, label }) {
     }
     if (candidate === root) continue;
     const own = join(candidate, path);
-    if (!existsSync(own) || sha256(readFileSync(own)) !== sha256(readFileSync(file))) {
+    if (!existsSync(own) || copyDigest(own) !== copyDigest(file)) {
       throw new Error(`${label} corpus input ${path} differs from the candidate's ${own}`);
     }
   }
@@ -442,13 +459,33 @@ function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+// SHA-256 of each input as prepareSelfVrtCorpus recorded it in this process.
+// selfVrtInputBody serves the renderer only bytes with that digest, so the
+// images captured or compared in this process belong to the manifest's input
+// even when the file on disk is replaced during the run.
+const preparedInputs = new Map();
+
 function corpusFiles(corpus, files) {
-  return files.map((name) => ({
-    name,
-    sha256: createHash('sha256')
-      .update(readFileSync(`public/${selfVrtInputPath({ corpus, file: name })}`))
-      .digest('hex'),
-  }));
+  return files.map((name) => {
+    const digest = sha256(readFileSync(`public/${selfVrtInputPath({ corpus, file: name })}`));
+    preparedInputs.set(`${corpus}\0${name}`, digest);
+    return { name, sha256: digest };
+  });
+}
+
+/** The bytes of a prepared self-VRT input, for the spec to serve to the
+ * fixture (page.route) instead of letting the dev server read the file again.
+ * Throws when the file no longer has the digest its manifest recorded.
+ * @param {{ corpus: string, file: string }} options */
+export function selfVrtInputBody({ corpus, file }) {
+  const expected = preparedInputs.get(`${corpus}\0${file}`);
+  if (!expected) throw new Error(`self-VRT input ${file} was not prepared for the ${corpus} corpus`);
+  const path = `public/${selfVrtInputPath({ corpus, file })}`;
+  const body = readFileSync(path);
+  if (sha256(body) !== expected) {
+    throw new Error(`self-VRT input ${path} changed after its manifest recorded it`);
+  }
+  return body;
 }
 
 function readBaselineJson(location, path) {
